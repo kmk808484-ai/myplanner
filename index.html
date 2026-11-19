@@ -306,6 +306,17 @@
 
       <!-- Right Controls: Key Schedules Modal Button, Traffic Light Test, Mute -->
       <div class="flex flex-wrap items-center gap-1.5 sm:gap-2 min-w-0">
+        <!-- ☁️ Cloud Sync Status & Settings Modal Trigger -->
+        <button
+          id="syncHeaderBtn"
+          onclick="openSyncModal()"
+          class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-bold border border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 transition shrink-0"
+          title="PC·모바일 실시간 동기화 설정"
+        >
+          <span id="syncStatusDot" class="w-2 h-2 rounded-full bg-emerald-500"></span>
+          <span id="syncStatusLabel">☁️ 동기화 준비</span>
+        </button>
+
         <!-- 📅 주요 일정 Modal Trigger + Subtle Next Schedule Badge -->
         <button
           onclick="openScheduleModal()"
@@ -317,13 +328,13 @@
           </span>
         </button>
 
-        <!-- Compact Traffic Light Test Toggle -->
+        <!-- Compact Traffic Light Test Toggle (Accessible on both PC & Mobile) -->
         <div class="flex items-center gap-0.5 sm:gap-1 bg-slate-100 border border-slate-200 rounded-xl p-1 text-[11px] shrink-0">
-          <span class="px-1.5 text-slate-500 font-semibold hidden md:inline">신호등 테스트</span>
+          <span class="px-1.5 text-slate-500 font-semibold hidden md:inline">경고 미리보기</span>
           <button data-preview="green" onclick="setPreviewMode('green')" class="preview-btn px-2 py-0.5 rounded-lg font-semibold text-slate-600 hover:bg-white transition">초록</button>
           <button data-preview="yellow" onclick="setPreviewMode('yellow')" class="preview-btn px-2 py-0.5 rounded-lg font-semibold text-slate-600 hover:bg-white transition">노랑</button>
-          <button data-preview="red" onclick="setPreviewMode('red')" class="preview-btn px-2 py-0.5 rounded-lg font-semibold text-slate-600 hover:bg-white transition">빨강</button>
-          <button id="previewExitBtn" onclick="setPreviewMode('live')" class="hidden px-2 py-0.5 rounded-lg font-bold bg-slate-900 text-white hover:bg-slate-700 transition">해제</button>
+          <button data-preview="red" onclick="setPreviewMode('red')" class="preview-btn px-2 py-0.5 rounded-lg font-semibold text-slate-600 hover:bg-white transition">빨강(지각)</button>
+          <button id="previewExitBtn" onclick="setPreviewMode('live')" class="hidden px-2 py-0.5 rounded-lg font-bold bg-slate-900 text-white hover:bg-slate-700 transition">자동</button>
         </div>
 
         <!-- One-Click Mute Toggle -->
@@ -348,12 +359,14 @@
     <div class="max-w-[1560px] mx-auto px-3 sm:px-6 py-3.5">
       <div class="grid grid-cols-1 lg:grid-cols-12 gap-3.5 sm:gap-4 items-center">
 
-        <!-- Left: Large 3-Light Traffic Signal -->
-        <div class="lg:col-span-3 flex items-center gap-3">
+        <!-- Left: Large 3-Light Traffic Signal (Fixed for Mobile & PC) -->
+        <div class="lg:col-span-3 flex flex-wrap sm:flex-nowrap items-center gap-3 min-w-0">
           <div class="traffic-housing rounded-2xl px-3.5 sm:px-4 py-2.5 sm:py-3 flex items-center gap-2.5 sm:gap-3 shrink-0" role="status" aria-label="다음 일정 신호등">
-            <div id="bulbRed" class="light-bulb w-9 h-9 sm:w-10 sm:h-10 rounded-full light-red-off"></div>
+            <div id="bulbGreen" class="light-bulb w-9 h-9 sm:w-10 sm:h-10 rounded-full light-green-off" title="여유"></div>
+            <div id="bulbYellow" class="light-bulb w-9 h-9 sm:w-10 sm:h-10 rounded-full light-yellow-off" title="전환 준비"></div>
+            <div id="bulbRed" class="light-bulb w-9 h-9 sm:w-10 sm:h-10 rounded-full light-red-off" title="지각 경고"></div>
           </div>
-          <div class="min-w-0">
+          <div class="min-w-0 flex-1">
             <div id="trafficStatusBadge" class="inline-flex items-center text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 mb-1">
               여유 있음
             </div>
@@ -761,6 +774,75 @@
   </div>
 
   <!-- =====================================================================
+       4-B. "동기화 설정" (REAL-TIME PC & MOBILE SYNC) MODAL
+       ===================================================================== -->
+  <div id="syncModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-slate-900/50 backdrop-blur-xs p-3 sm:p-4" onclick="handleSyncModalBackdropClick(event)">
+    <div class="bg-white rounded-2xl border border-slate-200 shadow-2xl w-[calc(100vw-24px)] sm:w-full max-w-md overflow-hidden" onclick="event.stopPropagation()">
+      <!-- Modal Header -->
+      <div class="px-5 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50/70">
+        <div>
+          <h2 class="text-base font-extrabold text-slate-900 flex items-center gap-2">
+            <span>☁️ 실시간 동기화 설정</span>
+          </h2>
+          <p class="text-xs text-slate-500 mt-0.5">PC와 핸드폰에서 같은 데이터를 실시간으로 공유합니다.</p>
+        </div>
+        <button onclick="closeSyncModal()" class="w-8 h-8 rounded-lg text-slate-400 hover:text-slate-900 hover:bg-slate-200/70 flex items-center justify-center text-lg font-bold transition" title="닫기">
+          ✕
+        </button>
+      </div>
+
+      <!-- Modal Body -->
+      <div class="p-5 space-y-4">
+        <!-- Current Connection Status Box -->
+        <div class="rounded-xl border border-slate-200 bg-slate-50 p-3.5 space-y-1.5">
+          <div class="flex items-center justify-between text-xs">
+            <span class="font-bold text-slate-600">현재 연결 상태</span>
+            <span id="syncModalStateBadge" class="font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">연결됨</span>
+          </div>
+          <div class="flex items-center justify-between text-xs">
+            <span class="font-bold text-slate-600">동기화 모드</span>
+            <span id="syncModalModeText" class="font-semibold text-slate-800">자동 개인 동기화</span>
+          </div>
+          <p id="syncModalLastUpdated" class="text-[11px] text-slate-400 pt-1">최근 동기화: 대기 중</p>
+        </div>
+
+        <!-- Sync Room ID Form -->
+        <form onsubmit="applySyncRoomCode(event)" class="space-y-2.5">
+          <label class="block text-xs font-bold text-slate-800">
+            기기 연동 코드 (PC · 핸드폰 공유용)
+          </label>
+          <p class="text-[11px] text-slate-500 leading-relaxed">
+            원하는 코드(영문·숫자·한글)를 입력하고 <strong>연동 시작</strong>을 누른 뒤, 다른 기기에도 <strong>똑같은 코드</strong>를 입력하면 즉시 실시간 동기화됩니다.
+          </p>
+          <div class="flex gap-1.5">
+            <input
+              id="syncRoomCodeInput"
+              type="text"
+              maxlength="32"
+              placeholder="예: mydesk-2026"
+              class="flex-1 text-sm px-3 py-2 rounded-xl border border-slate-300 bg-white focus:outline-none focus:border-indigo-600 font-semibold"
+            />
+            <button type="button" onclick="generateRandomSyncCode()" class="px-3 py-2 rounded-xl border border-slate-200 bg-slate-100 hover:bg-slate-200 text-xs font-bold text-slate-700 transition shrink-0" title="랜덤 코드 생성">
+              랜덤
+            </button>
+            <button type="button" onclick="copySyncRoomCode()" class="px-3 py-2 rounded-xl border border-slate-200 bg-slate-100 hover:bg-slate-200 text-xs font-bold text-slate-700 transition shrink-0" title="코드 복사">
+              복사
+            </button>
+          </div>
+          <div class="flex items-center gap-2 pt-1">
+            <button type="submit" class="flex-1 py-2.5 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs sm:text-sm font-bold transition shadow-xs">
+              ☁️ 이 코드로 연동 시작
+            </button>
+            <button type="button" onclick="resetToPersonalSync()" class="py-2.5 px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-600 transition shrink-0">
+              개인 모드
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- =====================================================================
        5. BOTTOM-RIGHT FLOATING MINI RPG BATTLE & GROWTH WIDGET ("성장 배틀")
        ===================================================================== -->
   <aside id="rpgWidgetContainer" class="fixed bottom-3 right-3 sm:bottom-4 sm:right-4 z-40 max-w-[calc(100vw-24px)]">
@@ -885,6 +967,7 @@
        1. CONSTANTS, DATE HELPERS & INITIAL STATE
        ======================================================================= */
     const STORAGE_KEY = 'daily_focus_planner_v3';
+    const SYNC_ROOM_STORAGE_KEY = 'daily_focus_planner_sync_room_v1';
     const CIRCLE_CIRCUMFERENCE = 2 * Math.PI * 94; // ~590.619
     const EXP_PER_LEVEL = 100;
 
@@ -899,31 +982,31 @@
       {
         level: 2,
         warriorTitle: '견습 검사',
-        gearDesc: '가죽 갑옷 · 철 단검',
-        monsterName: '고블린 정찰병'
+        gearDesc: '가죽 갑옷 · 철검',
+        monsterName: '고블린'
       },
       {
         level: 3,
         warriorTitle: '왕국 기사',
-        gearDesc: '강철 판금 · 기사 장검 & 방패',
+        gearDesc: '강철 갑옷 · 기사 장검',
         monsterName: '오크 전사'
       },
       {
         level: 4,
-        warriorTitle: '룬 나이트',
-        gearDesc: '미스릴 갑옷 · 푸른 룬 대검',
-        monsterName: '스켈레톤 로드'
+        warriorTitle: '성전 기사',
+        gearDesc: '미스릴 갑옷 · 기사검',
+        monsterName: '다크 나이트'
       },
       {
         level: 5,
-        warriorTitle: '황금 성기사',
-        gearDesc: '황금 갑옷 · 빛나는 성검',
-        monsterName: '다크 나이트'
+        warriorTitle: '마검사',
+        gearDesc: '황금 갑옷 · 마법 대검',
+        monsterName: '와이번'
       },
       {
         level: 6,
         warriorTitle: '드래곤 슬레이어',
-        gearDesc: '흑요석 드래곤 아머 · 전설의 검',
+        gearDesc: '드래곤 아머 · 전설의 검',
         monsterName: '고대 드래곤'
       }
     ];
@@ -1155,6 +1238,28 @@
       } catch (err) {
         console.error('State save error:', err);
       }
+      if (!isApplyingRemoteState && window.CloudSync && typeof window.CloudSync.pushState === 'function') {
+        window.CloudSync.pushState(state);
+      }
+    }
+
+    let state = loadState();
+    let isApplyingRemoteState = false;
+    let previewMode = 'live'; // 'live' | 'green' | 'yellow' | 'red'
+    let isTimerRunning = false;
+    let timerInterval = null;
+    let urgentAlarmInterval = null;
+    let lastTrafficPhase = null;
+    let currentMinutesToDeparture = null;
+    let editingArchiveThoughtId = null;
+
+    /* =======================================================================
+       2. WEB AUDIO API SOUND ENGINE (1-CLICK MUTE FOR OFFICE USE)
+       ======================================================================= */
+    let audioCtx = null;
+
+    function unlockAudioOnGesture() {
+      getAudioContext();
     }
 
     let state = loadState();
@@ -1289,9 +1394,27 @@
        3. "주요 일정" (KEY SCHEDULES) MODAL & TRAFFIC LIGHT ENGINE
        ======================================================================= */
     function getScheduleDateObj(ev) {
-      const [y, m, d] = ev.date.split('-').map(Number);
-      const [hh, mm] = ev.time.split(':').map(Number);
+      if (!ev || typeof ev.date !== 'string' || typeof ev.time !== 'string') {
+        return new Date(NaN);
+      }
+      const dateParts = ev.date.split('-').map((n) => parseInt(n, 10));
+      const timeParts = ev.time.split(':').map((n) => parseInt(n, 10));
+      if (dateParts.length !== 3 || timeParts.length < 2) {
+        return new Date(NaN);
+      }
+      const [y, m, d] = dateParts;
+      const [hh, mm] = timeParts;
+      if ([y, m, d, hh, mm].some((v) => Number.isNaN(v))) {
+        return new Date(NaN);
+      }
+      // Strictly numeric Date constructor to prevent iOS Safari / mobile Invalid Date & UTC offset bugs
       return new Date(y, m - 1, d, hh, mm, 0, 0);
+    }
+
+    function getSortedSchedules() {
+      return [...state.schedules]
+        .filter((ev) => !Number.isNaN(getScheduleDateObj(ev).getTime()))
+        .sort((a, b) => getScheduleDateObj(a).getTime() - getScheduleDateObj(b).getTime());
     }
 
     function getSortedSchedules() {
@@ -1567,6 +1690,9 @@
       document.getElementById('liveClockDisplay').textContent =
         `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
 
+      const trafficBar = document.getElementById('trafficLightBar');
+      const vignette = document.getElementById('lateVignette');
+      const previewTag = document.getElementById('previewModeTag');
       const nextEv = getNextActiveSchedule();
       const headerBadge = document.getElementById('nextScheduleHeaderBadge');
 
@@ -1725,6 +1851,12 @@
 
         if (lastTrafficPhase !== 'red') {
           startUrgentAlarmLoop();
+          // Trigger mobile vibration alert on Android browsers
+          try {
+            if (navigator && typeof navigator.vibrate === 'function') {
+              navigator.vibrate([200, 100, 200]);
+            }
+          } catch (e) {}
         }
       }
 
@@ -2996,6 +3128,7 @@
       const pill = document.getElementById('rpgCollapsedPill');
       const card = document.getElementById('rpgCard');
       const expPct = Math.max(0, Math.min(100, (rpg.exp / EXP_PER_LEVEL) * 100));
+      const monsterHp = Math.max(0, EXP_PER_LEVEL - rpg.exp);
 
       document.getElementById('rpgPillLevel').textContent = `LV. ${rpg.level}`;
       document.getElementById('rpgPillExp').textContent = `${rpg.exp}/${EXP_PER_LEVEL}`;
@@ -3269,9 +3402,174 @@
     }
 
     /* =======================================================================
-       11. INITIALIZATION
+       10-B. CLOUD SYNC MODAL UI & REMOTE STATE MERGE HANDLERS
+       ======================================================================= */
+    function openSyncModal() {
+      const modal = document.getElementById('syncModal');
+      const input = document.getElementById('syncRoomCodeInput');
+      if (window.CloudSync) {
+        input.value = window.CloudSync.getRoomCode() || '';
+      }
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+    }
+
+    function closeSyncModal() {
+      const modal = document.getElementById('syncModal');
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+    }
+
+    function handleSyncModalBackdropClick(e) {
+      if (e.target.id === 'syncModal') {
+        closeSyncModal();
+      }
+    }
+
+    function generateRandomSyncCode() {
+      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      let code = 'PLAN-';
+      for (let i = 0; i < 6; i++) {
+        code += chars.charAt(Math.floor(Math.random() * chars.length));
+      }
+      document.getElementById('syncRoomCodeInput').value = code;
+    }
+
+    function copySyncRoomCode() {
+      const input = document.getElementById('syncRoomCodeInput');
+      const val = input.value.trim();
+      if (!val) {
+        showToast('먼저 연동 코드를 입력하거나 [랜덤] 버튼을 눌러 생성해 주세요.');
+        return;
+      }
+      try {
+        input.select();
+        input.setSelectionRange(0, 99999);
+        document.execCommand('copy');
+        showToast(`📋 연동 코드 "${val}"가 복사되었습니다!`);
+      } catch (err) {
+        showToast('코드를 직접 선택해 복사해 주세요.');
+      }
+    }
+
+    function applySyncRoomCode(e) {
+      e.preventDefault();
+      const raw = document.getElementById('syncRoomCodeInput').value.trim();
+      if (!raw) {
+        showToast('연동 코드를 입력해 주세요.');
+        return;
+      }
+      if (window.CloudSync && typeof window.CloudSync.setRoomCode === 'function') {
+        window.CloudSync.setRoomCode(raw);
+        closeSyncModal();
+        showToast(`☁️ 연동 코드 "${raw}"로 실시간 동기화를 시작합니다.`);
+      }
+    }
+
+    function resetToPersonalSync() {
+      document.getElementById('syncRoomCodeInput').value = '';
+      if (window.CloudSync && typeof window.CloudSync.setRoomCode === 'function') {
+        window.CloudSync.setRoomCode('');
+        closeSyncModal();
+        showToast('개인 자동 동기화 모드로 전환했습니다.');
+      }
+    }
+
+    function updateSyncStatusUI(status, roomCode, lastSyncTimeStr) {
+      const btn = document.getElementById('syncHeaderBtn');
+      const dot = document.getElementById('syncStatusDot');
+      const label = document.getElementById('syncStatusLabel');
+      const modalBadge = document.getElementById('syncModalStateBadge');
+      const modalMode = document.getElementById('syncModalModeText');
+      const modalTime = document.getElementById('syncModalLastUpdated');
+
+      if (!btn || !dot || !label) return;
+
+      if (status === 'synced') {
+        btn.className = 'flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-bold border border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 transition shrink-0';
+        dot.className = 'w-2 h-2 rounded-full bg-emerald-500';
+        label.textContent = roomCode ? `☁️ 동기화됨 (${roomCode})` : '☁️ 동기화됨';
+        if (modalBadge) {
+          modalBadge.className = 'font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800';
+          modalBadge.textContent = '실시간 연결됨';
+        }
+      } else if (status === 'syncing') {
+        btn.className = 'flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-bold border border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100 transition shrink-0';
+        dot.className = 'w-2 h-2 rounded-full bg-amber-500 animate-pulse';
+        label.textContent = '☁️ 동기화 중...';
+        if (modalBadge) {
+          modalBadge.className = 'font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800';
+          modalBadge.textContent = '동기화 중...';
+        }
+      } else {
+        btn.className = 'flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-bold border border-slate-200 bg-slate-100 text-slate-600 hover:bg-slate-200 transition shrink-0';
+        dot.className = 'w-2 h-2 rounded-full bg-slate-400';
+        label.textContent = '☁️ 오프라인 저장';
+        if (modalBadge) {
+          modalBadge.className = 'font-bold px-2 py-0.5 rounded-full bg-slate-200 text-slate-700';
+          modalBadge.textContent = '로컬 모드';
+        }
+      }
+
+      if (modalMode) {
+        modalMode.textContent = roomCode ? `기기 연동 코드: ${roomCode}` : '자동 개인 동기화';
+      }
+      if (modalTime && lastSyncTimeStr) {
+        modalTime.textContent = `최근 동기화: ${lastSyncTimeStr}`;
+      }
+    }
+
+    function applyRemoteState(remoteData) {
+      if (!remoteData || typeof remoteData !== 'object') return;
+      isApplyingRemoteState = true;
+      try {
+        const defaults = createInitialState();
+        // Preserve local device-only preferences (mute & RPG collapse on mobile)
+        const localCollapsed = state.rpg ? state.rpg.collapsed : false;
+        const localMuted = state.isMuted;
+
+        state = {
+          ...defaults,
+          ...remoteData,
+          focus: { ...defaults.focus, ...(remoteData.focus || {}) },
+          rpg: { ...defaults.rpg, ...(remoteData.rpg || {}), collapsed: localCollapsed },
+          ui: { ...defaults.ui, ...(remoteData.ui || {}) },
+          isMuted: localMuted
+        };
+
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        } catch (e) {}
+
+        renderChecklist();
+        renderTasks();
+        renderFocusPanel();
+        renderThoughts();
+        renderRpgWidget();
+        renderScheduleModalList();
+        updateClockAndTrafficLight();
+      } finally {
+        isApplyingRemoteState = false;
+      }
+    }
+
+    /* =======================================================================
+       11. INITIALIZATION & MOBILE LIFECYCLE RESILIENCE
        ======================================================================= */
     window.addEventListener('resize', resizeConfettiCanvas);
+
+    // Immediately recalculate traffic light & clock when waking mobile screen or returning to tab
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        updateClockAndTrafficLight();
+      }
+    });
+    window.addEventListener('focus', () => updateClockAndTrafficLight());
+    window.addEventListener('pageshow', () => updateClockAndTrafficLight());
+
+    // Unlock Web Audio API on first mobile touch or click
+    document.addEventListener('touchstart', unlockAudioOnGesture, { passive: true, once: true });
+    document.addEventListener('click', unlockAudioOnGesture, { passive: true, once: true });
 
     window.onload = function () {
       resizeConfettiCanvas();
@@ -3288,10 +3586,195 @@
       renderRpgWidget();
       updateClockAndTrafficLight();
 
+      if (window.CloudSync && typeof window.CloudSync.init === 'function') {
+        window.CloudSync.init();
+      }
+
       // Update live clock & traffic light every second
       setInterval(() => {
         updateClockAndTrafficLight();
       }, 1000);
+    };
+  </script>
+
+  <!-- =====================================================================
+       REAL-TIME CLOUD SYNCHRONIZATION MODULE (FIREBASE AUTH + FIRESTORE)
+       ===================================================================== -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+    const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+    const CLIENT_ID = `cli_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+    let db = null;
+    let auth = null;
+    let currentUser = null;
+    let unsubscribeSnapshot = null;
+    let pushDebounceTimer = null;
+    let lastKnownUpdatedAt = 0;
+    let currentRoomCode = '';
+
+    try {
+      currentRoomCode = localStorage.getItem('daily_focus_planner_sync_room_v1') || '';
+    } catch (e) {
+      currentRoomCode = '';
+    }
+
+    function sanitizeRoomId(code) {
+      const trimmed = String(code || '').trim();
+      if (!trimmed) return '';
+      // Encode safely into a valid Firestore document ID
+      return 'room_' + encodeURIComponent(trimmed).replace(/\./g, '%2E').slice(0, 80);
+    }
+
+    function getTargetDocRef() {
+      if (!db || !currentUser) return null;
+      const safeRoom = sanitizeRoomId(currentRoomCode);
+      if (safeRoom) {
+        // RULE 1: Public shared sync room path for PC <-> Mobile sharing
+        return doc(db, 'artifacts', appId, 'public', 'data', 'sync_rooms', safeRoom);
+      }
+      // RULE 1: Private user-specific path
+      return doc(db, 'artifacts', appId, 'users', currentUser.uid, 'planner', 'state');
+    }
+
+    function getTimeStr() {
+      const d = new Date();
+      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+    }
+
+    function attachSnapshotListener() {
+      if (unsubscribeSnapshot) {
+        unsubscribeSnapshot();
+        unsubscribeSnapshot = null;
+      }
+      if (!currentUser || !db) return;
+
+      const docRef = getTargetDocRef();
+      if (!docRef) return;
+
+      window.updateSyncStatusUI('syncing', currentRoomCode, null);
+
+      unsubscribeSnapshot = onSnapshot(
+        docRef,
+        (snapshot) => {
+          if (snapshot.exists()) {
+            const payload = snapshot.data();
+            // Prevent overwrite loops from our own writes
+            if (payload && payload.clientId !== CLIENT_ID && payload.stateJson) {
+              const remoteTs = Number(payload.updatedAt || 0);
+              if (remoteTs >= lastKnownUpdatedAt) {
+                lastKnownUpdatedAt = remoteTs;
+                try {
+                  const parsedState = JSON.parse(payload.stateJson);
+                  window.applyRemoteState(parsedState);
+                } catch (parseErr) {
+                  console.error('Failed to parse remote state:', parseErr);
+                }
+              }
+            }
+            window.updateSyncStatusUI('synced', currentRoomCode, getTimeStr());
+          } else {
+            // Document does not exist yet: seed cloud with current local state
+            pushStateNow(window.state || loadState());
+          }
+        },
+        (error) => {
+          console.error('Firestore onSnapshot error:', error);
+          window.updateSyncStatusUI('offline', currentRoomCode, null);
+        }
+      );
+    }
+
+    async function pushStateNow(stateObj) {
+      if (!currentUser || !db) return;
+      const docRef = getTargetDocRef();
+      if (!docRef) return;
+
+      window.updateSyncStatusUI('syncing', currentRoomCode, null);
+      const nowTs = Date.now();
+      lastKnownUpdatedAt = nowTs;
+
+      try {
+        await setDoc(docRef, {
+          stateJson: JSON.stringify(stateObj),
+          updatedAt: nowTs,
+          clientId: CLIENT_ID,
+          roomLabel: currentRoomCode || 'personal'
+        });
+        window.updateSyncStatusUI('synced', currentRoomCode, getTimeStr());
+      } catch (err) {
+        console.error('Firestore save error:', err);
+        window.updateSyncStatusUI('offline', currentRoomCode, null);
+      }
+    }
+
+    window.CloudSync = {
+      async init() {
+        if (!firebaseConfig) {
+          window.updateSyncStatusUI('offline', currentRoomCode, null);
+          return;
+        }
+        window.updateSyncStatusUI('syncing', currentRoomCode, null);
+        try {
+          const app = initializeApp(firebaseConfig);
+          auth = getAuth(app);
+          db = getFirestore(app);
+
+          // RULE 3: Authenticate FIRST and await before any Firestore operation
+          if (initialAuthToken) {
+            const cred = await signInWithCustomToken(auth, initialAuthToken);
+            currentUser = cred.user;
+          } else {
+            const cred = await signInAnonymously(auth);
+            currentUser = cred.user;
+          }
+
+          if (!currentUser) {
+            window.updateSyncStatusUI('offline', currentRoomCode, null);
+            return;
+          }
+
+          attachSnapshotListener();
+        } catch (err) {
+          console.error('CloudSync initialization failed:', err);
+          window.updateSyncStatusUI('offline', currentRoomCode, null);
+        }
+      },
+
+      pushState(stateObj) {
+        if (!currentUser || !db) return;
+        clearTimeout(pushDebounceTimer);
+        pushDebounceTimer = setTimeout(() => {
+          pushStateNow(stateObj);
+        }, 250);
+      },
+
+      setRoomCode(newCode) {
+        currentRoomCode = String(newCode || '').trim();
+        try {
+          if (currentRoomCode) {
+            localStorage.setItem('daily_focus_planner_sync_room_v1', currentRoomCode);
+          } else {
+            localStorage.removeItem('daily_focus_planner_sync_room_v1');
+          }
+        } catch (e) {}
+        lastKnownUpdatedAt = 0;
+        if (currentUser && db) {
+          attachSnapshotListener();
+        } else {
+          window.updateSyncStatusUI('offline', currentRoomCode, null);
+        }
+      },
+
+      getRoomCode() {
+        return currentRoomCode;
+      }
     };
   </script>
 </body>
