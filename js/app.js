@@ -9,6 +9,7 @@
 
   let isEditing = false;
   let isSendingChat = false;
+  let isBridgeConnected = false;
   let searchQuery = '';
 
   // ================= DOM References =================
@@ -274,6 +275,8 @@
           launchLocalItem(item.link, 'open');
         } else if (isHtmlContentItem(item)) {
           runHtmlContent(item);
+        } else if (isBridgeConnected && isOwnerAuthenticated() && /\.[a-z0-9]{1,6}$/i.test(String(item.name || '').trim())) {
+          openMemoInLocalApp(item);
         } else {
           selectItem(item);
           toggleEditMode(true);
@@ -521,6 +524,7 @@
       linkBadge.dataset.localPath = item.link;
       linkBadge.textContent = `🖥️ ${item.link.length > 28 ? item.link.slice(0, 28) + '…' : item.link}`;
       btnOpenLocal.textContent = '🚀 로컬에서 실행';
+      btnRevealLocal.textContent = '📂 폴더 열기';
       btnRevealLocal.style.display = '';
       localActionRow.style.display = 'flex';
     } else if (item.link) {
@@ -530,10 +534,17 @@
       delete linkBadge.dataset.localPath;
       linkBadge.textContent = `🔗 ${item.link.length > 28 ? item.link.slice(0, 28) + '…' : item.link}`;
       localActionRow.style.display = 'none';
-    } else if (isHtmlContentItem(item)) {
+    } else if (item.type === 'doc' && isHtmlContentItem(item)) {
       linkBadge.style.display = 'none';
       delete linkBadge.dataset.localPath;
-      btnOpenLocal.textContent = '🌐 HTML 바로 실행';
+      btnOpenLocal.textContent = '🌐 새 탭으로 실행';
+      btnRevealLocal.textContent = '🖥️ PC 브라우저로 열기';
+      btnRevealLocal.style.display = '';
+      localActionRow.style.display = 'flex';
+    } else if (item.type === 'doc') {
+      linkBadge.style.display = 'none';
+      delete linkBadge.dataset.localPath;
+      btnOpenLocal.textContent = getLocalAppButtonLabel(item);
       btnRevealLocal.style.display = 'none';
       localActionRow.style.display = 'flex';
     } else {
@@ -693,8 +704,10 @@
         window.open(state.selectedItem.link, '_blank', 'noopener,noreferrer');
       } else if (isHtmlContentItem(state.selectedItem)) {
         runHtmlContent(state.selectedItem);
+      } else if (state.selectedItem && state.selectedItem.type === 'doc') {
+        openMemoInLocalApp(state.selectedItem);
       } else {
-        showToast('실행할 로컬 경로가 없습니다. 메모 수정에서 경로를 입력해 주세요.');
+        showToast('실행할 메모를 먼저 선택해 주세요.');
       }
     }
     else if (action === 'attach-ai') {
@@ -1401,6 +1414,7 @@
   async function refreshBridgeStatus(showFeedback = false) {
     const health = await LocalBridge.checkHealth(getBridgeUrl());
     const ok = Boolean(health && health.ok);
+    isBridgeConnected = ok;
     const dot = $('bridge-status-dot');
     const text = $('bridge-status-text');
     if (dot) dot.classList.toggle('connected', ok);
@@ -1493,16 +1507,70 @@
     showToast(`🌐 "${item.name}" HTML 실행됨`);
   }
 
+  function resolveVirtualFileName(item) {
+    const rawName = String(item?.name || 'memo').trim() || 'memo';
+    if (/\.[a-z0-9]{1,6}$/i.test(rawName)) return rawName;
+    if (isHtmlContentItem(item)) return `${rawName}.html`;
+    return `${rawName}.txt`;
+  }
+
+  function getLocalAppButtonLabel(item) {
+    const fileName = resolveVirtualFileName(item).toLowerCase();
+    if (/\.html?$/.test(fileName)) return '🖥️ PC 브라우저로 열기';
+    if (/\.csv$/.test(fileName)) return '📊 PC 엑셀로 열기';
+    if (/\.txt$/.test(fileName)) return '📝 PC 메모장으로 열기';
+    return '🖥️ PC 연결 앱으로 열기';
+  }
+
+  async function openMemoInLocalApp(item) {
+    if (!item || item.type !== 'doc') return;
+    if (!isOwnerAuthenticated()) {
+      showToast('🔒 내 구글 계정으로 로그인해야 PC 연결 프로그램으로 열 수 있습니다.');
+      openAuthModal();
+      return;
+    }
+    const token = await BrainAuth.getToken();
+    if (!token) {
+      onAuthStateChanged();
+      showToast('🔒 로그인 세션이 만료되었습니다. 다시 로그인해 주세요.');
+      openAuthModal();
+      return;
+    }
+
+    const fileName = resolveVirtualFileName(item);
+    const content = String(item.summary || '');
+    try {
+      const res = await LocalBridge.openContentLocal(fileName, content, getBridgeUrl(), token);
+      isBridgeConnected = true;
+      const dot = $('bridge-status-dot');
+      const text = $('bridge-status-text');
+      if (dot) dot.classList.add('connected');
+      if (text) text.textContent = '로컬 연결됨';
+      showToast(`🚀 PC 앱에서 열림: ${res.fileName || fileName}`);
+    } catch (err) {
+      refreshBridgeStatus(false);
+      showToast(`⚠️ ${err.message}`);
+    }
+  }
+
   $('btn-open-local').addEventListener('click', () => {
-    if (state.selectedItem?.link && LocalBridge.isLocalPath(state.selectedItem.link)) {
+    if (!state.selectedItem) return;
+    if (state.selectedItem.link && LocalBridge.isLocalPath(state.selectedItem.link)) {
       launchLocalItem(state.selectedItem.link, 'open');
     } else if (isHtmlContentItem(state.selectedItem)) {
       runHtmlContent(state.selectedItem);
+    } else if (state.selectedItem.type === 'doc') {
+      openMemoInLocalApp(state.selectedItem);
     }
   });
 
   $('btn-reveal-local').addEventListener('click', () => {
-    if (state.selectedItem?.link) launchLocalItem(state.selectedItem.link, 'reveal');
+    if (!state.selectedItem) return;
+    if (state.selectedItem.link && LocalBridge.isLocalPath(state.selectedItem.link)) {
+      launchLocalItem(state.selectedItem.link, 'reveal');
+    } else if (isHtmlContentItem(state.selectedItem)) {
+      openMemoInLocalApp(state.selectedItem);
+    }
   });
 
   $('btn-local-bridge').addEventListener('click', () => {

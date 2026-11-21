@@ -88,6 +88,31 @@
     return data;
   }
 
+  async function openContentLocal(fileName, content, baseUrl, idToken) {
+    if (!idToken) {
+      throw new Error('내 구글 계정으로 로그인해야 PC 연결 프로그램으로 열 수 있습니다.');
+    }
+    const url = `${getCleanBaseUrl(baseUrl)}/open-content`;
+    let res;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: buildAuthHeaders(idToken),
+        body: JSON.stringify({ fileName, content })
+      });
+    } catch (_) {
+      throw new Error(
+        '로컬 연결 도우미가 실행 중이 아닙니다. local-bridge 폴더의 [로컬연결_실행.bat]을 먼저 실행해 주세요.'
+      );
+    }
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || `로컬 앱 열기 실패 (HTTP ${res.status})`);
+    }
+    return data;
+  }
+
   async function pickLocalFile(baseUrl, idToken) {
     if (!idToken) {
       throw new Error('내 구글 계정으로 로그인해야 로컬 파일을 선택할 수 있습니다.');
@@ -120,6 +145,7 @@
     guessIconForPath,
     checkHealth,
     openLocal,
+    openContentLocal,
     pickLocalFile
   };
 })(window);
