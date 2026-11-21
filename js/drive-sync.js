@@ -200,17 +200,23 @@
     if (targetId) {
       // 기존 second-brain-db.json 내용만 덮어쓰기 (중복 파일 방지)
       const url = `${UPLOAD_API}/files/${encodeURIComponent(targetId)}?uploadType=media&fields=id,name,modifiedTime`;
-      const res = await driveFetch(url, accessToken, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json; charset=utf-8' },
-        body: jsonBlob
-      });
-      const updated = await res.json();
-      return {
-        fileId: updated.id,
-        modifiedTime: updated.modifiedTime || new Date().toISOString(),
-        rootFolderId: folders.rootFolderId
-      };
+      try {
+        const res = await driveFetch(url, accessToken, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          body: jsonBlob
+        });
+        const updated = await res.json();
+        return {
+          fileId: updated.id,
+          modifiedTime: updated.modifiedTime || new Date().toISOString(),
+          rootFolderId: folders.rootFolderId
+        };
+      } catch (err) {
+        // 다른 계정/삭제된 파일 ID 등으로 404가 난 경우 새 파일 생성으로 자동 복구
+        if (err.status !== 404) throw err;
+        targetId = '';
+      }
     }
 
     // 신규 생성 (multipart)

@@ -8,7 +8,39 @@
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-  <div id="os-window">
+  <!-- Windows 스타일 OS 잠금 / Google 로그인 화면 -->
+  <div id="os-login-screen" class="os-login-screen">
+    <div class="os-login-clock-wrap">
+      <div id="login-clock" class="os-login-clock">00:00</div>
+      <div id="login-date" class="os-login-date"></div>
+    </div>
+
+    <div class="os-login-card">
+      <div class="os-login-avatar">🧠</div>
+      <h1 class="os-login-title">Second Brain OS</h1>
+      <p class="os-login-sub" id="login-subtitle">Google 계정으로 로그인하면 내 드라이브(SecondBrainOS) 공간으로 바로 입장합니다.</p>
+
+      <div id="login-file-warning" class="auth-notice-warn" style="display:none; text-align:left; margin-bottom:12px;">
+        ⚠️ Google 로그인은 <code>file://</code> 주소에서 동작하지 않습니다.<br>
+        <b>local-bridge/로컬연결_실행.bat</b>을 실행해 <code>http://localhost:4820</code>으로 열거나 <b>GitHub Pages</b>에서 접속해 주세요.
+      </div>
+
+      <div id="login-error-box" class="auth-notice-warn" style="display:none; text-align:left; margin-bottom:12px;"></div>
+
+      <button type="button" class="btn btn-os-google" id="btn-os-google-login">
+        <span class="google-g-badge">G</span>
+        <span id="btn-os-google-text">Google 계정으로 로그인</span>
+      </button>
+
+      <div id="login-status-text" class="os-login-status"></div>
+
+      <div class="os-login-footer">
+        <button type="button" class="os-login-link-btn" id="btn-login-firebase-config">⚙️ Firebase 설정</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="os-window" class="os-locked">
     <!-- 상단 타이틀 바 -->
     <header id="title-bar">
       <div class="title-group">
@@ -30,8 +62,11 @@
       </div>
 
       <div class="title-group">
-        <button class="btn-toggle" id="btn-google-auth" title="내 구글 계정 로그인 (Google Drive 동기화 및 로컬 항목 잠금 해제)">
+        <button class="btn-toggle" id="btn-google-auth" title="계정 정보 및 Google Drive 설정">
           <span id="auth-btn-icon">🔒</span><span class="hide-sm" id="auth-btn-text">Google 로그인</span>
+        </button>
+        <button class="btn-toggle" id="btn-lock-os" title="로그아웃 / 계정 전환 (잠금 화면으로 이동)">
+          <span>🚪</span><span class="hide-sm">계정 전환</span>
         </button>
         <button class="btn-toggle" id="btn-drive-sync" title="Google Drive (SecondBrainOS 폴더) 동기화">
           <span class="drive-dot" id="drive-status-dot"></span><span class="hide-sm" id="drive-status-text">드라이브 미연결</span>
@@ -414,13 +449,13 @@
   <div id="toast-container"></div>
 
   <!-- 스크립트 (file:// 및 GitHub Pages 모두 호환) -->
-  <script src="js/markdown.js?v=15"></script>
-  <script src="js/store.js?v=15"></script>
-  <script src="js/ai-client.js?v=15"></script>
-  <script src="js/auth.js?v=15"></script>
-  <script src="js/drive-sync.js?v=15"></script>
-  <script src="js/local-bridge.js?v=15"></script>
-  <script src="js/window-manager.js?v=15"></script>
-  <script src="js/app.js?v=15"></script>
+  <script src="js/markdown.js?v=16"></script>
+  <script src="js/store.js?v=16"></script>
+  <script src="js/ai-client.js?v=16"></script>
+  <script src="js/auth.js?v=16"></script>
+  <script src="js/drive-sync.js?v=16"></script>
+  <script src="js/local-bridge.js?v=16"></script>
+  <script src="js/window-manager.js?v=16"></script>
+  <script src="js/app.js?v=16"></script>
 </body>
 </html>

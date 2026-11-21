@@ -1,7 +1,7 @@
 (function () {
   'use strict';
 
-  const { DEFAULT_FIREBASE_CONFIG, state, genId, regenerateIds, persistFS, persistSettings, persistChat, getSyncMeta, setSyncMeta, saveStateForUndo, findNodeAndParent, isDescendant, getPathToNode, searchNodes, collectDocsInFolder, getTheme, setTheme } = window.BrainStore;
+  const { DEFAULT_FIREBASE_CONFIG, state, getActiveUserEmail, switchUser, clearActiveWorkspace, genId, regenerateIds, persistFS, persistSettings, persistChat, getSyncMeta, setSyncMeta, saveStateForUndo, findNodeAndParent, isDescendant, getPathToNode, searchNodes, collectDocsInFolder, getTheme, setTheme } = window.BrainStore;
   const { PROVIDERS, sendChat } = window.BrainAI;
   const { render: renderMarkdown, escapeHtml } = window.BrainMarkdown;
   const BrainAuth = window.BrainAuth;
@@ -1536,11 +1536,140 @@
     e.target.value = '';
   });
 
-  // ================= Google Auth & Local Lock =================
+  // ================= Google Auth & Windows-Style Login Screen =================
   const elAuthModal = $('auth-modal');
+  const elOsWindow = $('os-window');
+  const elLoginScreen = $('os-login-screen');
+  const elLoginClock = $('login-clock');
+  const elLoginDate = $('login-date');
+  const elLoginStatusText = $('login-status-text');
+  const elLoginErrorBox = $('login-error-box');
+  const elLoginFileWarning = $('login-file-warning');
+  const elBtnOsGoogleLogin = $('btn-os-google-login');
+
+  let isAuthBusy = false;
+
+  function updateLoginClock() {
+    if (!elLoginClock || !elLoginDate) return;
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    elLoginClock.textContent = `${hh}:${mm}`;
+    elLoginDate.textContent = now.toLocaleDateString('ko-KR', {
+      month: 'long',
+      day: 'numeric',
+      weekday: 'long'
+    });
+  }
+
+  function setLoginScreenError(msg = '') {
+    if (!elLoginErrorBox) return;
+    if (msg) {
+      elLoginErrorBox.innerHTML = `<b>⚠️ 로그인 / 동기화 오류:</b> ${escapeHtml(msg)}`;
+      elLoginErrorBox.style.display = 'block';
+    } else {
+      elLoginErrorBox.style.display = 'none';
+      elLoginErrorBox.innerHTML = '';
+    }
+  }
+
+  function showLoginScreen(statusText = '', errorMsg = '') {
+    if (driveSyncTimer) {
+      clearTimeout(driveSyncTimer);
+      driveSyncTimer = null;
+    }
+    hasSyncedDriveThisSession = false;
+    WinManager.closeAll();
+    openMdWindows.clear();
+    BrainDrive.clearCache();
+    clearActiveWorkspace();
+
+    searchQuery = '';
+    if (elGlobalSearch) elGlobalSearch.value = '';
+    if (elBtnClearSearch) elBtnClearSearch.style.display = 'none';
+    if (elTreeRoot) elTreeRoot.innerHTML = '';
+    if (elContentArea) elContentArea.innerHTML = '';
+    if (elChatMessages) elChatMessages.innerHTML = '';
+    clearSelectionView();
+
+    if (elOsWindow) elOsWindow.classList.add('os-locked');
+    if (elLoginScreen) elLoginScreen.classList.remove('hidden');
+
+    const isFile = BrainAuth.isFileProtocol();
+    if (elLoginFileWarning) elLoginFileWarning.style.display = isFile ? 'block' : 'none';
+    if (elBtnOsGoogleLogin) elBtnOsGoogleLogin.disabled = isFile;
+    if (elLoginStatusText) elLoginStatusText.textContent = statusText || '';
+    setLoginScreenError(errorMsg);
+    updateLoginClock();
+    updateAuthButtonUI();
+    updateDriveStatusUI();
+  }
+
+  async function enterWorkspaceForUser(user, { triggerInitialSync = false, waitForSyncBeforeReveal = false } = {}) {
+    if (!user || !user.email) {
+      showLoginScreen();
+      return;
+    }
+
+    const email = String(user.email).trim().toLowerCase();
+    const isAccountChanged = getActiveUserEmail() !== email;
+
+    if (isAccountChanged) {
+      if (driveSyncTimer) {
+        clearTimeout(driveSyncTimer);
+        driveSyncTimer = null;
+      }
+      WinManager.closeAll();
+      openMdWindows.clear();
+      BrainDrive.clearCache();
+      hasSyncedDriveThisSession = false;
+      lastDriveErrorMessage = '';
+      lastDriveErrorCode = '';
+      driveSyncStatus = BrainAuth.hasDriveAccess() ? 'synced' : 'expired';
+      switchUser(email);
+    }
+
+    const shouldSync =
+      (triggerInitialSync || (BrainAuth.hasDriveAccess() && !hasSyncedDriveThisSession)) &&
+      BrainAuth.hasDriveAccess();
+
+    if (waitForSyncBeforeReveal && shouldSync) {
+      if (elLoginStatusText) elLoginStatusText.textContent = `☁️ ${email}의 Google Drive(SecondBrainOS) 불러오는 중...`;
+      await syncWithDrive({ mode: 'initial', interactive: false, showSuccessToast: true });
+    }
+
+    if (elOsWindow) elOsWindow.classList.remove('os-locked');
+    if (elLoginScreen) elLoginScreen.classList.add('hidden');
+    if (elLoginStatusText) elLoginStatusText.textContent = '';
+    setLoginScreenError('');
+
+    onAuthStateChanged();
+    renderChatMessages();
+
+    if (!waitForSyncBeforeReveal && shouldSync) {
+      syncWithDrive({ mode: 'initial', interactive: false, showSuccessToast: true });
+    }
+  }
+
+  async function logoutAndLockOS(reasonMsg = '로그아웃되었습니다. 다른 Google 계정으로 로그인할 수 있습니다.') {
+    closeAuthModal();
+    if (driveSyncTimer) {
+      clearTimeout(driveSyncTimer);
+      driveSyncTimer = null;
+    }
+    hasSyncedDriveThisSession = false;
+    lastDriveErrorMessage = '';
+    lastDriveErrorCode = '';
+    driveSyncStatus = 'disconnected';
+    BrainDrive.clearCache();
+    await BrainAuth.signOut();
+    showLoginScreen(reasonMsg);
+    showToast('🔒 잠금 화면으로 이동했습니다.');
+  }
 
   function isOwnerAuthenticated() {
-    return BrainAuth.isOwner(state.settings.ownerEmail);
+    const user = BrainAuth.getUser();
+    return Boolean(user && user.email && user.emailVerified);
   }
 
   function isItemVisible(item) {
@@ -1692,13 +1821,16 @@
     }
   }
 
-  function handleAuthUserChanged() {
-    onAuthStateChanged();
+  function handleAuthUserChanged(fbUser) {
+    if (isAuthBusy) return;
+    const user = fbUser || BrainAuth.getUser();
+    if (user && user.email) {
+      enterWorkspaceForUser(user, { triggerInitialSync: false, waitForSyncBeforeReveal: false });
+    } else {
+      showLoginScreen('');
+    }
     if (elAuthModal.style.display === 'flex') {
       renderAuthModalContent();
-    }
-    if (isOwnerAuthenticated() && BrainAuth.hasDriveAccess() && !hasSyncedDriveThisSession) {
-      syncWithDrive({ mode: 'initial', interactive: false, showSuccessToast: true });
     }
   }
 
@@ -1715,6 +1847,7 @@
       if (curPath.some((n) => !isItemVisible(n))) {
         state.currentFolder = state.fileSystem;
       }
+      return;
     }
 
     renderTree(state.fileSystem, elTreeRoot, true);
@@ -1777,48 +1910,57 @@
     if (e.target === elAuthModal) closeAuthModal();
   });
 
-  $('btn-firebase-google-login').addEventListener('click', async () => {
-    saveAuthFormToState();
-    const btn = $('btn-firebase-google-login');
-    btn.disabled = true;
+  async function performGoogleLoginFlow(fromLoginScreen = false) {
+    if (isAuthBusy) return;
+    isAuthBusy = true;
+
+    const btnOs = $('btn-os-google-login');
+    const btnModal = $('btn-firebase-google-login');
+    if (btnOs) btnOs.disabled = true;
+    if (btnModal) btnModal.disabled = true;
+
+    if (fromLoginScreen) {
+      setLoginScreenError('');
+      if (elLoginStatusText) elLoginStatusText.textContent = '🔑 Google 로그인 창을 여는 중...';
+    }
+
     try {
       const user = await BrainAuth.signInWithGoogle(state.settings.firebaseConfig);
-      if (user) {
-        if (!state.settings.ownerEmail) {
-          state.settings.ownerEmail = user.email;
-          persistSettings();
-          $('auth-owner-email').value = user.email;
-        }
-        onAuthStateChanged();
-        if (isOwnerAuthenticated()) {
-          closeAuthModal();
-          showToast(`🔓 ${user.email} 로그인 완료! Google Drive 동기화를 시작합니다...`);
-          syncWithDrive({ mode: 'initial', interactive: false, showSuccessToast: true });
-        } else {
-          renderAuthModalContent();
-          showToast(`🚫 허용된 계정(${state.settings.ownerEmail})이 아닙니다. 로컬 항목은 잠금 유지됩니다.`);
-        }
+      if (user && user.email) {
+        closeAuthModal();
+        await enterWorkspaceForUser(user, {
+          triggerInitialSync: true,
+          waitForSyncBeforeReveal: fromLoginScreen
+        });
+        showToast(`🔓 ${user.email} 계정으로 접속했습니다.`);
       }
     } catch (err) {
+      if (fromLoginScreen) {
+        setLoginScreenError(err.message);
+        if (elLoginStatusText) elLoginStatusText.textContent = '';
+      }
       showToast(`⚠️ ${err.message}`);
     } finally {
-      btn.disabled = false;
-      renderAuthModalContent();
+      isAuthBusy = false;
+      if (btnOs) btnOs.disabled = BrainAuth.isFileProtocol();
+      if (btnModal) btnModal.disabled = !BrainAuth.isConfigComplete(state.settings.firebaseConfig);
+      if (elAuthModal.style.display === 'flex') {
+        renderAuthModalContent();
+      }
     }
+  }
+
+  $('btn-os-google-login').addEventListener('click', () => performGoogleLoginFlow(true));
+  $('btn-login-firebase-config').addEventListener('click', openAuthModal);
+  $('btn-lock-os').addEventListener('click', () => logoutAndLockOS());
+
+  $('btn-firebase-google-login').addEventListener('click', async () => {
+    saveAuthFormToState();
+    await performGoogleLoginFlow(false);
   });
 
   $('btn-google-signout').addEventListener('click', async () => {
-    if (driveSyncTimer) {
-      clearTimeout(driveSyncTimer);
-      driveSyncTimer = null;
-    }
-    hasSyncedDriveThisSession = false;
-    BrainDrive.clearCache();
-    await BrainAuth.signOut();
-    driveSyncStatus = 'disconnected';
-    onAuthStateChanged();
-    renderAuthModalContent();
-    showToast('🔒 로그아웃되었습니다. Google Drive 연결과 로컬 잠금이 해제되었습니다.');
+    await logoutAndLockOS();
   });
 
   $('btn-save-auth-config').addEventListener('click', async () => {
@@ -2182,15 +2324,19 @@
     if (token && isOwnerAuthenticated()) return token;
     if (!interactive) return null;
 
+    const prevEmail = getActiveUserEmail();
     const user = await BrainAuth.reconnectDrive(state.settings.firebaseConfig);
-    if (user && !state.settings.ownerEmail) {
-      state.settings.ownerEmail = user.email;
-      persistSettings();
+    if (!user || !user.email) {
+      throw new Error('Google 계정 로그인을 완료해 주세요.');
+    }
+    if (prevEmail && prevEmail !== user.email) {
+      WinManager.closeAll();
+      openMdWindows.clear();
+      BrainDrive.clearCache();
+      hasSyncedDriveThisSession = false;
+      switchUser(user.email);
     }
     onAuthStateChanged();
-    if (!isOwnerAuthenticated()) {
-      throw new Error(`허용된 계정(${state.settings.ownerEmail})으로 로그인해 주세요.`);
-    }
     token = BrainAuth.getDriveAccessToken();
     if (!token) {
       throw new Error('Google Drive 접근 토큰을 받지 못했습니다. 로그인 시 드라이브 권한을 허용해 주세요.');
@@ -2930,15 +3076,28 @@
   elChatProvider.value = state.settings.lastProvider || 'gemini';
   populateModels(elChatProvider.value);
   updateApiStatusSummary();
-  updateAuthButtonUI();
-  updateDriveStatusUI();
-  renderTree(state.fileSystem, elTreeRoot, true);
-  openFolder(state.currentFolder);
-  renderChatMessages();
-  renderContextChips();
-  updateLocalLockBanner();
-  if (BrainAuth.isConfigComplete(state.settings.firebaseConfig)) {
-    BrainAuth.init(state.settings.firebaseConfig, handleAuthUserChanged).catch(() => {});
+  updateLoginClock();
+  setInterval(updateLoginClock, 15000);
+
+  // 시작 시 항상 Windows 스타일 로그인 잠금 화면으로 진입 (목록 비노출)
+  showLoginScreen(
+    BrainAuth.isConfigComplete(state.settings.firebaseConfig) && !BrainAuth.isFileProtocol()
+      ? '🔐 로그인 상태 확인 중...'
+      : ''
+  );
+
+  if (BrainAuth.isConfigComplete(state.settings.firebaseConfig) && !BrainAuth.isFileProtocol()) {
+    BrainAuth.init(state.settings.firebaseConfig, handleAuthUserChanged)
+      .then(() => {
+        // 기존 세션이 없으면 안내 문구 정리
+        if (!BrainAuth.getUser() && !isAuthBusy && elLoginStatusText) {
+          elLoginStatusText.textContent = '';
+        }
+      })
+      .catch((err) => {
+        setLoginScreenError(`Firebase 초기화 실패: ${err.message}`);
+        if (elLoginStatusText) elLoginStatusText.textContent = '';
+      });
   }
   refreshBridgeStatus(false);
 })();

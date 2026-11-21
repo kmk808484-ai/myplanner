@@ -1,12 +1,33 @@
 (function (global) {
   'use strict';
 
-  const DB_KEY = 'brainOS_v6_DB';
+  const LEGACY_V6_DB_KEY = 'brainOS_v6_DB';
   const LEGACY_DB_KEY = 'brainOS_DB';
+  const LEGACY_CHAT_KEY = 'brainOS_chat_history';
+  const LEGACY_CLAIMED_KEY = 'brainOS_legacy_claimed_by';
   const SETTINGS_KEY = 'brainOS_api_settings';
-  const CHAT_KEY = 'brainOS_chat_history';
   const THEME_KEY = 'brainOS_theme';
-  const SYNC_META_KEY = 'brainOS_sync_meta';
+
+  const DEFAULT_FIREBASE_CONFIG = {
+    apiKey: 'AIzaSyCuCNfM7l1aInsq_KCFWKQmoyME2tJXCZU',
+    authDomain: 'gen-lang-client-0519883143.firebaseapp.com',
+    projectId: 'gen-lang-client-0519883143',
+    storageBucket: 'gen-lang-client-0519883143.firebasestorage.app',
+    messagingSenderId: '845419336299',
+    appId: '1:845419336299:web:0909e669b1713c052cd72e'
+  };
+
+  let activeUserEmail = '';
+
+  function createLockedPlaceholderFS() {
+    return {
+      id: 'root',
+      name: '잠김',
+      type: 'folder',
+      icon: '🔒',
+      children: []
+    };
+  }
 
   function createDefaultData() {
     return {
@@ -24,19 +45,18 @@
             {
               id: 'welcome-note',
               type: 'doc',
-              name: 'Second Brain OS 사용법',
+              name: 'Second Brain OS 사용법.md',
               icon: '✨',
-              tag: '#가이드 #MultiAI',
+              tag: '#가이드 #MD #MultiAI',
               link: '',
               summary:
                 '## 환영합니다!\n\n' +
-                '이 앱은 **GitHub Pages**에서 바로 실행되는 **Multi-AI 세컨드 브레인**입니다.\n\n' +
+                '이 앱은 **Google Drive 자동 동기화**와 **Multi-AI**를 지원하는 개인 지식 OS입니다.\n\n' +
                 '### 주요 기능\n' +
-                '- **탐색기**: 폴더 생성, 드래그 이동, `Ctrl+C / X / V / Z`, 우클릭 메뉴\n' +
-                '- **파일 드롭**: `.md`, `.txt`, `.json` 파일을 중앙에 끌어다 놓으면 본문이 자동 입력됩니다.\n' +
-                '- **4대 AI API 지원**: 상단 **⚙️ API 설정**에서 **Gemini · OpenAI · Anthropic(Claude) · Grok(xAI)** 키를 등록하세요.\n' +
-                '- **컨텍스트 대화**: 우측 **🤖 AI 대화** 탭에서 `📎 현재 메모` 또는 `📂 현재 폴더`를 첨부해 내 지식 기반으로 질문하세요.\n' +
-                '- **답변 저장**: AI의 좋은 답변은 `💾 메모로 저장` 버튼으로 현재 폴더에 바로 보관할 수 있습니다.'
+                '- **탐색기**: 폴더 생성, 드래그 이동, `F2`(이름 바꾸기), `Ctrl+C / X / V / Z`, 우클릭 메뉴\n' +
+                '- **내장 MD 뷰어**: `.md` 파일을 더블클릭하면 이동·크기조절·최소화가 가능한 전용 마크다운 창이 열립니다.\n' +
+                '- **파일 업로드**: 이미지, PDF, PPT, Word, Excel, HTML, MD 파일을 끌어다 놓으면 내 구글 드라이브(`SecondBrainOS`)에 자동 동기화됩니다.\n' +
+                '- **4대 AI API 지원**: 상단 **⚙️ API 설정**에서 **Gemini · OpenAI · Claude · Grok** 키를 등록하세요.'
             }
           ]
         }
@@ -44,31 +64,15 @@
     };
   }
 
-  function loadFileSystem() {
-    try {
-      const saved = localStorage.getItem(DB_KEY);
-      if (saved) return JSON.parse(saved);
-      // v4/v5 데이터 자동 마이그레이션
-      const legacy = localStorage.getItem(LEGACY_DB_KEY);
-      if (legacy) {
-        const parsed = JSON.parse(legacy);
-        localStorage.setItem(DB_KEY, JSON.stringify(parsed));
-        return parsed;
-      }
-    } catch (e) {
-      console.error('DB 로드 오류:', e);
-    }
-    return createDefaultData();
+  function getUserKeys(email) {
+    const clean = String(email || '').trim().toLowerCase();
+    const prefix = `brainOS_u_${encodeURIComponent(clean)}_`;
+    return {
+      db: `${prefix}DB`,
+      chat: `${prefix}chat`,
+      syncMeta: `${prefix}sync_meta`
+    };
   }
-
-  const DEFAULT_FIREBASE_CONFIG = {
-    apiKey: 'AIzaSyCuCNfM7l1aInsq_KCFWKQmoyME2tJXCZU',
-    authDomain: 'gen-lang-client-0519883143.firebaseapp.com',
-    projectId: 'gen-lang-client-0519883143',
-    storageBucket: 'gen-lang-client-0519883143.firebasestorage.app',
-    messagingSenderId: '845419336299',
-    appId: '1:845419336299:web:0909e669b1713c052cd72e'
-  };
 
   function loadSettings() {
     const defaults = {
@@ -105,33 +109,131 @@
     }
   }
 
-  function loadChatHistory() {
-    try {
-      const raw = localStorage.getItem(CHAT_KEY);
-      return raw ? JSON.parse(raw) : [];
-    } catch (e) {
-      return [];
-    }
+  let syncMeta = {
+    updatedAt: 0,
+    lastSyncedAt: 0,
+    driveDbFileId: '',
+    hasUserEdits: false
+  };
+
+  const state = {
+    fileSystem: createLockedPlaceholderFS(),
+    currentFolder: null,
+    selectedItem: null,
+    undoStack: [],
+    clipboard: null,
+    settings: loadSettings(),
+    chatHistory: [],
+    attachedContextIds: []
+  };
+  state.currentFolder = state.fileSystem;
+
+  function getActiveUserEmail() {
+    return activeUserEmail;
   }
 
-  function loadSyncMeta() {
-    const hasExistingDb = Boolean(localStorage.getItem(DB_KEY) || localStorage.getItem(LEGACY_DB_KEY));
-    const defaults = {
-      updatedAt: hasExistingDb ? Date.now() : 0,
+  function switchUser(email) {
+    const clean = String(email || '').trim().toLowerCase();
+    if (!clean) {
+      clearActiveWorkspace();
+      return;
+    }
+
+    activeUserEmail = clean;
+    const keys = getUserKeys(clean);
+
+    // 1. 해당 계정 전용 DB 로드 (없으면 기존 단일 계정 레거시 DB 1회 마이그레이션 검토)
+    let loadedFS = null;
+    let loadedChat = [];
+    let hasLocalUserDb = false;
+
+    try {
+      const saved = localStorage.getItem(keys.db);
+      if (saved) {
+        loadedFS = JSON.parse(saved);
+        hasLocalUserDb = true;
+      } else {
+        // 기존 ownerEmail 또는 최초 사용자가 레거시 단일 DB를 보유한 경우 1회 안전 이전
+        const claimedBy = String(localStorage.getItem(LEGACY_CLAIMED_KEY) || '').trim().toLowerCase();
+        const prevOwner = String(state.settings.ownerEmail || '').trim().toLowerCase();
+        const legacyRaw = localStorage.getItem(LEGACY_V6_DB_KEY) || localStorage.getItem(LEGACY_DB_KEY);
+        const canClaimLegacy = Boolean(legacyRaw) && (
+          claimedBy === clean ||
+          (!claimedBy && (!prevOwner || prevOwner === clean))
+        );
+
+        if (canClaimLegacy) {
+          loadedFS = JSON.parse(legacyRaw);
+          localStorage.setItem(keys.db, JSON.stringify(loadedFS));
+          localStorage.setItem(LEGACY_CLAIMED_KEY, clean);
+          hasLocalUserDb = true;
+
+          const legacyChatRaw = localStorage.getItem(LEGACY_CHAT_KEY);
+          if (legacyChatRaw) {
+            try {
+              loadedChat = JSON.parse(legacyChatRaw) || [];
+              localStorage.setItem(keys.chat, JSON.stringify(loadedChat));
+            } catch (_) {}
+          }
+        }
+      }
+    } catch (e) {
+      console.error('계정별 DB 로드 오류:', e);
+    }
+
+    if (!loadedFS) {
+      loadedFS = createDefaultData();
+    }
+
+    // 2. 해당 계정 전용 채팅 로드
+    if (loadedChat.length === 0) {
+      try {
+        const rawChat = localStorage.getItem(keys.chat);
+        loadedChat = rawChat ? JSON.parse(rawChat) : [];
+      } catch (_) {
+        loadedChat = [];
+      }
+    }
+
+    // 3. 해당 계정 전용 동기화 메타 로드 (타 계정의 driveDbFileId와 절대 섞이지 않음)
+    const defaultMeta = {
+      updatedAt: hasLocalUserDb ? Date.now() : 0,
       lastSyncedAt: 0,
       driveDbFileId: '',
-      hasUserEdits: hasExistingDb
+      hasUserEdits: hasLocalUserDb
     };
     try {
-      const raw = localStorage.getItem(SYNC_META_KEY);
-      if (!raw) return defaults;
-      return { ...defaults, ...JSON.parse(raw) };
-    } catch (e) {
-      return defaults;
+      const rawMeta = localStorage.getItem(keys.syncMeta);
+      syncMeta = rawMeta ? { ...defaultMeta, ...JSON.parse(rawMeta) } : defaultMeta;
+    } catch (_) {
+      syncMeta = defaultMeta;
     }
+
+    state.fileSystem = loadedFS;
+    state.currentFolder = state.fileSystem;
+    state.selectedItem = null;
+    state.undoStack = [];
+    state.clipboard = null;
+    state.chatHistory = Array.isArray(loadedChat) ? loadedChat : [];
+    state.attachedContextIds = [];
   }
 
-  let syncMeta = loadSyncMeta();
+  function clearActiveWorkspace() {
+    activeUserEmail = '';
+    syncMeta = {
+      updatedAt: 0,
+      lastSyncedAt: 0,
+      driveDbFileId: '',
+      hasUserEdits: false
+    };
+    state.fileSystem = createLockedPlaceholderFS();
+    state.currentFolder = state.fileSystem;
+    state.selectedItem = null;
+    state.undoStack = [];
+    state.clipboard = null;
+    state.chatHistory = [];
+    state.attachedContextIds = [];
+  }
 
   function getSyncMeta() {
     return { ...syncMeta };
@@ -139,23 +241,13 @@
 
   function setSyncMeta(patch) {
     syncMeta = { ...syncMeta, ...(patch || {}) };
-    try {
-      localStorage.setItem(SYNC_META_KEY, JSON.stringify(syncMeta));
-    } catch (_) {}
+    if (activeUserEmail) {
+      try {
+        localStorage.setItem(getUserKeys(activeUserEmail).syncMeta, JSON.stringify(syncMeta));
+      } catch (_) {}
+    }
     return { ...syncMeta };
   }
-
-  const state = {
-    fileSystem: loadFileSystem(),
-    currentFolder: null,
-    selectedItem: null,
-    undoStack: [],
-    clipboard: null,
-    settings: loadSettings(),
-    chatHistory: loadChatHistory(),
-    attachedContextIds: []
-  };
-  state.currentFolder = state.fileSystem;
 
   function genId() {
     return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
@@ -167,7 +259,8 @@
   }
 
   function persistFS(options = {}) {
-    localStorage.setItem(DB_KEY, JSON.stringify(state.fileSystem));
+    if (!activeUserEmail) return;
+    localStorage.setItem(getUserKeys(activeUserEmail).db, JSON.stringify(state.fileSystem));
     if (!options.silent) {
       setSyncMeta({ updatedAt: Date.now(), hasUserEdits: true });
     }
@@ -178,7 +271,8 @@
   }
 
   function persistChat(options = {}) {
-    localStorage.setItem(CHAT_KEY, JSON.stringify(state.chatHistory.slice(-60)));
+    if (!activeUserEmail) return;
+    localStorage.setItem(getUserKeys(activeUserEmail).chat, JSON.stringify(state.chatHistory.slice(-60)));
     if (!options.silent) {
       setSyncMeta({ updatedAt: Date.now(), hasUserEdits: true });
     }
@@ -253,6 +347,9 @@
   global.BrainStore = {
     DEFAULT_FIREBASE_CONFIG,
     state,
+    getActiveUserEmail,
+    switchUser,
+    clearActiveWorkspace,
     genId,
     regenerateIds,
     persistFS,
