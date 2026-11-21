@@ -23,6 +23,7 @@
   let hasSyncedDriveThisSession = false;
   let previewRenderSeq = 0;
   const openMdWindows = new Map(); // itemId -> { win, syncFromItem }
+  const mdDriveSyncTimers = new Map(); // itemId -> timerId
 
   // ================= DOM References =================
   const $ = (id) => document.getElementById(id);
@@ -380,11 +381,24 @@
     if (!item || !trimmed || trimmed === item.name) return false;
     saveStateForUndo();
     item.name = trimmed;
+    if (item.driveFile) item.driveFile.name = trimmed;
     saveAndRender();
     if (state.selectedItem && state.selectedItem.id === item.id) {
       selectItem(item);
     }
     syncOpenWindowsForItem(item);
+
+    // Google Drive 실제 파일 이름도 함께 변경
+    const driveIdToRename = item.driveDocId || item.driveFile?.id;
+    const driveToken = BrainAuth.getDriveAccessToken();
+    if (driveIdToRename && driveToken) {
+      BrainDrive.renameFile(driveToken, driveIdToRename, trimmed).catch((err) => {
+        console.warn('Drive 파일 이름 변경 실패:', err);
+      });
+    } else if (item.type === 'doc') {
+      scheduleDocFileSyncToDrive(item, true);
+    }
+
     showToast(`✏️ 이름이 "${trimmed}"(으)로 변경되었습니다.`);
     return true;
   }
@@ -470,6 +484,7 @@
     if (type === 'folder') {
       startRenameItem(newItem);
     } else {
+      scheduleDocFileSyncToDrive(newItem, true);
       openMarkdownWindow(newItem, 'split');
     }
     showToast(type === 'folder' ? '새 폴더를 만들었습니다.' : `새 마크다운 메모(${newName})를 만들었습니다.`);
@@ -657,6 +672,7 @@
         };
         if (!state.currentFolder.children) state.currentFolder.children = [];
         state.currentFolder.children.push(newItem);
+        scheduleDocFileSyncToDrive(newItem, true);
         lastAdded = newItem;
         addedCount++;
       } else {
@@ -965,6 +981,9 @@
     saveAndRender();
     selectItem(state.selectedItem);
     syncOpenWindowsForItem(state.selectedItem);
+    if (state.selectedItem.type === 'doc') {
+      scheduleDocFileSyncToDrive(state.selectedItem, true);
+    }
     showToast('저장되었습니다.');
   }
 
@@ -1363,6 +1382,7 @@
     if (!state.currentFolder.children) state.currentFolder.children = [];
     state.currentFolder.children.push(newNote);
     saveAndRender();
+    scheduleDocFileSyncToDrive(newNote, true);
     showToast(`"${state.currentFolder.name}" 폴더에 .md 메모로 저장되었습니다.`);
   }
 
@@ -1578,6 +1598,8 @@
       clearTimeout(driveSyncTimer);
       driveSyncTimer = null;
     }
+    for (const t of mdDriveSyncTimers.values()) clearTimeout(t);
+    mdDriveSyncTimers.clear();
     hasSyncedDriveThisSession = false;
     WinManager.closeAll();
     openMdWindows.clear();
@@ -2441,9 +2463,15 @@
         return true;
       }
 
-      // 'initial' 또는 'manual': 클라우드 최신본 먼저 확인 후 병합/업로드
+      // 'initial' 또는 'manual': 클라우드 DB 확인 + 실제 SecondBrainOS 폴더 내 파일 스캔·병합
       const cloud = await BrainDrive.downloadDatabase(token, userEmail);
+      let dbFileId = cloud.fileId || '';
+      let hadPriorCloudDb = false;
+      let loadedFromCloudDb = false;
+      let needPushDb = false;
+
       if (cloud.exists && cloud.data && cloud.data.fileSystem) {
+        hadPriorCloudDb = true;
         const cloudUpdatedAt =
           Number(cloud.data.updatedAt) ||
           (cloud.modifiedTime ? Date.parse(cloud.modifiedTime) : 0) ||
@@ -2452,62 +2480,65 @@
 
         if (!localMeta.hasUserEdits || cloudUpdatedAt > localUpdatedAt) {
           applyCloudPayload(cloud.data, cloud.fileId);
-          hasSyncedDriveThisSession = true;
-          driveSyncStatus = 'synced';
-          showToast('☁️ Google Drive(SecondBrainOS)에서 최신 데이터를 불러왔습니다.');
-          return true;
-        }
-
-        if (cloudUpdatedAt === localUpdatedAt && localMeta.lastSyncedAt > 0) {
+          loadedFromCloudDb = true;
+        } else if (cloudUpdatedAt === localUpdatedAt && localMeta.lastSyncedAt > 0) {
           setSyncMeta({ lastSyncedAt: Date.now(), driveDbFileId: cloud.fileId });
-          hasSyncedDriveThisSession = true;
-          driveSyncStatus = 'synced';
-          if (showSuccessToast) showToast('☁️ Google Drive와 이미 최신 상태입니다.');
-          return true;
-        }
-
-        // 로컬이 더 최신인 경우: 최초 연결 충돌이면 사용자 확인
-        if (mode === 'initial' && localMeta.lastSyncedAt === 0 && localMeta.hasUserEdits) {
-          const loadCloud = confirm(
-            'Google Drive(SecondBrainOS 폴더)에 저장된 백업이 있습니다.\n\n' +
-            '[확인] Google Drive 데이터 불러오기 (권장)\n' +
-            '[취소] 현재 PC 데이터로 Google Drive 덮어쓰기'
-          );
-          if (loadCloud) {
-            applyCloudPayload(cloud.data, cloud.fileId);
-            hasSyncedDriveThisSession = true;
-            driveSyncStatus = 'synced';
-            showToast('☁️ Google Drive에서 데이터를 불러왔습니다.');
-            return true;
+        } else {
+          // 로컬이 더 최신인 경우: 최초 연결 충돌이면 사용자 확인
+          if (mode === 'initial' && localMeta.lastSyncedAt === 0 && localMeta.hasUserEdits) {
+            const loadCloud = confirm(
+              'Google Drive(SecondBrainOS 폴더)에 저장된 백업이 있습니다.\n\n' +
+              '[확인] Google Drive 데이터 불러오기 (권장)\n' +
+              '[취소] 현재 PC 데이터로 Google Drive 덮어쓰기'
+            );
+            if (loadCloud) {
+              applyCloudPayload(cloud.data, cloud.fileId);
+              loadedFromCloudDb = true;
+            } else {
+              needPushDb = true;
+            }
+          } else {
+            needPushDb = true;
           }
         }
+      } else {
+        needPushDb = true;
+      }
 
+      // 실제 Google Drive SecondBrainOS 폴더 안의 모든 파일·하위폴더 스캔 및 병합
+      const scanResult = await syncDriveFolderContents(token, userEmail, {
+        removeDefaultWelcomeIfImported: !hadPriorCloudDb && !localMeta.hasUserEdits
+      });
+      if (scanResult.changed) {
+        needPushDb = true;
+      }
+
+      if (needPushDb) {
         const payload = buildCloudPayload();
-        const uploaded = await BrainDrive.uploadDatabase(token, payload, cloud.fileId, userEmail);
+        const uploaded = await BrainDrive.uploadDatabase(token, payload, dbFileId, userEmail);
         setSyncMeta({
           updatedAt: payload.updatedAt,
           lastSyncedAt: Date.now(),
           driveDbFileId: uploaded.fileId,
           hasUserEdits: true
         });
-        hasSyncedDriveThisSession = true;
-        driveSyncStatus = 'synced';
-        if (showSuccessToast) showToast('☁️ 현재 데이터를 Google Drive(SecondBrainOS)에 반영했습니다.');
-        return true;
       }
 
-      // 클라우드에 아직 백업 파일이 없는 경우 → 첫 백업 생성
-      const payload = buildCloudPayload();
-      const uploaded = await BrainDrive.uploadDatabase(token, payload, '', userEmail);
-      setSyncMeta({
-        updatedAt: payload.updatedAt,
-        lastSyncedAt: Date.now(),
-        driveDbFileId: uploaded.fileId,
-        hasUserEdits: true
-      });
       hasSyncedDriveThisSession = true;
       driveSyncStatus = 'synced';
-      showToast('☁️ 내 드라이브 [SecondBrainOS] 폴더에 첫 백업을 완료했습니다.');
+
+      if (scanResult.importedCount > 0 || scanResult.updatedCount > 0) {
+        const parts = [];
+        if (scanResult.importedCount > 0) parts.push(`새 파일 ${scanResult.importedCount}개 가져옴`);
+        if (scanResult.updatedCount > 0) parts.push(`${scanResult.updatedCount}개 최신 반영`);
+        showToast(`☁️ SecondBrainOS 드라이브 폴더 동기화 완료 (${parts.join(', ')})`);
+      } else if (loadedFromCloudDb) {
+        showToast('☁️ Google Drive(SecondBrainOS)에서 최신 데이터를 불러왔습니다.');
+      } else if (!hadPriorCloudDb) {
+        showToast('☁️ 내 드라이브 [SecondBrainOS] 폴더에 첫 백업을 완료했습니다.');
+      } else if (showSuccessToast) {
+        showToast('☁️ Google Drive(SecondBrainOS)와 동기화되었습니다.');
+      }
       return true;
     } catch (err) {
       handleDriveError(err);
@@ -2526,6 +2557,265 @@
         renderAuthModalContent();
       }
     }
+  }
+
+  function ensureLocalFolderByPath(folderSegments) {
+    let curr = state.fileSystem;
+    let createdAny = false;
+    for (const seg of folderSegments || []) {
+      const name = String(seg || '').trim();
+      if (!name) continue;
+      if (!curr.children) curr.children = [];
+      let next = curr.children.find((c) => c.type === 'folder' && String(c.name || '').toLowerCase() === name.toLowerCase());
+      if (!next) {
+        next = {
+          id: genId(),
+          type: 'folder',
+          name,
+          icon: '📁',
+          tag: '',
+          summary: '',
+          link: '',
+          children: []
+        };
+        curr.children.push(next);
+        createdAny = true;
+      }
+      curr = next;
+    }
+    return { folder: curr, createdAny };
+  }
+
+  function indexExistingDriveNodes(node, byDocId, byFileId) {
+    if (!node) return;
+    if (node.driveDocId) byDocId.set(node.driveDocId, node);
+    if (node.driveFile && node.driveFile.id) byFileId.set(node.driveFile.id, node);
+    if (Array.isArray(node.children)) {
+      node.children.forEach((c) => indexExistingDriveNodes(c, byDocId, byFileId));
+    }
+  }
+
+  async function syncDriveFolderContents(token, userEmail, options = {}) {
+    const scan = await BrainDrive.scanAppFolder(token, userEmail);
+    const byDocId = new Map();
+    const byFileId = new Map();
+    indexExistingDriveNodes(state.fileSystem, byDocId, byFileId);
+
+    let importedCount = 0;
+    let updatedCount = 0;
+    let changed = false;
+
+    // 1. 드라이브에 있는 하위 폴더 반영
+    for (const folderPath of scan.folders || []) {
+      const res = ensureLocalFolderByPath(folderPath);
+      if (res.createdAny) changed = true;
+    }
+
+    // 2. 드라이브 SecondBrainOS 폴더 안의 모든 파일 반영
+    for (const f of scan.files || []) {
+      const { ext, icon, tag } = getFileMetaByExt(f.name);
+      const isTextFile = TEXT_EDITABLE_EXTS.has(ext) && (!f.size || f.size <= 500 * 1024);
+
+      // 이미 연결된 텍스트/MD 문서: 드라이브 수정 시각이 더 최신이면 본문 갱신
+      if (byDocId.has(f.id)) {
+        const existingNode = byDocId.get(f.id);
+        const driveMs = f.modifiedTime ? Date.parse(f.modifiedTime) : 0;
+        const localMs = existingNode.driveModifiedTime ? Date.parse(existingNode.driveModifiedTime) : 0;
+        if (isTextFile && driveMs > localMs + 1500) {
+          try {
+            const text = await BrainDrive.downloadTextFile(token, f.id);
+            existingNode.summary = text;
+            existingNode.name = f.name;
+            existingNode.driveModifiedTime = f.modifiedTime;
+            syncOpenWindowsForItem(existingNode);
+            updatedCount++;
+            changed = true;
+          } catch (_) {}
+        }
+        continue;
+      }
+
+      // 이미 연결된 바이너리 파일
+      if (byFileId.has(f.id)) {
+        const existingNode = byFileId.get(f.id);
+        if (existingNode.driveFile) {
+          existingNode.driveFile.webViewLink = f.webViewLink || existingNode.driveFile.webViewLink;
+          if (f.size) existingNode.driveFile.size = f.size;
+        }
+        continue;
+      }
+
+      // 해당 폴더 확보
+      const { folder: targetFolder, createdAny } = ensureLocalFolderByPath(f.folderPath || []);
+      if (createdAny) changed = true;
+      if (!targetFolder.children) targetFolder.children = [];
+
+      // 같은 폴더에 같은 이름의 미연결 문서가 있으면 중복 생성 대신 연결
+      const sameNameDoc = targetFolder.children.find(
+        (c) =>
+          c.type === 'doc' &&
+          !c.driveDocId &&
+          !(c.driveFile && c.driveFile.id) &&
+          String(c.name || '').toLowerCase() === String(f.name || '').toLowerCase()
+      );
+
+      if (sameNameDoc) {
+        if (isTextFile) {
+          sameNameDoc.driveDocId = f.id;
+          sameNameDoc.driveModifiedTime = f.modifiedTime;
+          if (!String(sameNameDoc.summary || '').trim()) {
+            try {
+              sameNameDoc.summary = await BrainDrive.downloadTextFile(token, f.id);
+              updatedCount++;
+            } catch (_) {}
+          }
+          byDocId.set(f.id, sameNameDoc);
+        } else {
+          sameNameDoc.driveFile = {
+            id: f.id,
+            name: f.name,
+            mimeType: f.mimeType,
+            size: f.size,
+            webViewLink: f.webViewLink,
+            uploadedAt: f.modifiedTime
+          };
+          byFileId.set(f.id, sameNameDoc);
+          updatedCount++;
+        }
+        changed = true;
+        continue;
+      }
+
+      // 신규 파일 카드 생성
+      if (isTextFile) {
+        let textContent = '';
+        try {
+          textContent = await BrainDrive.downloadTextFile(token, f.id);
+        } catch (_) {}
+        const newDoc = {
+          id: genId(),
+          type: 'doc',
+          name: f.name,
+          icon,
+          tag,
+          link: '',
+          summary: textContent,
+          driveDocId: f.id,
+          driveModifiedTime: f.modifiedTime
+        };
+        targetFolder.children.push(newDoc);
+        byDocId.set(f.id, newDoc);
+        importedCount++;
+        changed = true;
+      } else {
+        const newBin = {
+          id: genId(),
+          type: 'doc',
+          name: f.name,
+          icon,
+          tag,
+          link: '',
+          summary: '',
+          driveFile: {
+            id: f.id,
+            name: f.name,
+            mimeType: f.mimeType,
+            size: f.size,
+            webViewLink: f.webViewLink,
+            uploadedAt: f.modifiedTime
+          }
+        };
+        targetFolder.children.push(newBin);
+        byFileId.set(f.id, newBin);
+        importedCount++;
+        changed = true;
+      }
+    }
+
+    // 최초 로그인 계정에 실제 드라이브 파일이 있었다면 기본 '시작 가이드' 제거
+    if (options.removeDefaultWelcomeIfImported && (importedCount > 0 || (scan.folders && scan.folders.length > 0))) {
+      state.fileSystem.children = (state.fileSystem.children || []).filter((c) => c.id !== 'welcome-folder');
+    }
+
+    if (changed) {
+      persistFS({ silent: true });
+      setSyncMeta({ updatedAt: Date.now(), hasUserEdits: true });
+      renderTree(state.fileSystem, elTreeRoot, true);
+      if (searchQuery) renderSearchResults(searchQuery);
+      else openFolder(state.currentFolder);
+      renderContextChips();
+      if (state.selectedItem && isItemVisible(state.selectedItem) && !isEditing) {
+        selectItem(state.selectedItem);
+      }
+    }
+
+    return { importedCount, updatedCount, changed };
+  }
+
+  // 실시간 .md / 텍스트 문서를 실제 파일로 Google Drive(SecondBrainOS/)에 저장
+  function isRealTimeDriveTextDoc(item) {
+    if (!item || item.type !== 'doc') return false;
+    if (item.driveFile && item.driveFile.id) return false;
+    if (item.link && LocalBridge.isLocalPath(item.link)) return false;
+    if (isBinaryFileName(item.name)) return false;
+    return true;
+  }
+
+  function getRelativeFolderPathForItem(itemId) {
+    const pathNodes = getPathToNode(itemId) || [];
+    // [root, ...folders, item] -> 중간 폴더 이름만 추출
+    if (pathNodes.length <= 2) return [];
+    return pathNodes.slice(1, -1).map((n) => n.name);
+  }
+
+  async function syncDocFileToDriveNow(item) {
+    if (!isRealTimeDriveTextDoc(item)) return;
+    if (!isOwnerAuthenticated()) return;
+    const token = BrainAuth.getDriveAccessToken();
+    if (!token) return;
+
+    const userEmail = BrainAuth.getUser()?.email || '';
+    const fileName = resolveVirtualFileName(item);
+    const folderPath = getRelativeFolderPathForItem(item.id);
+
+    try {
+      const saved = await BrainDrive.upsertTextFile(token, {
+        fileId: item.driveDocId || '',
+        name: fileName,
+        content: String(item.summary || ''),
+        folderPath,
+        userEmail
+      });
+      if (saved && saved.id) {
+        item.driveDocId = saved.id;
+        item.driveModifiedTime = saved.modifiedTime || new Date().toISOString();
+        persistFS({ silent: true });
+      }
+    } catch (err) {
+      handleDriveError(err);
+    }
+  }
+
+  function scheduleDocFileSyncToDrive(item, immediate = false) {
+    if (!isRealTimeDriveTextDoc(item)) return;
+    if (!isOwnerAuthenticated() || !BrainAuth.hasDriveAccess()) return;
+
+    const prevTimer = mdDriveSyncTimers.get(item.id);
+    if (prevTimer) {
+      clearTimeout(prevTimer);
+      mdDriveSyncTimers.delete(item.id);
+    }
+
+    if (immediate) {
+      syncDocFileToDriveNow(item);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      mdDriveSyncTimers.delete(item.id);
+      syncDocFileToDriveNow(item);
+    }, 1500);
+    mdDriveSyncTimers.set(item.id, timer);
   }
 
   function scheduleDriveSync() {
@@ -2621,6 +2911,7 @@
 
     let isDirty = false;
     let currentMode = initialMode;
+    let mdAutoSaveTimer = null;
 
     const updateStats = () => {
       const val = textarea.value || '';
@@ -2636,21 +2927,36 @@
 
     const setDirty = (dirty) => {
       isDirty = dirty;
-      saveIndicator.textContent = dirty ? '수정됨 *' : '저장됨';
+      saveIndicator.textContent = dirty ? '저장 중...' : '☁️ 저장됨';
       saveIndicator.classList.toggle('dirty', dirty);
     };
 
     const saveMdContent = (silent = false) => {
+      if (mdAutoSaveTimer) {
+        clearTimeout(mdAutoSaveTimer);
+        mdAutoSaveTimer = null;
+      }
       const val = textarea.value;
       if (val === (item.summary || '') && !isDirty) return;
       saveStateForUndo();
       item.summary = val;
       saveAndRender();
+      scheduleDocFileSyncToDrive(item, true);
       if (state.selectedItem && state.selectedItem.id === item.id && !isEditing) {
         selectItem(item);
       }
       setDirty(false);
-      if (!silent) showToast(`💾 "${item.name}" 저장되었습니다.`);
+      if (!silent) showToast(`💾 "${item.name}" 저장 및 Google Drive 동기화됨`);
+    };
+
+    const triggerRealtimeAutoSave = () => {
+      setDirty(true);
+      renderPreview();
+      if (mdAutoSaveTimer) clearTimeout(mdAutoSaveTimer);
+      mdAutoSaveTimer = setTimeout(() => {
+        mdAutoSaveTimer = null;
+        saveMdContent(true);
+      }, 1600);
     };
 
     const setMode = (mode) => {
@@ -2683,8 +2989,7 @@
       textarea.value = textarea.value.slice(0, start) + replacement + textarea.value.slice(end);
       textarea.focus();
       textarea.setSelectionRange(start + cursorOffset, start + cursorOffset);
-      setDirty(true);
-      renderPreview();
+      triggerRealtimeAutoSave();
     };
 
     // Init content
@@ -2700,8 +3005,7 @@
     });
 
     textarea.addEventListener('input', () => {
-      setDirty(true);
-      renderPreview();
+      triggerRealtimeAutoSave();
     });
 
     textarea.addEventListener('keydown', (e) => {

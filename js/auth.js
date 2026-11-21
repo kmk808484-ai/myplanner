@@ -2,10 +2,10 @@
   'use strict';
 
   const FIREBASE_SDK_VERSION = '10.14.1';
-  const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
-  const DRIVE_TOKEN_KEY = 'brainOS_drive_access_token';
-  const DRIVE_TOKEN_EXP_KEY = 'brainOS_drive_access_exp';
-  const DRIVE_TOKEN_EMAIL_KEY = 'brainOS_drive_access_email';
+  const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
+  const DRIVE_TOKEN_KEY = 'brainOS_drive_access_token_v2';
+  const DRIVE_TOKEN_EXP_KEY = 'brainOS_drive_access_exp_v2';
+  const DRIVE_TOKEN_EMAIL_KEY = 'brainOS_drive_access_email_v2';
   const DRIVE_TOKEN_TTL_MS = 55 * 60 * 1000; // Google OAuth access token ~60m
 
   let sdkLoadPromise = null;

@@ -9,6 +9,7 @@
   const MULTIPART_LIMIT_BYTES = 4.5 * 1024 * 1024; // 4.5MB (Google multipart limit is 5MB)
 
   let cachedFolders = null; // { email, rootFolderId, filesFolderId }
+  const folderPathCache = new Map(); // "email::a/b" -> folderId
   const blobUrlCache = new Map(); // fileId -> { url, mimeType, size }
 
   function createDriveError(message, status = 0, code = '') {
@@ -105,6 +106,40 @@
     return res.json();
   }
 
+  async function findRootAppFolder(accessToken) {
+    // 1. 정확히 SecondBrainOS 우선 검색
+    const exact = await findFileInFolder(
+      accessToken,
+      ROOT_FOLDER_NAME,
+      'root',
+      'application/vnd.google-apps.folder'
+    );
+    if (exact) return exact;
+
+    // 2. 사용자가 직접 만든 SecondBrain / secondbrain / Second Brain OS 폴더도 대소문자 구분 없이 탐색
+    const q = encodeURIComponent(
+      `'root' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`
+    );
+    const fields = encodeURIComponent('files(id,name,modifiedTime)');
+    const url = `${DRIVE_API}/files?q=${q}&fields=${fields}&pageSize=100&spaces=drive`;
+    const res = await driveFetch(url, accessToken, { method: 'GET' });
+    const data = await res.json();
+    const candidates = (data.files || []).filter((f) => {
+      const compact = String(f.name || '').toLowerCase().replace(/[\s_-]+/g, '');
+      return compact === 'secondbrainos' || compact === 'secondbrain';
+    });
+    if (candidates.length > 0) {
+      // SecondBrainOS가 있으면 최우선
+      candidates.sort((a, b) => {
+        const aExact = String(a.name || '').toLowerCase().replace(/[\s_-]+/g, '') === 'secondbrainos' ? 0 : 1;
+        const bExact = String(b.name || '').toLowerCase().replace(/[\s_-]+/g, '') === 'secondbrainos' ? 0 : 1;
+        return aExact - bExact;
+      });
+      return candidates[0];
+    }
+    return null;
+  }
+
   async function ensureAppFolders(accessToken, userEmail = '') {
     const normalizedEmail = String(userEmail || '').trim().toLowerCase();
     if (
@@ -116,12 +151,7 @@
       return cachedFolders;
     }
 
-    let rootFolder = await findFileInFolder(
-      accessToken,
-      ROOT_FOLDER_NAME,
-      'root',
-      'application/vnd.google-apps.folder'
-    );
+    let rootFolder = await findRootAppFolder(accessToken);
     if (!rootFolder) {
       rootFolder = await createFolder(accessToken, ROOT_FOLDER_NAME, 'root');
     }
@@ -144,8 +174,42 @@
     return cachedFolders;
   }
 
+  async function ensureFolderPath(accessToken, folderNames = [], userEmail = '') {
+    const folders = await ensureAppFolders(accessToken, userEmail);
+    const cleanSegments = (folderNames || [])
+      .map((s) => String(s || '').trim())
+      .filter((s) => Boolean(s));
+
+    if (cleanSegments.length === 0) return folders.rootFolderId;
+
+    const normalizedEmail = String(userEmail || '').trim().toLowerCase();
+    const cacheKey = `${normalizedEmail}::${cleanSegments.join('/')}`;
+    if (folderPathCache.has(cacheKey)) {
+      return folderPathCache.get(cacheKey);
+    }
+
+    let parentId = folders.rootFolderId;
+    let partial = '';
+    for (const seg of cleanSegments) {
+      partial = partial ? `${partial}/${seg}` : seg;
+      const pKey = `${normalizedEmail}::${partial}`;
+      if (folderPathCache.has(pKey)) {
+        parentId = folderPathCache.get(pKey);
+        continue;
+      }
+      let found = await findFileInFolder(accessToken, seg, parentId, 'application/vnd.google-apps.folder');
+      if (!found) {
+        found = await createFolder(accessToken, seg, parentId);
+      }
+      parentId = found.id;
+      folderPathCache.set(pKey, parentId);
+    }
+    return parentId;
+  }
+
   function clearCache() {
     cachedFolders = null;
+    folderPathCache.clear();
     for (const entry of blobUrlCache.values()) {
       try {
         URL.revokeObjectURL(entry.url);
@@ -435,16 +499,162 @@
     return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
   }
 
+  async function upsertTextFile(accessToken, { fileId = '', name, content = '', mimeType = '', folderPath = [], userEmail = '' }) {
+    const safeName = String(name || '새 메모.md').trim() || '새 메모.md';
+    const resolvedMime = mimeType || guessMimeType({ name: safeName });
+    const parentId = await ensureFolderPath(accessToken, folderPath, userEmail);
+    const blob = new Blob([String(content || '')], { type: `${resolvedMime}; charset=utf-8` });
+
+    let targetId = String(fileId || '').trim();
+    if (!targetId) {
+      const existing = await findFileInFolder(accessToken, safeName, parentId);
+      if (existing && existing.mimeType !== 'application/vnd.google-apps.folder') {
+        targetId = existing.id;
+      }
+    }
+
+    const fields = encodeURIComponent('id,name,mimeType,size,webViewLink,modifiedTime');
+
+    if (targetId) {
+      const boundary = `sb_txt_patch_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      const body = new Blob([
+        `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n`,
+        JSON.stringify({ name: safeName }),
+        `\r\n--${boundary}\r\nContent-Type: ${resolvedMime}; charset=UTF-8\r\n\r\n`,
+        blob,
+        `\r\n--${boundary}--`
+      ]);
+      try {
+        const res = await driveFetch(
+          `${UPLOAD_API}/files/${encodeURIComponent(targetId)}?uploadType=multipart&fields=${fields}`,
+          accessToken,
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+            body
+          }
+        );
+        return res.json();
+      } catch (err) {
+        if (err.status !== 404) throw err;
+        targetId = '';
+      }
+    }
+
+    const boundary = `sb_txt_new_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const body = new Blob([
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n`,
+      JSON.stringify({ name: safeName, parents: [parentId], mimeType: resolvedMime }),
+      `\r\n--${boundary}\r\nContent-Type: ${resolvedMime}; charset=UTF-8\r\n\r\n`,
+      blob,
+      `\r\n--${boundary}--`
+    ]);
+    const res = await driveFetch(
+      `${UPLOAD_API}/files?uploadType=multipart&fields=${fields}`,
+      accessToken,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+        body
+      }
+    );
+    return res.json();
+  }
+
+  async function renameFile(accessToken, fileId, newName) {
+    if (!fileId || !newName) return null;
+    const url = `${DRIVE_API}/files/${encodeURIComponent(fileId)}?fields=id,name,modifiedTime`;
+    const res = await driveFetch(url, accessToken, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+      body: JSON.stringify({ name: String(newName).trim() })
+    });
+    return res.json();
+  }
+
+  async function downloadTextFile(accessToken, fileId) {
+    const url = `${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media`;
+    const res = await driveFetch(url, accessToken, { method: 'GET' });
+    return res.text();
+  }
+
+  async function listChildrenInFolder(accessToken, folderId) {
+    const results = [];
+    let pageToken = '';
+    do {
+      const q = encodeURIComponent(`'${escapeDriveQueryValue(folderId)}' in parents and trashed = false`);
+      const fields = encodeURIComponent('nextPageToken,files(id,name,mimeType,size,modifiedTime,webViewLink)');
+      const url =
+        `${DRIVE_API}/files?q=${q}&fields=${fields}&pageSize=100&spaces=drive` +
+        (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '');
+      const res = await driveFetch(url, accessToken, { method: 'GET' });
+      const data = await res.json();
+      if (Array.isArray(data.files)) results.push(...data.files);
+      pageToken = data.nextPageToken || '';
+    } while (pageToken && results.length < 500);
+    return results;
+  }
+
+  async function scanAppFolder(accessToken, userEmail = '') {
+    const folders = await ensureAppFolders(accessToken, userEmail);
+    const foundFiles = [];
+    const foundFolderPaths = [];
+
+    async function walk(folderId, relPath, depth) {
+      if (depth > 5) return;
+      const children = await listChildrenInFolder(accessToken, folderId);
+      for (const child of children) {
+        if (child.mimeType === 'application/vnd.google-apps.folder') {
+          // 내부 업로드 전용 files 폴더는 하위 파일만 루트로 스캔 (폴더 자체는 가상 폴더로 중복 생성 안 함)
+          if (depth === 0 && child.id === folders.filesFolderId) {
+            await walk(child.id, relPath, depth + 1);
+          } else {
+            const nextPath = [...relPath, child.name];
+            foundFolderPaths.push(nextPath);
+            await walk(child.id, nextPath, depth + 1);
+          }
+          continue;
+        }
+        // DB 메타파일 자체는 스캔 목록에서 제외
+        if (depth === 0 && child.name === DB_FILE_NAME) continue;
+        // Google Workspace 네이티브 문서(shortcut 등) 제외
+        if (String(child.mimeType || '').startsWith('application/vnd.google-apps.')) continue;
+
+        foundFiles.push({
+          id: child.id,
+          name: child.name,
+          mimeType: child.mimeType || guessMimeType({ name: child.name }),
+          size: Number(child.size || 0),
+          modifiedTime: child.modifiedTime || '',
+          webViewLink: child.webViewLink || `https://drive.google.com/file/d/${child.id}/view`,
+          folderPath: relPath
+        });
+      }
+    }
+
+    await walk(folders.rootFolderId, [], 0);
+    return {
+      rootFolderId: folders.rootFolderId,
+      folders: foundFolderPaths,
+      files: foundFiles
+    };
+  }
+
   global.BrainDrive = {
     ROOT_FOLDER_NAME,
     FILES_FOLDER_NAME,
     DB_FILE_NAME,
     ensureAppFolders,
+    ensureFolderPath,
     clearCache,
     getRootFolderUrl,
     downloadDatabase,
     uploadDatabase,
     uploadFile,
+    upsertTextFile,
+    renameFile,
+    downloadTextFile,
+    scanAppFolder,
     getFileBlobUrl,
     getFileBase64,
     getPreviewEmbedUrl,
