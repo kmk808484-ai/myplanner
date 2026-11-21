@@ -1,0 +1,1 @@
+offchcp 65001  Second Brain OS - 로컬 실행 도우미powershell -STA -NoProfile -ExecutionPolicy Bypass -File "%~dp0local-bridge.ps1" -OpenBrowser
