@@ -272,6 +272,8 @@
           window.open(item.link, '_blank', 'noopener,noreferrer');
         } else if (item.link && LocalBridge.isLocalPath(item.link)) {
           launchLocalItem(item.link, 'open');
+        } else if (isHtmlContentItem(item)) {
+          runHtmlContent(item);
         } else {
           selectItem(item);
           toggleEditMode(true);
@@ -510,12 +512,16 @@
 
     const linkBadge = $('p-link-badge');
     const localActionRow = $('local-action-row');
+    const btnOpenLocal = $('btn-open-local');
+    const btnRevealLocal = $('btn-reveal-local');
     if (item.link && LocalBridge.isLocalPath(item.link)) {
       linkBadge.style.display = 'inline-block';
       linkBadge.href = '#';
       linkBadge.removeAttribute('target');
       linkBadge.dataset.localPath = item.link;
       linkBadge.textContent = `🖥️ ${item.link.length > 28 ? item.link.slice(0, 28) + '…' : item.link}`;
+      btnOpenLocal.textContent = '🚀 로컬에서 실행';
+      btnRevealLocal.style.display = '';
       localActionRow.style.display = 'flex';
     } else if (item.link) {
       linkBadge.style.display = 'inline-block';
@@ -524,6 +530,12 @@
       delete linkBadge.dataset.localPath;
       linkBadge.textContent = `🔗 ${item.link.length > 28 ? item.link.slice(0, 28) + '…' : item.link}`;
       localActionRow.style.display = 'none';
+    } else if (isHtmlContentItem(item)) {
+      linkBadge.style.display = 'none';
+      delete linkBadge.dataset.localPath;
+      btnOpenLocal.textContent = '🌐 HTML 바로 실행';
+      btnRevealLocal.style.display = 'none';
+      localActionRow.style.display = 'flex';
     } else {
       linkBadge.style.display = 'none';
       delete linkBadge.dataset.localPath;
@@ -679,6 +691,8 @@
         launchLocalItem(state.selectedItem.link, 'open');
       } else if (state.selectedItem && state.selectedItem.link && LocalBridge.isWebUrl(state.selectedItem.link)) {
         window.open(state.selectedItem.link, '_blank', 'noopener,noreferrer');
+      } else if (isHtmlContentItem(state.selectedItem)) {
+        runHtmlContent(state.selectedItem);
       } else {
         showToast('실행할 로컬 경로가 없습니다. 메모 수정에서 경로를 입력해 주세요.');
       }
@@ -1452,8 +1466,39 @@
     }
   });
 
+  function isHtmlContentItem(item) {
+    if (!item || item.type !== 'doc') return false;
+    const content = String(item.summary || '').trim();
+    if (!content) return false;
+    const isHtmlName = /\.html?$/i.test(String(item.name || '').trim());
+    const looksLikeHtml = /<!doctype\s+html|<html[\s>]/i.test(content);
+    return isHtmlName || looksLikeHtml;
+  }
+
+  function runHtmlContent(item) {
+    const content = String(item?.summary || '');
+    if (!content.trim()) {
+      showToast('실행할 HTML 내용이 비어 있습니다.');
+      return;
+    }
+    const blob = new Blob([content], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const win = window.open(url, '_blank');
+    if (!win) {
+      showToast('브라우저에서 팝업이 차단되었습니다. 팝업 허용 후 다시 시도해 주세요.');
+      URL.revokeObjectURL(url);
+      return;
+    }
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    showToast(`🌐 "${item.name}" HTML 실행됨`);
+  }
+
   $('btn-open-local').addEventListener('click', () => {
-    if (state.selectedItem?.link) launchLocalItem(state.selectedItem.link, 'open');
+    if (state.selectedItem?.link && LocalBridge.isLocalPath(state.selectedItem.link)) {
+      launchLocalItem(state.selectedItem.link, 'open');
+    } else if (isHtmlContentItem(state.selectedItem)) {
+      runHtmlContent(state.selectedItem);
+    }
   });
 
   $('btn-reveal-local').addEventListener('click', () => {
