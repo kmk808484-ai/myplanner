@@ -2,6 +2,12 @@
   'use strict';
 
   const FIREBASE_SDK_VERSION = '10.14.1';
+  const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+  const DRIVE_TOKEN_KEY = 'brainOS_drive_access_token';
+  const DRIVE_TOKEN_EXP_KEY = 'brainOS_drive_access_exp';
+  const DRIVE_TOKEN_EMAIL_KEY = 'brainOS_drive_access_email';
+  const DRIVE_TOKEN_TTL_MS = 55 * 60 * 1000; // Google OAuth access token ~60m
+
   let sdkLoadPromise = null;
   let firebaseApp = null;
   let firebaseAuth = null;
@@ -10,17 +16,62 @@
   let currentUser = null;
   let stateChangeCallback = null;
 
+  function saveDriveToken(token, email) {
+    try {
+      if (!token) return;
+      sessionStorage.setItem(DRIVE_TOKEN_KEY, token);
+      sessionStorage.setItem(DRIVE_TOKEN_EXP_KEY, String(Date.now() + DRIVE_TOKEN_TTL_MS));
+      sessionStorage.setItem(DRIVE_TOKEN_EMAIL_KEY, String(email || '').trim().toLowerCase());
+    } catch (_) {}
+  }
+
+  function clearDriveAccessToken() {
+    try {
+      sessionStorage.removeItem(DRIVE_TOKEN_KEY);
+      sessionStorage.removeItem(DRIVE_TOKEN_EXP_KEY);
+      sessionStorage.removeItem(DRIVE_TOKEN_EMAIL_KEY);
+    } catch (_) {}
+  }
+
+  function getDriveAccessToken() {
+    try {
+      const token = sessionStorage.getItem(DRIVE_TOKEN_KEY);
+      const exp = Number(sessionStorage.getItem(DRIVE_TOKEN_EXP_KEY) || 0);
+      const tokenEmail = String(sessionStorage.getItem(DRIVE_TOKEN_EMAIL_KEY) || '').trim().toLowerCase();
+      if (!token || !exp || Date.now() >= exp) {
+        clearDriveAccessToken();
+        return null;
+      }
+      const user = getUser();
+      if (!user || (tokenEmail && user.email !== tokenEmail)) {
+        clearDriveAccessToken();
+        return null;
+      }
+      return token;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function hasDriveAccess() {
+    return Boolean(getDriveAccessToken());
+  }
+
   function isFileProtocol() {
     return global.location && global.location.protocol === 'file:';
   }
 
   function normalizeConfig(cfg) {
     const c = cfg || {};
-    return {
+    const out = {
       apiKey: String(c.apiKey || '').trim(),
       authDomain: String(c.authDomain || '').trim(),
       projectId: String(c.projectId || '').trim()
     };
+    if (c.storageBucket) out.storageBucket = String(c.storageBucket).trim();
+    if (c.messagingSenderId) out.messagingSenderId = String(c.messagingSenderId).trim();
+    if (c.appId) out.appId = String(c.appId).trim();
+    return out;
   }
 
   function isConfigComplete(cfg) {
@@ -42,7 +93,10 @@
     const parsed = {
       apiKey: extract('apiKey'),
       authDomain: extract('authDomain'),
-      projectId: extract('projectId')
+      projectId: extract('projectId'),
+      storageBucket: extract('storageBucket'),
+      messagingSenderId: extract('messagingSenderId'),
+      appId: extract('appId')
     };
 
     if (!parsed.apiKey && !parsed.authDomain && !parsed.projectId) {
@@ -142,6 +196,9 @@
 
     unsubscribeAuth = firebaseAuth.onAuthStateChanged((fbUser) => {
       currentUser = formatFirebaseUser(fbUser);
+      if (!currentUser) {
+        clearDriveAccessToken();
+      }
       if (typeof stateChangeCallback === 'function') {
         stateChangeCallback(currentUser);
       }
@@ -150,7 +207,7 @@
     return true;
   }
 
-  async function signInWithGoogle(firebaseConfig) {
+  async function signInWithGoogle(firebaseConfig, options = {}) {
     if (isFileProtocol()) {
       throw new Error(
         'Firebase Google 로그인은 file://에서 동작하지 않습니다. local-bridge/로컬연결_실행.bat으로 http://localhost:4820을 열거나 GitHub Pages에서 접속해 주세요.'
@@ -165,11 +222,28 @@
     await init(cfg, stateChangeCallback);
 
     const provider = new global.firebase.auth.GoogleAuthProvider();
-    provider.setCustomParameters({ prompt: 'select_account' });
+    if (options.requestDrive !== false) {
+      provider.addScope(DRIVE_SCOPE);
+    }
+
+    const customParams = {};
+    if (options.loginHint) {
+      customParams.login_hint = options.loginHint;
+    } else {
+      customParams.prompt = options.prompt || 'select_account';
+    }
+    if (options.forceConsent) {
+      customParams.prompt = 'consent';
+    }
+    provider.setCustomParameters(customParams);
 
     try {
       const result = await firebaseAuth.signInWithPopup(provider);
       currentUser = formatFirebaseUser(result.user);
+      const accessToken = result?.credential?.accessToken || '';
+      if (accessToken && currentUser) {
+        saveDriveToken(accessToken, currentUser.email);
+      }
       return currentUser;
     } catch (err) {
       const code = err?.code || '';
@@ -196,8 +270,18 @@
     }
   }
 
+  async function reconnectDrive(firebaseConfig, forceConsent = false) {
+    const user = getUser();
+    return signInWithGoogle(firebaseConfig, {
+      requestDrive: true,
+      loginHint: user?.email || '',
+      forceConsent
+    });
+  }
+
   async function signOut() {
     currentUser = null;
+    clearDriveAccessToken();
     if (firebaseAuth) {
       try {
         await firebaseAuth.signOut();
@@ -233,14 +317,19 @@
   }
 
   global.BrainAuth = {
+    DRIVE_SCOPE,
     isFileProtocol,
     isConfigComplete,
     parseFirebaseConfigText,
     init,
     signInWithGoogle,
+    reconnectDrive,
     signOut,
     getUser,
     getToken,
+    getDriveAccessToken,
+    hasDriveAccess,
+    clearDriveAccessToken,
     isSignedIn,
     isOwner
   };

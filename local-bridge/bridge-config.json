@@ -1,7 +1,7 @@
 {
   "port": 4820,
-  "firebaseApiKey": "",
-  "firebaseAuthDomain": "",
-  "firebaseProjectId": "",
+  "firebaseApiKey": "AIzaSyCuCNfM7l1aInsq_KCFWKQmoyME2tJXCZU",
+  "firebaseAuthDomain": "gen-lang-client-0519883143.firebaseapp.com",
+  "firebaseProjectId": "gen-lang-client-0519883143",
   "allowedEmail": ""
 }

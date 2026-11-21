@@ -1,16 +1,26 @@
 (function () {
   'use strict';
 
-  const { state, genId, regenerateIds, persistFS, persistSettings, persistChat, saveStateForUndo, findNodeAndParent, isDescendant, getPathToNode, searchNodes, collectDocsInFolder, getTheme, setTheme } = window.BrainStore;
+  const { state, genId, regenerateIds, persistFS, persistSettings, persistChat, getSyncMeta, setSyncMeta, saveStateForUndo, findNodeAndParent, isDescendant, getPathToNode, searchNodes, collectDocsInFolder, getTheme, setTheme } = window.BrainStore;
   const { PROVIDERS, sendChat } = window.BrainAI;
   const { render: renderMarkdown, escapeHtml } = window.BrainMarkdown;
   const BrainAuth = window.BrainAuth;
+  const BrainDrive = window.BrainDrive;
   const LocalBridge = window.BrainLocalBridge;
 
   let isEditing = false;
   let isSendingChat = false;
   let isBridgeConnected = false;
   let searchQuery = '';
+
+  // Google Drive sync & file viewer state
+  let driveSyncTimer = null;
+  let isDriveSyncing = false;
+  let driveSyncStatus = 'disconnected'; // 'disconnected' | 'syncing' | 'synced' | 'expired' | 'error'
+  let hasSyncedDriveThisSession = false;
+  let previewRenderSeq = 0;
+  let activeViewerItem = null;
+  let activeViewerBlobUrl = '';
 
   // ================= DOM References =================
   const $ = (id) => document.getElementById(id);
@@ -134,12 +144,15 @@
   $('tab-chat').addEventListener('click', () => switchRightTab('chat'));
 
   // ================= File System Rendering =================
-  function saveAndRender() {
-    persistFS();
+  function saveAndRender(options = {}) {
+    persistFS(options);
     renderTree(state.fileSystem, elTreeRoot, true);
     if (searchQuery) renderSearchResults(searchQuery);
     else openFolder(state.currentFolder);
     renderContextChips();
+    if (!options.skipDriveSync) {
+      scheduleDriveSync();
+    }
   }
 
   function renderTree(node, container, isRoot = false) {
@@ -235,6 +248,7 @@
       card.className = 'item-card' + (state.selectedItem && state.selectedItem.id === item.id ? ' selected' : '');
       card.draggable = true;
       card.innerHTML =
+        (item.driveFile ? `<span class="item-cloud-badge" title="Google Drive 동기화 파일">☁️</span>` : '') +
         `<div class="item-icon">${escapeHtml(item.icon || (item.type === 'folder' ? '📁' : '📄'))}</div>` +
         `<div class="item-name">${escapeHtml(item.name)}</div>` +
         (item.tag ? `<div class="item-tag-mini">${escapeHtml(item.tag)}</div>` : '');
@@ -269,6 +283,9 @@
           clearSearch(false);
           openFolder(item);
           renderTree(state.fileSystem, elTreeRoot, true);
+        } else if (item.driveFile && item.driveFile.id) {
+          selectItem(item);
+          openDriveFileViewer(item);
         } else if (item.link && LocalBridge.isWebUrl(item.link)) {
           window.open(item.link, '_blank', 'noopener,noreferrer');
         } else if (item.link && LocalBridge.isLocalPath(item.link)) {
@@ -443,50 +460,129 @@
     elContentArea.classList.remove('drag-over');
   });
 
+  function getFileMetaByExt(fileName) {
+    const ext = String(fileName || '').includes('.') ? String(fileName).split('.').pop().toLowerCase() : '';
+    if (['md', 'txt'].includes(ext)) return { ext, icon: '📝', tag: '#Note' };
+    if (['html', 'htm'].includes(ext)) return { ext, icon: '🌐', tag: '#HTML' };
+    if (['js', 'ts', 'py', 'css', 'json', 'xml', 'yml', 'yaml', 'c', 'cpp', 'java'].includes(ext)) return { ext, icon: '💻', tag: '#Code' };
+    if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) return { ext, icon: '🖼️', tag: '#Image' };
+    if (ext === 'pdf') return { ext, icon: '📕', tag: '#PDF' };
+    if (['ppt', 'pptx', 'key', 'odp'].includes(ext)) return { ext, icon: '📙', tag: '#PPT' };
+    if (['doc', 'docx', 'hwp', 'hwpx', 'odt'].includes(ext)) return { ext, icon: '📘', tag: '#Word' };
+    if (['xls', 'xlsx', 'csv', 'ods'].includes(ext)) return { ext, icon: '📊', tag: '#Excel' };
+    if (['mp4', 'mov', 'webm', 'mkv', 'avi'].includes(ext)) return { ext, icon: '🎬', tag: '#Video' };
+    if (['mp3', 'wav', 'ogg', 'm4a'].includes(ext)) return { ext, icon: '🎵', tag: '#Audio' };
+    if (['zip', '7z', 'rar', 'tar', 'gz'].includes(ext)) return { ext, icon: '🗜️', tag: '#Archive' };
+    return { ext, icon: '📄', tag: '#File' };
+  }
+
+  function readFileAsTextAsync(file) {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => resolve('');
+      reader.readAsText(file, 'utf-8');
+    });
+  }
+
+  async function handleIncomingFiles(fileList) {
+    const files = Array.from(fileList || []);
+    if (files.length === 0) return;
+
+    const textReadable = ['md', 'txt', 'json', 'csv', 'js', 'ts', 'py', 'html', 'htm', 'css', 'xml', 'yml', 'yaml'];
+    const binaryFiles = files.filter((f) => {
+      const { ext } = getFileMetaByExt(f.name);
+      return !(textReadable.includes(ext) && f.size <= 500 * 1024);
+    });
+
+    // 이미지/PDF/PPT 등 바이너리 파일이 있으면 Google Drive 토큰 확보
+    let driveToken = BrainAuth.getDriveAccessToken();
+    if (binaryFiles.length > 0 && (!driveToken || !isOwnerAuthenticated())) {
+      if (!BrainAuth.isConfigComplete(state.settings.firebaseConfig)) {
+        showToast('☁️ 이미지·PDF·PPT 파일 저장은 Google 로그인(Firebase 설정) 후 이용할 수 있습니다.');
+        openAuthModal();
+        return;
+      }
+      try {
+        showToast('☁️ 파일 업로드를 위해 Google Drive 연결을 확인합니다...');
+        driveToken = await ensureDriveToken(true);
+      } catch (err) {
+        showToast(`⚠️ ${err.message}`);
+        openAuthModal();
+        return;
+      }
+      if (!driveToken) {
+        showToast('☁️ Google Drive 연결 후 파일을 업로드해 주세요.');
+        openAuthModal();
+        return;
+      }
+    }
+
+    saveStateForUndo();
+    const userEmail = BrainAuth.getUser()?.email || '';
+    let addedCount = 0;
+    let lastAdded = null;
+
+    for (const file of files) {
+      const { ext, icon, tag } = getFileMetaByExt(file.name);
+      const isInlineText = textReadable.includes(ext) && file.size <= 500 * 1024;
+
+      if (isInlineText) {
+        const contentText = await readFileAsTextAsync(file);
+        const newItem = {
+          id: genId(),
+          type: 'doc',
+          name: file.name,
+          icon,
+          tag,
+          summary: contentText || '',
+          link: ''
+        };
+        if (!state.currentFolder.children) state.currentFolder.children = [];
+        state.currentFolder.children.push(newItem);
+        lastAdded = newItem;
+        addedCount++;
+      } else {
+        showToast(`☁️ "${file.name}" Google Drive 업로드 중...`);
+        try {
+          const uploaded = await BrainDrive.uploadFile(driveToken, file, userEmail);
+          const newItem = {
+            id: genId(),
+            type: 'doc',
+            name: file.name,
+            icon,
+            tag,
+            summary: '',
+            link: '',
+            driveFile: uploaded
+          };
+          if (!state.currentFolder.children) state.currentFolder.children = [];
+          state.currentFolder.children.push(newItem);
+          lastAdded = newItem;
+          addedCount++;
+        } catch (err) {
+          handleDriveError(err);
+          showToast(`⚠️ "${file.name}" 업로드 실패: ${err.message}`);
+        }
+      }
+    }
+
+    if (addedCount > 0) {
+      saveAndRender();
+      if (lastAdded) selectItem(lastAdded);
+      showToast(
+        addedCount === 1
+          ? `✅ "${lastAdded.name}" 파일이 추가되었습니다.`
+          : `✅ 파일 ${addedCount}개가 추가되었습니다.`
+      );
+    }
+  }
+
   elContentArea.addEventListener('drop', (e) => {
     e.preventDefault();
     elContentArea.classList.remove('drag-over');
     if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
-
-    saveStateForUndo();
-    const file = e.dataTransfer.files[0];
-    const fileName = file.name;
-    const ext = fileName.split('.').pop().toLowerCase();
-
-    let fileIcon = '📄';
-    let fileTag = '#Doc';
-    if (['md', 'txt'].includes(ext)) { fileIcon = '📝'; fileTag = '#Note'; }
-    else if (['html', 'htm', 'js', 'ts', 'py', 'css', 'json'].includes(ext)) { fileIcon = '💻'; fileTag = '#Code'; }
-    else if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext)) { fileIcon = '🖼️'; fileTag = '#Image'; }
-    else if (ext === 'pdf') { fileIcon = '📕'; fileTag = '#Book'; }
-
-    const textReadable = ['md', 'txt', 'json', 'csv', 'js', 'ts', 'py', 'html', 'htm', 'css', 'xml', 'yml', 'yaml'];
-
-    const createDroppedItem = (contentText) => {
-      const newItem = {
-        id: genId(),
-        type: 'doc',
-        name: fileName,
-        icon: fileIcon,
-        tag: fileTag,
-        summary: contentText || '',
-        link: ''
-      };
-      if (!state.currentFolder.children) state.currentFolder.children = [];
-      state.currentFolder.children.push(newItem);
-      saveAndRender();
-      selectItem(newItem);
-      showToast(`"${fileName}" 파일이 추가되었습니다.`);
-    };
-
-    if (textReadable.includes(ext) && file.size <= 500 * 1024) {
-      const reader = new FileReader();
-      reader.onload = () => createDroppedItem(String(reader.result || ''));
-      reader.onerror = () => createDroppedItem('');
-      reader.readAsText(file, 'utf-8');
-    } else {
-      createDroppedItem('');
-    }
+    handleIncomingFiles(e.dataTransfer.files);
   });
 
   // ================= Detail Preview & Edit =================
@@ -495,6 +591,113 @@
     isEditing = false;
     elDetailState.style.display = 'none';
     elEmptyState.style.display = 'flex';
+  }
+
+  function getDriveOpenButtonLabel(driveFile) {
+    const cat = BrainDrive.getFileCategory(driveFile);
+    if (cat === 'image') return '🖼️ 크게 보기';
+    if (cat === 'pdf') return '📕 PDF 바로 열기';
+    if (cat === 'ppt') return '📙 슬라이드 바로 열기';
+    if (cat === 'word') return '📘 문서 바로 열기';
+    if (cat === 'excel') return '📊 시트 바로 열기';
+    if (cat === 'video' || cat === 'audio') return '▶️ 바로 재생';
+    return '👁️ 바로 열기';
+  }
+
+  function getDriveCategoryDesc(driveFile) {
+    const cat = BrainDrive.getFileCategory(driveFile);
+    const sizeText = BrainDrive.formatFileSize(driveFile.size);
+    const labelMap = {
+      image: '이미지 파일',
+      pdf: 'PDF 문서',
+      ppt: 'PowerPoint 프레젠테이션',
+      word: 'Word 문서',
+      excel: 'Excel 스프레드시트',
+      video: '동영상 파일',
+      audio: '오디오 파일',
+      other: 'Google Drive 파일'
+    };
+    return [labelMap[cat] || 'Google Drive 파일', sizeText].filter(Boolean).join(' · ');
+  }
+
+  async function renderDrivePreviewBox(item, seq) {
+    const box = $('drive-preview-box');
+    if (!box) return;
+
+    const df = item?.driveFile;
+    if (!df || !df.id) {
+      box.style.display = 'none';
+      box.innerHTML = '';
+      return;
+    }
+
+    const cat = BrainDrive.getFileCategory(df);
+    const desc = getDriveCategoryDesc(df);
+    box.style.display = 'block';
+
+    // Office(PPT/Word/Excel)나 기타 파일은 즉시 클릭 가능한 카드 표시
+    if (!['image', 'pdf', 'video', 'audio'].includes(cat)) {
+      box.innerHTML =
+        `<div class="drive-preview-file-card" title="클릭하여 바로 열기">` +
+        `  <div class="drive-preview-file-icon">${escapeHtml(item.icon || '📄')}</div>` +
+        `  <div class="drive-preview-file-info">` +
+        `    <div class="drive-preview-file-name">${escapeHtml(df.name || item.name)}</div>` +
+        `    <div class="drive-preview-file-sub">${escapeHtml(desc)} · 클릭하여 바로 열기</div>` +
+        `  </div>` +
+        `</div>`;
+      box.querySelector('.drive-preview-file-card').addEventListener('click', () => openDriveFileViewer(item));
+      return;
+    }
+
+    // 이미지 / PDF / 미디어: 토큰 있으면 인증된 Blob URL로 즉시 미리보기
+    const token = BrainAuth.getDriveAccessToken();
+    if (!token) {
+      box.innerHTML =
+        `<div class="drive-preview-file-card" title="클릭하여 Google Drive 연결 후 보기">` +
+        `  <div class="drive-preview-file-icon">${escapeHtml(item.icon || '📄')}</div>` +
+        `  <div class="drive-preview-file-info">` +
+        `    <div class="drive-preview-file-name">${escapeHtml(df.name || item.name)}</div>` +
+        `    <div class="drive-preview-file-sub">🔑 Google Drive 연결 후 바로 미리보기 가능 (${escapeHtml(desc)})</div>` +
+        `  </div>` +
+        `</div>`;
+      box.querySelector('.drive-preview-file-card').addEventListener('click', () => openDriveFileViewer(item));
+      return;
+    }
+
+    box.innerHTML = `<div class="drive-preview-loading">☁️ Google Drive에서 미리보기 불러오는 중...</div>`;
+    try {
+      const entry = await BrainDrive.getFileBlobUrl(token, df.id, df.mimeType);
+      if (seq !== previewRenderSeq) return; // 다른 메모로 이동함
+
+      if (cat === 'image') {
+        box.innerHTML = `<div class="drive-preview-img-wrap" title="클릭하여 크게 보기"><img alt=""></div>`;
+        const img = box.querySelector('img');
+        img.src = entry.url;
+        img.alt = df.name || item.name;
+        box.querySelector('.drive-preview-img-wrap').addEventListener('click', () => openDriveFileViewer(item));
+      } else if (cat === 'pdf') {
+        box.innerHTML = `<div class="drive-preview-pdf-wrap"><iframe title="PDF 미리보기"></iframe></div>`;
+        box.querySelector('iframe').src = entry.url;
+      } else if (cat === 'video') {
+        box.innerHTML = `<div class="drive-preview-media-wrap"><video controls preload="metadata"></video></div>`;
+        box.querySelector('video').src = entry.url;
+      } else if (cat === 'audio') {
+        box.innerHTML = `<div class="drive-preview-media-wrap"><audio controls preload="metadata"></audio></div>`;
+        box.querySelector('audio').src = entry.url;
+      }
+    } catch (err) {
+      if (seq !== previewRenderSeq) return;
+      handleDriveError(err);
+      box.innerHTML =
+        `<div class="drive-preview-file-card" title="클릭하여 다시 시도">` +
+        `  <div class="drive-preview-file-icon">${escapeHtml(item.icon || '📄')}</div>` +
+        `  <div class="drive-preview-file-info">` +
+        `    <div class="drive-preview-file-name">${escapeHtml(df.name || item.name)}</div>` +
+        `    <div class="drive-preview-file-sub">⚠️ 미리보기 로드 실패 — 클릭하여 재연결/열기</div>` +
+        `  </div>` +
+        `</div>`;
+      box.querySelector('.drive-preview-file-card').addEventListener('click', () => openDriveFileViewer(item));
+    }
   }
 
   function selectItem(item) {
@@ -515,8 +718,25 @@
 
     const linkBadge = $('p-link-badge');
     const localActionRow = $('local-action-row');
+    const driveActionRow = $('drive-action-row');
     const btnOpenLocal = $('btn-open-local');
     const btnRevealLocal = $('btn-reveal-local');
+
+    previewRenderSeq++;
+    const hasDriveFile = Boolean(item.driveFile && item.driveFile.id);
+    if (hasDriveFile) {
+      driveActionRow.style.display = 'flex';
+      $('btn-drive-open').textContent = getDriveOpenButtonLabel(item.driveFile);
+      renderDrivePreviewBox(item, previewRenderSeq);
+    } else {
+      driveActionRow.style.display = 'none';
+      const box = $('drive-preview-box');
+      if (box) {
+        box.style.display = 'none';
+        box.innerHTML = '';
+      }
+    }
+
     if (item.link && LocalBridge.isLocalPath(item.link)) {
       linkBadge.style.display = 'inline-block';
       linkBadge.href = '#';
@@ -533,6 +753,10 @@
       linkBadge.setAttribute('target', '_blank');
       delete linkBadge.dataset.localPath;
       linkBadge.textContent = `🔗 ${item.link.length > 28 ? item.link.slice(0, 28) + '…' : item.link}`;
+      localActionRow.style.display = 'none';
+    } else if (hasDriveFile) {
+      linkBadge.style.display = 'none';
+      delete linkBadge.dataset.localPath;
       localActionRow.style.display = 'none';
     } else if (item.type === 'doc' && isHtmlContentItem(item)) {
       linkBadge.style.display = 'none';
@@ -697,8 +921,11 @@
     elContextMenu.style.display = 'none';
     if (action === 'new-folder') createNew('folder');
     else if (action === 'new-doc') createNew('doc');
+    else if (action === 'upload-file') $('file-upload-input').click();
     else if (action === 'open-local') {
-      if (state.selectedItem && state.selectedItem.link && LocalBridge.isLocalPath(state.selectedItem.link)) {
+      if (state.selectedItem && state.selectedItem.driveFile && state.selectedItem.driveFile.id) {
+        openDriveFileViewer(state.selectedItem);
+      } else if (state.selectedItem && state.selectedItem.link && LocalBridge.isLocalPath(state.selectedItem.link)) {
         launchLocalItem(state.selectedItem.link, 'open');
       } else if (state.selectedItem && state.selectedItem.link && LocalBridge.isWebUrl(state.selectedItem.link)) {
         window.open(state.selectedItem.link, '_blank', 'noopener,noreferrer');
@@ -728,10 +955,21 @@
   $('btn-new-folder').addEventListener('click', () => createNew('folder'));
   $('btn-quick-folder').addEventListener('click', () => createNew('folder'));
   $('btn-new-doc').addEventListener('click', () => createNew('doc'));
+  $('btn-upload-file').addEventListener('click', () => $('file-upload-input').click());
+  $('file-upload-input').addEventListener('change', (e) => {
+    if (e.target.files && e.target.files.length > 0) {
+      handleIncomingFiles(e.target.files);
+    }
+    e.target.value = '';
+  });
   $('btn-undo').addEventListener('click', execUndo);
 
   // ================= Keyboard Shortcuts =================
   document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && $('viewer-modal').style.display === 'flex') {
+      closeDriveFileViewer();
+      return;
+    }
     const isInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName);
 
     // Ctrl+K: 검색 포커스
@@ -890,6 +1128,7 @@
     if (state.chatHistory.length > 0 && !confirm('현재 대화 기록을 초기화할까요?')) return;
     state.chatHistory = [];
     persistChat();
+    scheduleDriveSync();
     renderChatMessages();
     showToast('새 대화를 시작했습니다.');
   });
@@ -1039,6 +1278,7 @@
       isSendingChat = false;
       elBtnSendChat.disabled = false;
       persistChat();
+      scheduleDriveSync();
       renderChatMessages();
     }
   }
@@ -1234,6 +1474,7 @@
   function renderAuthModalContent() {
     const user = BrainAuth.getUser();
     const unlocked = isOwnerAuthenticated();
+    const hasDrive = BrainAuth.hasDriveAccess();
     const ownerEmail = (state.settings.ownerEmail || '').trim();
     const hasConfig = BrainAuth.isConfigComplete(state.settings.firebaseConfig);
     const isFile = BrainAuth.isFileProtocol();
@@ -1242,6 +1483,7 @@
     const subEl = $('auth-status-sub');
     const btnSignIn = $('btn-firebase-google-login');
     const btnSignOut = $('btn-google-signout');
+    const driveActions = $('auth-drive-actions');
     const fileWarn = $('auth-file-warning');
 
     card.classList.remove('unlocked', 'denied');
@@ -1250,8 +1492,12 @@
     if (unlocked && user) {
       card.classList.add('unlocked');
       titleEl.textContent = `🔓 본인 인증 완료 (${user.email})`;
-      subEl.textContent = '저장한 로컬 항목을 보고 Windows 연결 프로그램으로 실행할 수 있습니다. (브라우저를 닫으면 자동으로 다시 잠깁니다.)';
-      btnSignIn.style.display = 'none';
+      subEl.textContent = hasDrive
+        ? 'Google Drive(내 드라이브 / SecondBrainOS 폴더)에 메모·HTML·MD·이미지·PDF·PPT가 자동 동기화됩니다.'
+        : '로그인되어 있으나 Google Drive 토큰이 만료/미연결 상태입니다. 아래 [지금 동기화] 또는 다시 로그인을 눌러 연결하세요.';
+      btnSignIn.style.display = hasDrive ? 'none' : (isFile ? 'none' : 'flex');
+      btnSignIn.disabled = !hasConfig;
+      if (driveActions) driveActions.style.display = 'flex';
       btnSignOut.style.display = 'block';
     } else if (user) {
       card.classList.add('denied');
@@ -1261,16 +1507,18 @@
         : '아래에 허용할 내 구글 이메일을 입력하고 저장해 주세요.';
       btnSignIn.style.display = isFile ? 'none' : 'flex';
       btnSignIn.disabled = !hasConfig;
+      if (driveActions) driveActions.style.display = 'none';
       btnSignOut.style.display = 'block';
     } else {
-      titleEl.textContent = '🔒 잠김 상태 (로컬 항목 숨김)';
+      titleEl.textContent = '🔒 잠김 상태 (드라이브 미연결)';
       subEl.textContent = hasConfig
         ? (ownerEmail
-          ? `허용된 계정(${ownerEmail})으로 Firebase Google 로그인하면 저장한 로컬 파일과 실행 기능이 열립니다.`
+          ? `허용된 계정(${ownerEmail})으로 Google 로그인하면 내 드라이브(SecondBrainOS 폴더)와 자동 동기화됩니다.`
           : '아래에 허용할 내 구글 이메일을 입력한 뒤 Google 로그인을 눌러 주세요.')
         : '아래에 Firebase 설정(firebaseConfig)과 내 구글 이메일을 입력한 뒤 로그인해 주세요.';
       btnSignIn.style.display = isFile ? 'none' : 'flex';
       btnSignIn.disabled = !hasConfig;
+      if (driveActions) driveActions.style.display = 'none';
       btnSignOut.style.display = 'none';
     }
   }
@@ -1280,12 +1528,17 @@
     if (elAuthModal.style.display === 'flex') {
       renderAuthModalContent();
     }
+    if (isOwnerAuthenticated() && BrainAuth.hasDriveAccess() && !hasSyncedDriveThisSession) {
+      syncWithDrive({ mode: 'initial', interactive: false, showSuccessToast: true });
+    }
   }
 
   function onAuthStateChanged() {
     updateAuthButtonUI();
+    updateDriveStatusUI();
 
     if (!isOwnerAuthenticated()) {
+      hasSyncedDriveThisSession = false;
       if (state.selectedItem && !isItemVisible(state.selectedItem)) {
         clearSelectionView();
       }
@@ -1326,6 +1579,10 @@
     }
     state.settings.ownerEmail = $('auth-owner-email').value.trim().toLowerCase();
     state.settings.firebaseConfig = {
+      ...(state.settings.firebaseConfig || {}),
+      ...(pasted && pasted.storageBucket ? { storageBucket: pasted.storageBucket } : {}),
+      ...(pasted && pasted.messagingSenderId ? { messagingSenderId: pasted.messagingSenderId } : {}),
+      ...(pasted && pasted.appId ? { appId: pasted.appId } : {}),
       apiKey: $('auth-fb-apikey').value.trim(),
       authDomain: $('auth-fb-authdomain').value.trim(),
       projectId: $('auth-fb-projectid').value.trim()
@@ -1366,7 +1623,8 @@
         onAuthStateChanged();
         if (isOwnerAuthenticated()) {
           closeAuthModal();
-          showToast(`🔓 ${user.email} 로그인 완료! 저장된 로컬 항목이 열렸습니다.`);
+          showToast(`🔓 ${user.email} 로그인 완료! Google Drive 동기화를 시작합니다...`);
+          syncWithDrive({ mode: 'initial', interactive: false, showSuccessToast: true });
         } else {
           renderAuthModalContent();
           showToast(`🚫 허용된 계정(${state.settings.ownerEmail})이 아닙니다. 로컬 항목은 잠금 유지됩니다.`);
@@ -1381,10 +1639,17 @@
   });
 
   $('btn-google-signout').addEventListener('click', async () => {
+    if (driveSyncTimer) {
+      clearTimeout(driveSyncTimer);
+      driveSyncTimer = null;
+    }
+    hasSyncedDriveThisSession = false;
+    BrainDrive.clearCache();
     await BrainAuth.signOut();
+    driveSyncStatus = 'disconnected';
     onAuthStateChanged();
     renderAuthModalContent();
-    showToast('🔒 로그아웃되었습니다. 저장된 로컬 항목이 다시 숨겨졌습니다.');
+    showToast('🔒 로그아웃되었습니다. Google Drive 연결과 로컬 잠금이 해제되었습니다.');
   });
 
   $('btn-save-auth-config').addEventListener('click', async () => {
@@ -1623,8 +1888,461 @@
     }
   });
 
+  // ================= Google Drive Sync & File Viewer =================
+  function updateDriveStatusUI(customLabel = '') {
+    const btn = $('btn-drive-sync');
+    const dot = $('drive-status-dot');
+    const text = $('drive-status-text');
+    if (!btn || !dot || !text) return;
+
+    dot.classList.remove('synced', 'syncing', 'error');
+    const unlocked = isOwnerAuthenticated();
+    const hasToken = BrainAuth.hasDriveAccess();
+
+    if (isDriveSyncing || driveSyncStatus === 'syncing') {
+      dot.classList.add('syncing');
+      text.textContent = customLabel || '동기화 중...';
+      btn.title = 'Google Drive (SecondBrainOS) 동기화 진행 중...';
+      return;
+    }
+
+    if (!unlocked) {
+      text.textContent = customLabel || '드라이브 미연결';
+      btn.title = 'Google 로그인 후 내 드라이브(SecondBrainOS 폴더)에 자동 동기화됩니다.';
+      return;
+    }
+
+    if (!hasToken || driveSyncStatus === 'expired') {
+      dot.classList.add('error');
+      text.textContent = customLabel || '드라이브 재연결';
+      btn.title = 'Google Drive 토큰이 만료되었거나 연결되지 않았습니다. 클릭하여 재연결하세요.';
+      return;
+    }
+
+    if (driveSyncStatus === 'error') {
+      dot.classList.add('error');
+      text.textContent = customLabel || '동기화 오류';
+      btn.title = '동기화 중 오류가 발생했습니다. 클릭하여 다시 시도하세요.';
+      return;
+    }
+
+    dot.classList.add('synced');
+    const meta = getSyncMeta();
+    const timeStr = meta.lastSyncedAt
+      ? new Date(meta.lastSyncedAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })
+      : '';
+    text.textContent = customLabel || '드라이브 연결됨';
+    btn.title = timeStr
+      ? `내 드라이브 / SecondBrainOS 동기화됨 (${timeStr}) — 클릭하여 수동 동기화`
+      : '내 드라이브 / SecondBrainOS 연결됨 — 클릭하여 수동 동기화';
+  }
+
+  function handleDriveError(err) {
+    if (!err) return;
+    if (
+      err.code === 'AUTH_EXPIRED' ||
+      err.code === 'INSUFFICIENT_SCOPE' ||
+      err.code === 'NO_TOKEN' ||
+      err.status === 401
+    ) {
+      BrainAuth.clearDriveAccessToken();
+      driveSyncStatus = 'expired';
+    } else {
+      driveSyncStatus = 'error';
+    }
+    updateDriveStatusUI();
+    if (elAuthModal.style.display === 'flex') {
+      renderAuthModalContent();
+    }
+  }
+
+  async function ensureDriveToken(interactive = false) {
+    let token = BrainAuth.getDriveAccessToken();
+    if (token && isOwnerAuthenticated()) return token;
+    if (!interactive) return null;
+
+    const user = await BrainAuth.reconnectDrive(state.settings.firebaseConfig);
+    if (user && !state.settings.ownerEmail) {
+      state.settings.ownerEmail = user.email;
+      persistSettings();
+    }
+    onAuthStateChanged();
+    if (!isOwnerAuthenticated()) {
+      throw new Error(`허용된 계정(${state.settings.ownerEmail})으로 로그인해 주세요.`);
+    }
+    token = BrainAuth.getDriveAccessToken();
+    if (!token) {
+      throw new Error('Google Drive 접근 토큰을 받지 못했습니다. 로그인 시 드라이브 권한을 허용해 주세요.');
+    }
+    return token;
+  }
+
+  function buildCloudPayload() {
+    const meta = getSyncMeta();
+    return {
+      version: '7.0',
+      updatedAt: meta.updatedAt || Date.now(),
+      fileSystem: state.fileSystem,
+      chatHistory: state.chatHistory
+    };
+  }
+
+  function applyCloudPayload(data, driveFileId) {
+    if (!data || !data.fileSystem || !data.fileSystem.id) return false;
+    const prevFolderId = state.currentFolder?.id;
+    const prevSelectedId = state.selectedItem?.id;
+
+    state.fileSystem = data.fileSystem;
+    const foundFolder = prevFolderId ? findNodeAndParent(prevFolderId) : null;
+    state.currentFolder = foundFolder && foundFolder.node.type === 'folder' ? foundFolder.node : state.fileSystem;
+
+    const foundSelected = prevSelectedId ? findNodeAndParent(prevSelectedId) : null;
+    state.selectedItem = foundSelected ? foundSelected.node : null;
+
+    if (Array.isArray(data.chatHistory)) {
+      state.chatHistory = data.chatHistory;
+      persistChat({ silent: true });
+      renderChatMessages();
+    }
+
+    persistFS({ silent: true });
+    setSyncMeta({
+      updatedAt: Number(data.updatedAt) || Date.now(),
+      lastSyncedAt: Date.now(),
+      driveDbFileId: driveFileId || '',
+      hasUserEdits: true
+    });
+
+    renderTree(state.fileSystem, elTreeRoot, true);
+    if (searchQuery) renderSearchResults(searchQuery);
+    else openFolder(state.currentFolder);
+    renderContextChips();
+    updateLocalLockBanner();
+
+    if (state.selectedItem && isItemVisible(state.selectedItem)) {
+      selectItem(state.selectedItem);
+    } else {
+      clearSelectionView();
+    }
+    return true;
+  }
+
+  async function syncWithDrive({ mode = 'manual', interactive = false, showSuccessToast = false } = {}) {
+    if (isDriveSyncing) return false;
+    if (!isOwnerAuthenticated() && !interactive) {
+      updateDriveStatusUI();
+      return false;
+    }
+
+    let token;
+    try {
+      token = await ensureDriveToken(interactive);
+    } catch (err) {
+      handleDriveError(err);
+      if (interactive || showSuccessToast) showToast(`⚠️ ${err.message}`);
+      return false;
+    }
+
+    if (!token) {
+      driveSyncStatus = 'expired';
+      updateDriveStatusUI();
+      return false;
+    }
+
+    const userEmail = BrainAuth.getUser()?.email || '';
+    const localMeta = getSyncMeta();
+
+    isDriveSyncing = true;
+    driveSyncStatus = 'syncing';
+    updateDriveStatusUI();
+
+    try {
+      if (mode === 'push') {
+        const payload = buildCloudPayload();
+        const uploaded = await BrainDrive.uploadDatabase(token, payload, localMeta.driveDbFileId, userEmail);
+        setSyncMeta({
+          updatedAt: payload.updatedAt,
+          lastSyncedAt: Date.now(),
+          driveDbFileId: uploaded.fileId,
+          hasUserEdits: true
+        });
+        hasSyncedDriveThisSession = true;
+        driveSyncStatus = 'synced';
+        if (showSuccessToast) showToast('☁️ Google Drive(SecondBrainOS)에 저장되었습니다.');
+        return true;
+      }
+
+      // 'initial' 또는 'manual': 클라우드 최신본 먼저 확인 후 병합/업로드
+      const cloud = await BrainDrive.downloadDatabase(token, userEmail);
+      if (cloud.exists && cloud.data && cloud.data.fileSystem) {
+        const cloudUpdatedAt =
+          Number(cloud.data.updatedAt) ||
+          (cloud.modifiedTime ? Date.parse(cloud.modifiedTime) : 0) ||
+          0;
+        const localUpdatedAt = Number(localMeta.updatedAt) || 0;
+
+        if (!localMeta.hasUserEdits || cloudUpdatedAt > localUpdatedAt) {
+          applyCloudPayload(cloud.data, cloud.fileId);
+          hasSyncedDriveThisSession = true;
+          driveSyncStatus = 'synced';
+          showToast('☁️ Google Drive(SecondBrainOS)에서 최신 데이터를 불러왔습니다.');
+          return true;
+        }
+
+        if (cloudUpdatedAt === localUpdatedAt && localMeta.lastSyncedAt > 0) {
+          setSyncMeta({ lastSyncedAt: Date.now(), driveDbFileId: cloud.fileId });
+          hasSyncedDriveThisSession = true;
+          driveSyncStatus = 'synced';
+          if (showSuccessToast) showToast('☁️ Google Drive와 이미 최신 상태입니다.');
+          return true;
+        }
+
+        // 로컬이 더 최신인 경우: 최초 연결 충돌이면 사용자 확인
+        if (mode === 'initial' && localMeta.lastSyncedAt === 0 && localMeta.hasUserEdits) {
+          const loadCloud = confirm(
+            'Google Drive(SecondBrainOS 폴더)에 저장된 백업이 있습니다.\n\n' +
+            '[확인] Google Drive 데이터 불러오기 (권장)\n' +
+            '[취소] 현재 PC 데이터로 Google Drive 덮어쓰기'
+          );
+          if (loadCloud) {
+            applyCloudPayload(cloud.data, cloud.fileId);
+            hasSyncedDriveThisSession = true;
+            driveSyncStatus = 'synced';
+            showToast('☁️ Google Drive에서 데이터를 불러왔습니다.');
+            return true;
+          }
+        }
+
+        const payload = buildCloudPayload();
+        const uploaded = await BrainDrive.uploadDatabase(token, payload, cloud.fileId, userEmail);
+        setSyncMeta({
+          updatedAt: payload.updatedAt,
+          lastSyncedAt: Date.now(),
+          driveDbFileId: uploaded.fileId,
+          hasUserEdits: true
+        });
+        hasSyncedDriveThisSession = true;
+        driveSyncStatus = 'synced';
+        if (showSuccessToast) showToast('☁️ 현재 데이터를 Google Drive(SecondBrainOS)에 반영했습니다.');
+        return true;
+      }
+
+      // 클라우드에 아직 백업 파일이 없는 경우 → 첫 백업 생성
+      const payload = buildCloudPayload();
+      const uploaded = await BrainDrive.uploadDatabase(token, payload, '', userEmail);
+      setSyncMeta({
+        updatedAt: payload.updatedAt,
+        lastSyncedAt: Date.now(),
+        driveDbFileId: uploaded.fileId,
+        hasUserEdits: true
+      });
+      hasSyncedDriveThisSession = true;
+      driveSyncStatus = 'synced';
+      showToast('☁️ 내 드라이브 [SecondBrainOS] 폴더에 첫 백업을 완료했습니다.');
+      return true;
+    } catch (err) {
+      handleDriveError(err);
+      showToast(`⚠️ Drive 동기화 실패: ${err.message}`);
+      return false;
+    } finally {
+      isDriveSyncing = false;
+      updateDriveStatusUI();
+      if (driveSyncStatus === 'synced' && state.selectedItem?.driveFile && !isEditing) {
+        renderDrivePreviewBox(state.selectedItem, ++previewRenderSeq);
+      }
+      if (elAuthModal.style.display === 'flex') {
+        renderAuthModalContent();
+      }
+    }
+  }
+
+  function scheduleDriveSync() {
+    if (!isOwnerAuthenticated() || !BrainAuth.hasDriveAccess()) return;
+    if (driveSyncTimer) clearTimeout(driveSyncTimer);
+    driveSyncTimer = setTimeout(() => {
+      driveSyncTimer = null;
+      syncWithDrive({ mode: 'push', interactive: false, showSuccessToast: false });
+    }, 2200);
+  }
+
+  // Fullscreen File Viewer Modal
+  const elViewerModal = $('viewer-modal');
+  const elViewerBody = $('viewer-body');
+
+  function closeDriveFileViewer() {
+    elViewerModal.style.display = 'none';
+    elViewerBody.innerHTML = '';
+    activeViewerItem = null;
+    activeViewerBlobUrl = '';
+  }
+
+  async function openDriveFileViewer(item) {
+    const df = item?.driveFile;
+    if (!df || !df.id) return;
+
+    activeViewerItem = item;
+    activeViewerBlobUrl = '';
+
+    const cat = BrainDrive.getFileCategory(df);
+    const sizeText = BrainDrive.formatFileSize(df.size);
+
+    $('viewer-icon').textContent = item.icon || '📄';
+    $('viewer-title').textContent = df.name || item.name;
+    $('viewer-meta').textContent = sizeText ? `(${sizeText})` : '';
+    elViewerBody.innerHTML = `<div class="drive-preview-loading" style="color:#e5e7eb;">☁️ 파일 불러오는 중...</div>`;
+    elViewerModal.style.display = 'flex';
+
+    // 이미지 / PDF / 동영상 / 오디오 → 인증된 Blob URL로 앱 내부에서 지연 없이 바로 열기
+    if (['image', 'pdf', 'video', 'audio'].includes(cat)) {
+      let token;
+      try {
+        token = await ensureDriveToken(true);
+      } catch (err) {
+        closeDriveFileViewer();
+        showToast(`⚠️ ${err.message}`);
+        return;
+      }
+
+      try {
+        const entry = await BrainDrive.getFileBlobUrl(token, df.id, df.mimeType);
+        if (activeViewerItem !== item) return;
+        activeViewerBlobUrl = entry.url;
+
+        elViewerBody.innerHTML = '';
+        if (cat === 'image') {
+          const img = document.createElement('img');
+          img.src = entry.url;
+          img.alt = df.name || item.name;
+          elViewerBody.appendChild(img);
+        } else if (cat === 'pdf') {
+          const iframe = document.createElement('iframe');
+          iframe.src = entry.url;
+          iframe.title = df.name || item.name;
+          elViewerBody.appendChild(iframe);
+        } else if (cat === 'video') {
+          const video = document.createElement('video');
+          video.src = entry.url;
+          video.controls = true;
+          video.autoplay = true;
+          elViewerBody.appendChild(video);
+        } else if (cat === 'audio') {
+          const audio = document.createElement('audio');
+          audio.src = entry.url;
+          audio.controls = true;
+          audio.autoplay = true;
+          elViewerBody.appendChild(audio);
+        }
+      } catch (err) {
+        handleDriveError(err);
+        elViewerBody.innerHTML =
+          `<div class="viewer-fallback">` +
+          `  <div class="viewer-fallback-icon">⚠️</div>` +
+          `  <div>파일을 불러오지 못했습니다.</div>` +
+          `  <p>${escapeHtml(err.message)}</p>` +
+          `  <button type="button" class="btn btn-drive" id="btn-viewer-retry-web">☁️ Google Drive에서 직접 열기</button>` +
+          `</div>`;
+        const retryBtn = $('btn-viewer-retry-web');
+        if (retryBtn) {
+          retryBtn.addEventListener('click', () => {
+            window.open(BrainDrive.getWebViewUrl(df), '_blank', 'noopener,noreferrer');
+          });
+        }
+      }
+      return;
+    }
+
+    // PowerPoint(PPT/PPTX) / Word / Excel / 기타 → Google Drive 내장 뷰어 iframe + 새 탭 바로 열기 지원
+    const previewUrl = BrainDrive.getPreviewEmbedUrl(df.id);
+    elViewerBody.innerHTML =
+      `<div class="viewer-notice-bar">` +
+      `  <span>☁️ Google Drive 뷰어로 표시 중입니다. 화면이 비어 있거나 로그인 안내가 뜨면 우측 상단 <b>[↗ 새 탭에서 열기]</b>를 눌러주세요.</span>` +
+      `</div>` +
+      `<iframe src="${escapeHtml(previewUrl)}" allow="autoplay; fullscreen" title="${escapeHtml(df.name || item.name)}"></iframe>`;
+  }
+
+  async function downloadDriveFile(item) {
+    const df = item?.driveFile;
+    if (!df || !df.id) return;
+
+    let token;
+    try {
+      token = await ensureDriveToken(true);
+    } catch (err) {
+      showToast(`⚠️ ${err.message}`);
+      return;
+    }
+
+    showToast(`⬇️ "${df.name || item.name}" 다운로드 준비 중...`);
+    try {
+      const entry = await BrainDrive.getFileBlobUrl(token, df.id, df.mimeType);
+      const a = document.createElement('a');
+      a.href = entry.url;
+      a.download = df.name || item.name || 'download';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (err) {
+      handleDriveError(err);
+      showToast(`⚠️ 다운로드 실패: ${err.message}`);
+    }
+  }
+
+  $('btn-drive-sync').addEventListener('click', () => {
+    if (!BrainAuth.isConfigComplete(state.settings.firebaseConfig) || !isOwnerAuthenticated()) {
+      openAuthModal();
+      return;
+    }
+    syncWithDrive({ mode: 'manual', interactive: true, showSuccessToast: true });
+  });
+
+  $('btn-auth-drive-sync').addEventListener('click', () => {
+    syncWithDrive({ mode: 'manual', interactive: true, showSuccessToast: true });
+  });
+
+  $('btn-auth-open-drive-folder').addEventListener('click', async () => {
+    try {
+      const token = BrainAuth.getDriveAccessToken();
+      if (token) {
+        await BrainDrive.ensureAppFolders(token, BrainAuth.getUser()?.email || '');
+      }
+    } catch (_) {}
+    window.open(BrainDrive.getRootFolderUrl(), '_blank', 'noopener,noreferrer');
+  });
+
+  $('btn-drive-open').addEventListener('click', () => {
+    if (state.selectedItem?.driveFile) openDriveFileViewer(state.selectedItem);
+  });
+
+  $('btn-drive-webview').addEventListener('click', () => {
+    const df = state.selectedItem?.driveFile;
+    if (df) window.open(BrainDrive.getWebViewUrl(df), '_blank', 'noopener,noreferrer');
+  });
+
+  $('btn-drive-download').addEventListener('click', () => {
+    if (state.selectedItem?.driveFile) downloadDriveFile(state.selectedItem);
+  });
+
+  $('btn-close-viewer').addEventListener('click', closeDriveFileViewer);
+  elViewerModal.addEventListener('click', (e) => {
+    if (e.target === elViewerModal) closeDriveFileViewer();
+  });
+
+  $('btn-viewer-newtab').addEventListener('click', () => {
+    if (!activeViewerItem?.driveFile) return;
+    if (activeViewerBlobUrl) {
+      window.open(activeViewerBlobUrl, '_blank');
+    } else {
+      window.open(BrainDrive.getWebViewUrl(activeViewerItem.driveFile), '_blank', 'noopener,noreferrer');
+    }
+  });
+
+  $('btn-viewer-download').addEventListener('click', () => {
+    if (activeViewerItem?.driveFile) downloadDriveFile(activeViewerItem);
+  });
+
   window.addEventListener('focus', () => {
     refreshBridgeStatus(false);
+    updateDriveStatusUI();
   });
 
   // ================= Initialize =================
@@ -1633,6 +2351,7 @@
   populateModels(elChatProvider.value);
   updateApiStatusSummary();
   updateAuthButtonUI();
+  updateDriveStatusUI();
   renderTree(state.fileSystem, elTreeRoot, true);
   openFolder(state.currentFolder);
   renderChatMessages();

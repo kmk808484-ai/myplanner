@@ -6,6 +6,7 @@
   const SETTINGS_KEY = 'brainOS_api_settings';
   const CHAT_KEY = 'brainOS_chat_history';
   const THEME_KEY = 'brainOS_theme';
+  const SYNC_META_KEY = 'brainOS_sync_meta';
 
   function createDefaultData() {
     return {
@@ -60,6 +61,15 @@
     return createDefaultData();
   }
 
+  const DEFAULT_FIREBASE_CONFIG = {
+    apiKey: 'AIzaSyCuCNfM7l1aInsq_KCFWKQmoyME2tJXCZU',
+    authDomain: 'gen-lang-client-0519883143.firebaseapp.com',
+    projectId: 'gen-lang-client-0519883143',
+    storageBucket: 'gen-lang-client-0519883143.firebasestorage.app',
+    messagingSenderId: '845419336299',
+    appId: '1:845419336299:web:0909e669b1713c052cd72e'
+  };
+
   function loadSettings() {
     const defaults = {
       keys: { gemini: '', openai: '', anthropic: '', grok: '' },
@@ -67,19 +77,28 @@
       lastProvider: 'gemini',
       lastModel: '',
       localBridgeUrl: 'http://127.0.0.1:4820',
-      firebaseConfig: { apiKey: '', authDomain: '', projectId: '' },
+      firebaseConfig: { ...DEFAULT_FIREBASE_CONFIG },
       ownerEmail: ''
     };
     try {
       const raw = localStorage.getItem(SETTINGS_KEY);
       if (!raw) return defaults;
       const parsed = JSON.parse(raw);
+      const savedFb = parsed.firebaseConfig || {};
+      const mergedFb = {
+        apiKey: String(savedFb.apiKey || '').trim() || DEFAULT_FIREBASE_CONFIG.apiKey,
+        authDomain: String(savedFb.authDomain || '').trim() || DEFAULT_FIREBASE_CONFIG.authDomain,
+        projectId: String(savedFb.projectId || '').trim() || DEFAULT_FIREBASE_CONFIG.projectId,
+        storageBucket: String(savedFb.storageBucket || '').trim() || DEFAULT_FIREBASE_CONFIG.storageBucket,
+        messagingSenderId: String(savedFb.messagingSenderId || '').trim() || DEFAULT_FIREBASE_CONFIG.messagingSenderId,
+        appId: String(savedFb.appId || '').trim() || DEFAULT_FIREBASE_CONFIG.appId
+      };
       return {
         ...defaults,
         ...parsed,
         keys: { ...defaults.keys, ...(parsed.keys || {}) },
         customModels: { ...defaults.customModels, ...(parsed.customModels || {}) },
-        firebaseConfig: { ...defaults.firebaseConfig, ...(parsed.firebaseConfig || {}) }
+        firebaseConfig: mergedFb
       };
     } catch (e) {
       return defaults;
@@ -93,6 +112,37 @@
     } catch (e) {
       return [];
     }
+  }
+
+  function loadSyncMeta() {
+    const hasExistingDb = Boolean(localStorage.getItem(DB_KEY) || localStorage.getItem(LEGACY_DB_KEY));
+    const defaults = {
+      updatedAt: hasExistingDb ? Date.now() : 0,
+      lastSyncedAt: 0,
+      driveDbFileId: '',
+      hasUserEdits: hasExistingDb
+    };
+    try {
+      const raw = localStorage.getItem(SYNC_META_KEY);
+      if (!raw) return defaults;
+      return { ...defaults, ...JSON.parse(raw) };
+    } catch (e) {
+      return defaults;
+    }
+  }
+
+  let syncMeta = loadSyncMeta();
+
+  function getSyncMeta() {
+    return { ...syncMeta };
+  }
+
+  function setSyncMeta(patch) {
+    syncMeta = { ...syncMeta, ...(patch || {}) };
+    try {
+      localStorage.setItem(SYNC_META_KEY, JSON.stringify(syncMeta));
+    } catch (_) {}
+    return { ...syncMeta };
   }
 
   const state = {
@@ -116,16 +166,22 @@
     if (node.children) node.children.forEach(regenerateIds);
   }
 
-  function persistFS() {
+  function persistFS(options = {}) {
     localStorage.setItem(DB_KEY, JSON.stringify(state.fileSystem));
+    if (!options.silent) {
+      setSyncMeta({ updatedAt: Date.now(), hasUserEdits: true });
+    }
   }
 
   function persistSettings() {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings));
   }
 
-  function persistChat() {
+  function persistChat(options = {}) {
     localStorage.setItem(CHAT_KEY, JSON.stringify(state.chatHistory.slice(-60)));
+    if (!options.silent) {
+      setSyncMeta({ updatedAt: Date.now(), hasUserEdits: true });
+    }
   }
 
   function saveStateForUndo() {
@@ -201,6 +257,8 @@
     persistFS,
     persistSettings,
     persistChat,
+    getSyncMeta,
+    setSyncMeta,
     saveStateForUndo,
     findNodeAndParent,
     isDescendant,
