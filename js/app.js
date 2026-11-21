@@ -8,6 +8,7 @@
   const BrainDrive = window.BrainDrive;
   const LocalBridge = window.BrainLocalBridge;
   const WinManager = window.BrainWindowManager;
+  const BrainSheet = window.BrainSpreadsheet;
 
   let isEditing = false;
   let isSendingChat = false;
@@ -290,6 +291,9 @@
           clearSearch(false);
           openFolder(item);
           renderTree(state.fileSystem, elTreeRoot, true);
+        } else if (isSpreadsheetItem(item)) {
+          selectItem(item);
+          openSpreadsheetWindow(item);
         } else if (item.driveFile && item.driveFile.id) {
           selectItem(item);
           openDriveFileViewer(item);
@@ -370,6 +374,8 @@
     if (fileWin) fileWin.setTitle(item.name);
     const htmlWin = WinManager.getWindow(`html-${item.id}`);
     if (htmlWin) htmlWin.setTitle(item.name);
+    const sheetWin = WinManager.getWindow(`sheet-${item.id}`);
+    if (sheetWin) sheetWin.setTitle(item.name);
     const mdEntry = openMdWindows.get(item.id);
     if (mdEntry && typeof mdEntry.syncFromItem === 'function') {
       mdEntry.syncFromItem();
@@ -488,6 +494,29 @@
 
   function createNew(type) {
     saveStateForUndo();
+    if (type === 'sheet') {
+      const newName = getUniqueNameInFolder(state.currentFolder, '새 스프레드시트', '.xlsx');
+      const starterWb = BrainSheet.createStarterWorkbook();
+      const newItem = {
+        id: genId(),
+        type: 'doc',
+        name: newName,
+        icon: '📊',
+        tag: '#Excel #시트',
+        summary: BrainSheet.workbookToMarkdownSummary(starterWb),
+        link: '',
+        sheetData: starterWb
+      };
+      if (!state.currentFolder.children) state.currentFolder.children = [];
+      state.currentFolder.children.push(newItem);
+      saveAndRender();
+      selectItem(newItem);
+      syncSpreadsheetToDriveNow(newItem).catch(() => {});
+      openSpreadsheetWindow(newItem);
+      showToast(`📊 새 엑셀 시트(${newName})를 만들었습니다.`);
+      return;
+    }
+
     const newName = type === 'folder'
       ? getUniqueNameInFolder(state.currentFolder, '새 폴더')
       : getUniqueNameInFolder(state.currentFolder, '새 메모', '.md');
@@ -657,8 +686,10 @@
     if (files.length === 0) return;
 
     const textReadable = ['md', 'txt', 'json', 'csv', 'js', 'ts', 'py', 'html', 'htm', 'css', 'xml', 'yml', 'yaml'];
+    const excelExts = ['xlsx', 'xls'];
     const binaryFiles = files.filter((f) => {
       const { ext } = getFileMetaByExt(f.name);
+      if (excelExts.includes(ext)) return false; // Excel 파일은 Drive 미연결 상태에서도 내장 실행기로 열 수 있음
       return !(textReadable.includes(ext) && f.size <= 500 * 1024);
     });
 
@@ -694,16 +725,53 @@
       const { ext, icon, tag } = getFileMetaByExt(file.name);
       const isInlineText = textReadable.includes(ext) && file.size <= 500 * 1024;
 
-      if (isInlineText) {
+      if (excelExts.includes(ext)) {
+        try {
+          const buf = await file.arrayBuffer();
+          const parsedWb = await BrainSheet.parseArrayBufferToWorkbook(buf, file.name);
+          const mdSummary = BrainSheet.workbookToMarkdownSummary(parsedWb);
+          let uploaded = null;
+          if (driveToken && isOwnerAuthenticated()) {
+            try {
+              showToast(`☁️ "${file.name}" Google Drive 업로드 중...`);
+              const folderPath = getFolderPathSegments(state.currentFolder);
+              uploaded = await BrainDrive.uploadFile(driveToken, file, userEmail, folderPath);
+            } catch (uploadErr) {
+              handleDriveError(uploadErr);
+            }
+          }
+          const newItem = {
+            id: genId(),
+            type: 'doc',
+            name: file.name,
+            icon: '📊',
+            tag: '#Excel',
+            summary: mdSummary,
+            link: '',
+            sheetData: parsedWb,
+            ...(uploaded ? { driveFile: uploaded } : {})
+          };
+          if (!state.currentFolder.children) state.currentFolder.children = [];
+          state.currentFolder.children.push(newItem);
+          lastAdded = newItem;
+          addedCount++;
+        } catch (err) {
+          showToast(`⚠️ "${file.name}" 엑셀 파싱 실패: ${err.message}`);
+        }
+      } else if (isInlineText) {
         const contentText = await readFileAsTextAsync(file);
+        const parsedCsvWb = ext === 'csv'
+          ? BrainSheet.parseCsvToWorkbook(contentText || '', file.name.replace(/\.csv$/i, '') || 'Sheet1')
+          : null;
         const newItem = {
           id: genId(),
           type: 'doc',
           name: file.name,
-          icon,
-          tag,
-          summary: contentText || '',
-          link: ''
+          icon: ext === 'csv' ? '📊' : icon,
+          tag: ext === 'csv' ? '#CSV #Excel' : tag,
+          summary: parsedCsvWb ? BrainSheet.workbookToMarkdownSummary(parsedCsvWb) : (contentText || ''),
+          link: '',
+          ...(parsedCsvWb ? { sheetData: parsedCsvWb } : {})
         };
         if (!state.currentFolder.children) state.currentFolder.children = [];
         state.currentFolder.children.push(newItem);
@@ -888,15 +956,20 @@
     const linkBadge = $('p-link-badge');
     const localActionRow = $('local-action-row');
     const driveActionRow = $('drive-action-row');
+    const sheetActionRow = $('sheet-action-row');
     const mdActionRow = $('md-action-row');
     const btnOpenLocal = $('btn-open-local');
     const btnRevealLocal = $('btn-reveal-local');
 
     previewRenderSeq++;
     const hasDriveFile = Boolean(item.driveFile && item.driveFile.id);
+    const isSheet = isSpreadsheetItem(item);
+    if (sheetActionRow) {
+      sheetActionRow.style.display = isSheet ? 'flex' : 'none';
+    }
     if (hasDriveFile) {
       driveActionRow.style.display = 'flex';
-      $('btn-drive-open').textContent = getDriveOpenButtonLabel(item.driveFile);
+      $('btn-drive-open').textContent = isSheet ? '📊 엑셀 실행기' : getDriveOpenButtonLabel(item.driveFile);
       renderDrivePreviewBox(item, previewRenderSeq);
     } else {
       driveActionRow.style.display = 'none';
@@ -908,7 +981,7 @@
     }
 
     if (mdActionRow) {
-      mdActionRow.style.display = isMarkdownDocItem(item) ? 'flex' : 'none';
+      mdActionRow.style.display = !isSheet && isMarkdownDocItem(item) ? 'flex' : 'none';
     }
 
     if (item.link && LocalBridge.isLocalPath(item.link)) {
@@ -928,7 +1001,7 @@
       delete linkBadge.dataset.localPath;
       linkBadge.textContent = `🔗 ${item.link.length > 28 ? item.link.slice(0, 28) + '…' : item.link}`;
       localActionRow.style.display = 'none';
-    } else if (hasDriveFile) {
+    } else if (hasDriveFile || isSheet) {
       linkBadge.style.display = 'none';
       delete linkBadge.dataset.localPath;
       localActionRow.style.display = 'none';
@@ -1121,10 +1194,13 @@
     elContextMenu.style.display = 'none';
     if (action === 'new-folder') createNew('folder');
     else if (action === 'new-doc') createNew('doc');
+    else if (action === 'new-sheet') createNew('sheet');
     else if (action === 'upload-file') $('file-upload-input').click();
     else if (action === 'rename') startRenameItem(state.selectedItem);
     else if (action === 'open-local') {
-      if (state.selectedItem && state.selectedItem.driveFile && state.selectedItem.driveFile.id) {
+      if (isSpreadsheetItem(state.selectedItem)) {
+        openSpreadsheetWindow(state.selectedItem);
+      } else if (state.selectedItem && state.selectedItem.driveFile && state.selectedItem.driveFile.id) {
         openDriveFileViewer(state.selectedItem);
       } else if (state.selectedItem && state.selectedItem.link && LocalBridge.isLocalPath(state.selectedItem.link)) {
         launchLocalItem(state.selectedItem.link, 'open');
@@ -1158,6 +1234,7 @@
   $('btn-new-folder').addEventListener('click', () => createNew('folder'));
   $('btn-quick-folder').addEventListener('click', () => createNew('folder'));
   $('btn-new-doc').addEventListener('click', () => createNew('doc'));
+  $('btn-new-sheet').addEventListener('click', () => createNew('sheet'));
   $('btn-upload-file').addEventListener('click', () => $('file-upload-input').click());
   $('file-upload-input').addEventListener('change', (e) => {
     if (e.target.files && e.target.files.length > 0) {
@@ -3732,6 +3809,191 @@
     }
   }
 
+  // ================= OS Floating Windows: Built-in Excel Spreadsheet =================
+  function isSpreadsheetItem(item) {
+    if (!item || item.type !== 'doc') return false;
+    if (item.sheetData && Array.isArray(item.sheetData.sheets)) return true;
+    const name = String(item.name || '').trim().toLowerCase();
+    if (/\.(xlsx|xls|csv)$/.test(name)) return true;
+    const mime = String(item.driveFile?.mimeType || '').toLowerCase();
+    return mime.includes('spreadsheet') || mime.includes('excel');
+  }
+
+  async function syncSpreadsheetToDriveNow(item) {
+    if (!item || !item.sheetData || !isOwnerAuthenticated()) return;
+    const token = BrainAuth.getDriveAccessToken();
+    if (!token) return;
+
+    const userEmail = BrainAuth.getUser()?.email || '';
+    const folderPath = getRelativeFolderPathForItem(item.id);
+    const lowerName = String(item.name || '').toLowerCase();
+
+    if (lowerName.endsWith('.csv')) {
+      const csvText = BrainSheet.exportSheetToCsv(item.sheetData, item.sheetData.activeSheet || 0);
+      const res = await BrainDrive.upsertTextFile(token, {
+        fileId: item.driveFile?.id || item.driveDocId || '',
+        name: item.name,
+        content: csvText,
+        mimeType: 'text/csv',
+        folderPath,
+        userEmail
+      });
+      if (res && res.id) {
+        item.driveDocId = res.id;
+        item.driveFile = {
+          id: res.id,
+          name: res.name || item.name,
+          mimeType: 'text/csv',
+          size: Number(res.size || csvText.length),
+          webViewLink: res.webViewLink || `https://drive.google.com/file/d/${res.id}/view`,
+          uploadedAt: res.modifiedTime || new Date().toISOString()
+        };
+        persistFS({ silent: true });
+      }
+      return;
+    }
+
+    const xlsxName = /\.xlsx$/i.test(item.name) ? item.name : `${item.name.replace(/\.xls$/i, '')}.xlsx`;
+    const blob = await BrainSheet.exportWorkbookToXlsxBlob(item.sheetData);
+    const uploaded = await BrainDrive.upsertBinaryFile(token, {
+      fileId: item.driveFile?.id || '',
+      name: xlsxName,
+      blob,
+      mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      folderPath,
+      userEmail
+    });
+    if (uploaded && uploaded.id) {
+      item.driveFile = uploaded;
+      persistFS({ silent: true });
+    }
+  }
+
+  async function openSpreadsheetWindow(item) {
+    if (!item || item.type !== 'doc') return;
+    const winId = `sheet-${item.id}`;
+    const existing = WinManager.getWindow(winId);
+    if (existing) {
+      existing.restore();
+      return;
+    }
+
+    let sheetController = null;
+    const win = WinManager.openWindow({
+      id: winId,
+      title: item.name,
+      icon: item.icon || '📊',
+      meta: 'Excel · Origin 분석기',
+      width: 1180,
+      height: 720,
+      bodyClass: 'sb-sheet-win-body',
+      contentHtml: `<div class="drive-preview-loading">📊 스프레드시트 불러오는 중...</div>`,
+      onClose() {
+        if (sheetController && typeof sheetController.destroy === 'function') {
+          sheetController.destroy();
+          sheetController = null;
+        }
+      }
+    });
+    if (!win) return;
+
+    let workbook = null;
+    try {
+      if (item.sheetData && Array.isArray(item.sheetData.sheets)) {
+        workbook = BrainSheet.normalizeWorkbook(item.sheetData);
+      } else if (item.driveFile && item.driveFile.id) {
+        const token = await ensureDriveToken(true);
+        const buf = await BrainDrive.getFileArrayBuffer(token, item.driveFile.id);
+        workbook = await BrainSheet.parseArrayBufferToWorkbook(buf, item.driveFile.name || item.name);
+        item.sheetData = workbook;
+        item.summary = BrainSheet.workbookToMarkdownSummary(workbook);
+        persistFS({ silent: true });
+        if (state.selectedItem && state.selectedItem.id === item.id) {
+          $('p-summary').innerHTML = renderMarkdown(item.summary);
+        }
+      } else if (/\.csv$/i.test(String(item.name || '')) && item.summary) {
+        workbook = BrainSheet.parseCsvToWorkbook(item.summary, item.name.replace(/\.csv$/i, '') || 'Sheet1');
+        item.sheetData = workbook;
+      } else {
+        workbook = BrainSheet.createEmptyWorkbook('Sheet1');
+        item.sheetData = workbook;
+      }
+    } catch (err) {
+      handleDriveError(err);
+      win.setBody(
+        `<div class="drive-preview-loading" style="flex-direction:column; gap:10px; padding:24px; text-align:center;">` +
+        `<div>⚠️ 스프레드시트를 불러오지 못했습니다: ${escapeHtml(err.message)}</div>` +
+        `<button type="button" class="btn btn-sheet" id="btn-sheet-fallback-new">📊 빈 시트로 새로 열기</button>` +
+        `</div>`
+      );
+      const fbBtn = win.bodyEl.querySelector('#btn-sheet-fallback-new');
+      if (fbBtn) {
+        fbBtn.addEventListener('click', () => {
+          item.sheetData = BrainSheet.createEmptyWorkbook('Sheet1');
+          win.close();
+          openSpreadsheetWindow(item);
+        });
+      }
+      return;
+    }
+
+    sheetController = BrainSheet.mountSpreadsheetUI(win.bodyEl, {
+      workbook,
+      fileName: item.name,
+      initialViewMode: 'split',
+      onToast: showToast,
+      onDirtyChange(dirty) {
+        win.setMeta(dirty ? '● 수정됨' : 'Excel · Origin 분석기');
+      },
+      onAutoSave(updatedWb, mdSummary) {
+        item.sheetData = updatedWb;
+        item.summary = mdSummary;
+        persistFS();
+        if (state.selectedItem && state.selectedItem.id === item.id) {
+          $('p-summary').innerHTML = renderMarkdown(item.summary);
+        }
+      },
+      async onSave(updatedWb, mdSummary) {
+        saveStateForUndo();
+        item.sheetData = updatedWb;
+        item.summary = mdSummary;
+        saveAndRender();
+        if (state.selectedItem && state.selectedItem.id === item.id) {
+          $('p-summary').innerHTML = renderMarkdown(item.summary);
+        }
+        win.setMeta('저장됨');
+
+        let syncedDrive = false;
+        if (BrainAuth.getDriveAccessToken() && isOwnerAuthenticated()) {
+          try {
+            await syncSpreadsheetToDriveNow(item);
+            syncedDrive = true;
+          } catch (err) {
+            handleDriveError(err);
+          }
+        }
+        showToast(syncedDrive ? `☁️ "${item.name}" 저장 및 Google Drive 동기화 완료` : `💾 "${item.name}" 저장되었습니다.`);
+      },
+      onAskAI(updatedWb, mdSummary) {
+        item.sheetData = updatedWb;
+        item.summary = mdSummary;
+        persistFS();
+        attachNodeToContext(item);
+        switchRightTab('chat');
+        const rightPanel = $('right-panel');
+        if (rightPanel && rightPanel.classList.contains('collapsed')) {
+          togglePanel('right-panel', 'btn-right-panel', 'resizer-right');
+        }
+        elChatInput.focus();
+        showToast(`🤖 "${item.name}" 시트가 AI 컨텍스트에 첨부되었습니다.`);
+      }
+    });
+  }
+
+  $('btn-open-sheet').addEventListener('click', () => {
+    if (state.selectedItem) openSpreadsheetWindow(state.selectedItem);
+  });
+
   $('btn-open-md-viewer').addEventListener('click', () => {
     if (state.selectedItem) openMarkdownWindow(state.selectedItem, 'view');
   });
@@ -3783,7 +4045,9 @@
   });
 
   $('btn-drive-open').addEventListener('click', () => {
-    if (state.selectedItem?.driveFile) openDriveFileViewer(state.selectedItem);
+    if (!state.selectedItem) return;
+    if (isSpreadsheetItem(state.selectedItem)) openSpreadsheetWindow(state.selectedItem);
+    else if (state.selectedItem.driveFile) openDriveFileViewer(state.selectedItem);
   });
 
   $('btn-drive-open-pc').addEventListener('click', () => {

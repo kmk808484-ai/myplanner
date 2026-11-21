@@ -658,6 +658,68 @@
     };
   }
 
+  async function getFileArrayBuffer(accessToken, fileId) {
+    if (!fileId) throw createDriveError('유효하지 않은 Drive 파일 ID입니다.', 400, 'INVALID_ID');
+    const url = `${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media`;
+    const res = await driveFetch(url, accessToken, { method: 'GET' });
+    return res.arrayBuffer();
+  }
+
+  async function upsertBinaryFile(accessToken, { fileId = '', name, blob, mimeType = '', folderPath = [], userEmail = '' }) {
+    const safeName = String(name || '새 스프레드시트.xlsx').trim() || '새 스프레드시트.xlsx';
+    const resolvedMime = mimeType || guessMimeType({ name: safeName });
+    const parentId = await ensureFolderPath(accessToken, folderPath, userEmail);
+    const fields = encodeURIComponent('id,name,mimeType,size,webViewLink,modifiedTime');
+
+    let targetId = String(fileId || '').trim();
+    if (!targetId) {
+      const existing = await findFileInFolder(accessToken, safeName, parentId);
+      if (existing && existing.mimeType !== 'application/vnd.google-apps.folder') {
+        targetId = existing.id;
+      }
+    }
+
+    if (targetId) {
+      try {
+        const res = await driveFetch(
+          `${UPLOAD_API}/files/${encodeURIComponent(targetId)}?uploadType=media&fields=${fields}`,
+          accessToken,
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': resolvedMime },
+            body: blob
+          }
+        );
+        const updated = await res.json();
+        return {
+          id: updated.id,
+          name: updated.name || safeName,
+          mimeType: updated.mimeType || resolvedMime,
+          size: Number(updated.size || blob.size || 0),
+          webViewLink: updated.webViewLink || `https://drive.google.com/file/d/${updated.id}/view`,
+          uploadedAt: updated.modifiedTime || new Date().toISOString()
+        };
+      } catch (err) {
+        if (err.status !== 404) throw err;
+        targetId = '';
+      }
+    }
+
+    const fileObj = new File([blob], safeName, { type: resolvedMime });
+    const data = fileObj.size <= MULTIPART_LIMIT_BYTES
+      ? await uploadFileMultipart(accessToken, fileObj, parentId, resolvedMime)
+      : await uploadFileResumable(accessToken, fileObj, parentId, resolvedMime);
+
+    return {
+      id: data.id,
+      name: data.name || safeName,
+      mimeType: data.mimeType || resolvedMime,
+      size: Number(data.size || fileObj.size || 0),
+      webViewLink: data.webViewLink || `https://drive.google.com/file/d/${data.id}/view`,
+      uploadedAt: data.modifiedTime || new Date().toISOString()
+    };
+  }
+
   global.BrainDrive = {
     ROOT_FOLDER_NAME,
     FILES_FOLDER_NAME,
@@ -671,10 +733,12 @@
     uploadFile,
     moveFile,
     upsertTextFile,
+    upsertBinaryFile,
     renameFile,
     downloadTextFile,
     scanAppFolder,
     getFileBlobUrl,
+    getFileArrayBuffer,
     getFileBase64,
     getPreviewEmbedUrl,
     getWebViewUrl,
