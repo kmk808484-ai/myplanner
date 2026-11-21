@@ -7,13 +7,14 @@
   const BrainAuth = window.BrainAuth;
   const BrainDrive = window.BrainDrive;
   const LocalBridge = window.BrainLocalBridge;
+  const WinManager = window.BrainWindowManager;
 
   let isEditing = false;
   let isSendingChat = false;
   let isBridgeConnected = false;
   let searchQuery = '';
 
-  // Google Drive sync & file viewer state
+  // Google Drive sync & OS window state
   let driveSyncTimer = null;
   let isDriveSyncing = false;
   let driveSyncStatus = 'disconnected'; // 'disconnected' | 'syncing' | 'synced' | 'expired' | 'error'
@@ -21,8 +22,7 @@
   let lastDriveErrorCode = '';
   let hasSyncedDriveThisSession = false;
   let previewRenderSeq = 0;
-  let activeViewerItem = null;
-  let activeViewerBlobUrl = '';
+  const openMdWindows = new Map(); // itemId -> { win, syncFromItem }
 
   // ================= DOM References =================
   const $ = (id) => document.getElementById(id);
@@ -250,6 +250,7 @@
     sorted.forEach((item) => {
       const card = document.createElement('div');
       card.className = 'item-card' + (state.selectedItem && state.selectedItem.id === item.id ? ' selected' : '');
+      card.dataset.itemId = item.id;
       card.draggable = true;
       card.innerHTML =
         (item.driveFile ? `<span class="item-cloud-badge" title="Google Drive 동기화 파일">☁️</span>` : '') +
@@ -282,7 +283,8 @@
         selectItem(item);
       });
 
-      card.addEventListener('dblclick', () => {
+      card.addEventListener('dblclick', (e) => {
+        if (e.target.closest('.item-rename-input')) return;
         if (item.type === 'folder') {
           clearSearch(false);
           openFolder(item);
@@ -295,8 +297,12 @@
         } else if (item.link && LocalBridge.isLocalPath(item.link)) {
           launchLocalItem(item.link, 'open');
         } else if (isHtmlContentItem(item)) {
-          runHtmlContent(item);
-        } else if (isBridgeConnected && isOwnerAuthenticated() && /\.[a-z0-9]{1,6}$/i.test(String(item.name || '').trim())) {
+          selectItem(item);
+          openHtmlWindow(item);
+        } else if (isMarkdownDocItem(item)) {
+          selectItem(item);
+          openMarkdownWindow(item, 'view');
+        } else if (isBridgeConnected && isOwnerAuthenticated() && /\.[a-z0-9]{1,8}$/i.test(String(item.name || '').trim()) && !isBinaryFileName(item.name)) {
           openMemoInLocalApp(item);
         } else {
           selectItem(item);
@@ -345,15 +351,114 @@
 
   elBtnClearSearch.addEventListener('click', () => clearSearch(true));
 
-  // ================= CRUD, Clipboard & Undo =================
+  // ================= CRUD, Rename, Clipboard & Undo =================
+  function getUniqueNameInFolder(folder, baseName, ext = '') {
+    const existing = new Set((folder?.children || []).map((c) => String(c.name || '').toLowerCase()));
+    const first = `${baseName}${ext}`;
+    if (!existing.has(first.toLowerCase())) return first;
+    let n = 2;
+    while (existing.has(`${baseName} ${n}${ext}`.toLowerCase())) n++;
+    return `${baseName} ${n}${ext}`;
+  }
+
+  function syncOpenWindowsForItem(item) {
+    if (!item) return;
+    const mdWin = WinManager.getWindow(`md-${item.id}`);
+    if (mdWin) mdWin.setTitle(item.name);
+    const fileWin = WinManager.getWindow(`file-${item.id}`);
+    if (fileWin) fileWin.setTitle(item.name);
+    const htmlWin = WinManager.getWindow(`html-${item.id}`);
+    if (htmlWin) htmlWin.setTitle(item.name);
+    const mdEntry = openMdWindows.get(item.id);
+    if (mdEntry && typeof mdEntry.syncFromItem === 'function') {
+      mdEntry.syncFromItem();
+    }
+  }
+
+  function applyItemRename(item, rawNewName) {
+    const trimmed = String(rawNewName || '').trim();
+    if (!item || !trimmed || trimmed === item.name) return false;
+    saveStateForUndo();
+    item.name = trimmed;
+    saveAndRender();
+    if (state.selectedItem && state.selectedItem.id === item.id) {
+      selectItem(item);
+    }
+    syncOpenWindowsForItem(item);
+    showToast(`✏️ 이름이 "${trimmed}"(으)로 변경되었습니다.`);
+    return true;
+  }
+
+  function startRenameItem(item) {
+    if (!item || item.id === 'root') {
+      showToast('이름을 바꿀 항목을 먼저 선택해 주세요.');
+      return;
+    }
+
+    const card = elContentArea.querySelector(`.item-card[data-item-id="${CSS.escape(item.id)}"]`);
+    const nameEl = card ? card.querySelector('.item-name') : null;
+
+    if (!nameEl) {
+      const next = prompt('새 이름을 입력하세요:', item.name || '');
+      if (next !== null) applyItemRename(item, next);
+      return;
+    }
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'item-rename-input';
+    input.value = item.name || '';
+
+    nameEl.replaceWith(input);
+    input.focus();
+
+    // 확장자 앞부분만 자동 선택 (Windows 탐색기 방식)
+    const dotIdx = item.type === 'doc' ? input.value.lastIndexOf('.') : -1;
+    if (dotIdx > 0) {
+      input.setSelectionRange(0, dotIdx);
+    } else {
+      input.select();
+    }
+
+    let finished = false;
+    const finish = (commit) => {
+      if (finished) return;
+      finished = true;
+      const val = input.value;
+      if (commit && val.trim() && val.trim() !== item.name) {
+        applyItemRename(item, val);
+      } else {
+        if (searchQuery) renderSearchResults(searchQuery);
+        else openFolder(state.currentFolder);
+      }
+    };
+
+    input.addEventListener('click', (e) => e.stopPropagation());
+    input.addEventListener('dblclick', (e) => e.stopPropagation());
+    input.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter' && !e.isComposing) {
+        e.preventDefault();
+        finish(true);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        finish(false);
+      }
+    });
+    input.addEventListener('blur', () => finish(true));
+  }
+
   function createNew(type) {
     saveStateForUndo();
+    const newName = type === 'folder'
+      ? getUniqueNameInFolder(state.currentFolder, '새 폴더')
+      : getUniqueNameInFolder(state.currentFolder, '새 메모', '.md');
     const newItem = {
       id: genId(),
       type,
-      name: type === 'folder' ? '새 폴더' : '새 메모',
+      name: newName,
       icon: type === 'folder' ? '📁' : '📝',
-      tag: type === 'folder' ? '' : '#메모',
+      tag: type === 'folder' ? '' : '#MD',
       summary: '',
       link: '',
       children: type === 'folder' ? [] : undefined
@@ -362,8 +467,12 @@
     state.currentFolder.children.push(newItem);
     saveAndRender();
     selectItem(newItem);
-    toggleEditMode(true);
-    showToast(type === 'folder' ? '새 폴더를 만들었습니다.' : '새 메모를 만들었습니다.');
+    if (type === 'folder') {
+      startRenameItem(newItem);
+    } else {
+      openMarkdownWindow(newItem, 'split');
+    }
+    showToast(type === 'folder' ? '새 폴더를 만들었습니다.' : `새 마크다운 메모(${newName})를 만들었습니다.`);
   }
 
   function execCopy() {
@@ -424,11 +533,15 @@
     if (askConfirm && !confirm(`"${state.selectedItem.name}" 항목을 삭제할까요?`)) return;
 
     saveStateForUndo();
-    const found = findNodeAndParent(state.selectedItem.id);
+    const deletedId = state.selectedItem.id;
+    const found = findNodeAndParent(deletedId);
     if (found && found.parent) {
-      found.parent.children = found.parent.children.filter((c) => c.id !== state.selectedItem.id);
+      found.parent.children = found.parent.children.filter((c) => c.id !== deletedId);
     }
-    state.attachedContextIds = state.attachedContextIds.filter((id) => id !== state.selectedItem.id);
+    WinManager.getWindow(`md-${deletedId}`)?.close();
+    WinManager.getWindow(`file-${deletedId}`)?.close();
+    WinManager.getWindow(`html-${deletedId}`)?.close();
+    state.attachedContextIds = state.attachedContextIds.filter((id) => id !== deletedId);
     state.selectedItem = null;
     elEmptyState.style.display = 'block';
     elDetailState.style.display = 'none';
@@ -723,6 +836,7 @@
     const linkBadge = $('p-link-badge');
     const localActionRow = $('local-action-row');
     const driveActionRow = $('drive-action-row');
+    const mdActionRow = $('md-action-row');
     const btnOpenLocal = $('btn-open-local');
     const btnRevealLocal = $('btn-reveal-local');
 
@@ -739,6 +853,10 @@
         box.style.display = 'none';
         box.innerHTML = '';
       }
+    }
+
+    if (mdActionRow) {
+      mdActionRow.style.display = isMarkdownDocItem(item) ? 'flex' : 'none';
     }
 
     if (item.link && LocalBridge.isLocalPath(item.link)) {
@@ -786,7 +904,7 @@
     } else if (item.type === 'doc' && isHtmlContentItem(item)) {
       linkBadge.style.display = 'none';
       delete linkBadge.dataset.localPath;
-      btnOpenLocal.textContent = '🌐 새 탭으로 실행';
+      btnOpenLocal.textContent = '🌐 창으로 실행';
       btnRevealLocal.textContent = '🖥️ PC 브라우저로 열기';
       btnRevealLocal.style.display = '';
       localActionRow.style.display = 'flex';
@@ -846,6 +964,7 @@
     state.selectedItem.summary = $('edit-summary').value;
     saveAndRender();
     selectItem(state.selectedItem);
+    syncOpenWindowsForItem(state.selectedItem);
     showToast('저장되었습니다.');
   }
 
@@ -947,6 +1066,7 @@
     if (action === 'new-folder') createNew('folder');
     else if (action === 'new-doc') createNew('doc');
     else if (action === 'upload-file') $('file-upload-input').click();
+    else if (action === 'rename') startRenameItem(state.selectedItem);
     else if (action === 'open-local') {
       if (state.selectedItem && state.selectedItem.driveFile && state.selectedItem.driveFile.id) {
         openDriveFileViewer(state.selectedItem);
@@ -955,7 +1075,9 @@
       } else if (state.selectedItem && state.selectedItem.link && LocalBridge.isWebUrl(state.selectedItem.link)) {
         window.open(state.selectedItem.link, '_blank', 'noopener,noreferrer');
       } else if (isHtmlContentItem(state.selectedItem)) {
-        runHtmlContent(state.selectedItem);
+        openHtmlWindow(state.selectedItem);
+      } else if (isMarkdownDocItem(state.selectedItem)) {
+        openMarkdownWindow(state.selectedItem, 'view');
       } else if (state.selectedItem && state.selectedItem.type === 'doc') {
         openMemoInLocalApp(state.selectedItem);
       } else {
@@ -991,10 +1113,6 @@
 
   // ================= Keyboard Shortcuts =================
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && $('viewer-modal').style.display === 'flex') {
-      closeDriveFileViewer();
-      return;
-    }
     const isInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName);
 
     // Ctrl+K: 검색 포커스
@@ -1013,6 +1131,12 @@
     }
 
     if (isInput) return;
+
+    if (e.key === 'F2') {
+      e.preventDefault();
+      startRenameItem(state.selectedItem);
+      return;
+    }
 
     if (e.ctrlKey || e.metaKey) {
       const k = e.key.toLowerCase();
@@ -1223,22 +1347,23 @@
   function saveAiReplyAsNote(msg) {
     saveStateForUndo();
     const firstLine = (msg.content || '').split('\n').find((l) => l.trim()) || 'AI 답변 메모';
-    const cleanTitle = firstLine.replace(/^[#*\-\s]+/, '').slice(0, 36);
+    const cleanTitle = firstLine.replace(/^[#*\-\s]+/, '').slice(0, 36).trim();
     const provLabel = PROVIDERS[msg.provider]?.label || 'AI';
+    const baseName = (cleanTitle || `${provLabel} 답변`).replace(/\.md$/i, '');
 
     const newNote = {
       id: genId(),
       type: 'doc',
-      name: cleanTitle || `${provLabel} 답변`,
+      name: getUniqueNameInFolder(state.currentFolder, baseName, '.md'),
       icon: '🤖',
-      tag: `#AI #${provLabel}`,
+      tag: `#AI #${provLabel} #MD`,
       link: '',
       summary: msg.content
     };
     if (!state.currentFolder.children) state.currentFolder.children = [];
     state.currentFolder.children.push(newNote);
     saveAndRender();
-    showToast(`"${state.currentFolder.name}" 폴더에 메모로 저장되었습니다.`);
+    showToast(`"${state.currentFolder.name}" 폴더에 .md 메모로 저장되었습니다.`);
   }
 
   async function handleSendChat() {
@@ -1915,7 +2040,7 @@
     if (state.selectedItem.link && LocalBridge.isLocalPath(state.selectedItem.link)) {
       launchLocalItem(state.selectedItem.link, 'open');
     } else if (isHtmlContentItem(state.selectedItem)) {
-      runHtmlContent(state.selectedItem);
+      openHtmlWindow(state.selectedItem);
     } else if (state.selectedItem.type === 'doc') {
       openMemoInLocalApp(state.selectedItem);
     }
@@ -2266,83 +2391,388 @@
     }, 2200);
   }
 
-  // Fullscreen File Viewer Modal
-  const elViewerModal = $('viewer-modal');
-  const elViewerBody = $('viewer-body');
+  // ================= OS Floating Windows: MD Viewer, HTML & Drive Files =================
+  function isMarkdownDocItem(item) {
+    if (!item || item.type !== 'doc') return false;
+    if (item.driveFile && item.driveFile.id) return false;
+    if (item.link && (LocalBridge.isLocalPath(item.link) || LocalBridge.isWebUrl(item.link))) return false;
+    if (isHtmlContentItem(item)) return false;
+    if (isBinaryFileName(item.name)) return false;
+    const name = String(item.name || '').trim().toLowerCase();
+    // .md 확장자이거나 확장자가 없는 일반 메모는 내장 MD 뷰어 대상
+    return /\.md$/.test(name) || !/\.[a-z0-9]{1,8}$/.test(name);
+  }
 
-  function closeDriveFileViewer() {
-    elViewerModal.style.display = 'none';
-    elViewerBody.innerHTML = '';
-    activeViewerItem = null;
-    activeViewerBlobUrl = '';
+  function toggleCheckboxInMarkdown(mdText, targetIndex) {
+    let idx = 0;
+    return String(mdText || '').replace(/^(\s*[-*]\s+\[)([ xX])(\]\s+)/gm, (match, prefix, mark, suffix) => {
+      if (idx++ === targetIndex) {
+        return `${prefix}${mark.toLowerCase() === 'x' ? ' ' : 'x'}${suffix}`;
+      }
+      return match;
+    });
+  }
+
+  function openMarkdownWindow(item, initialMode = 'view') {
+    if (!item || item.type !== 'doc') return;
+    const winId = `md-${item.id}`;
+    const existing = WinManager.getWindow(winId);
+    if (existing) {
+      existing.restore();
+      const entry = openMdWindows.get(item.id);
+      if (entry && initialMode && entry.setMode) entry.setMode(initialMode);
+      return;
+    }
+
+    const root = document.createElement('div');
+    root.className = 'md-app';
+    root.innerHTML =
+      `<div class="md-toolbar">` +
+      `  <div class="md-toolbar-left">` +
+      `    <div class="md-mode-tabs">` +
+      `      <button type="button" class="md-mode-btn" data-mode="view">📖 보기</button>` +
+      `      <button type="button" class="md-mode-btn" data-mode="split">⚡ 분할</button>` +
+      `      <button type="button" class="md-mode-btn" data-mode="edit">✏️ 편집</button>` +
+      `    </div>` +
+      `    <div class="md-format-bar">` +
+      `      <button type="button" class="md-fmt-btn" data-fmt="h1" title="제목 1">H1</button>` +
+      `      <button type="button" class="md-fmt-btn" data-fmt="h2" title="제목 2">H2</button>` +
+      `      <button type="button" class="md-fmt-btn" data-fmt="bold" title="굵게"><b>B</b></button>` +
+      `      <button type="button" class="md-fmt-btn" data-fmt="italic" title="기울임"><i>I</i></button>` +
+      `      <button type="button" class="md-fmt-btn" data-fmt="code" title="코드 블록">&lt;/&gt;</button>` +
+      `      <button type="button" class="md-fmt-btn" data-fmt="check" title="체크리스트">☑️</button>` +
+      `      <button type="button" class="md-fmt-btn" data-fmt="table" title="표 삽입">표</button>` +
+      `    </div>` +
+      `  </div>` +
+      `  <div class="md-toolbar-right">` +
+      `    <span class="md-save-indicator">저장됨</span>` +
+      `    <button type="button" class="btn-sm btn-primary-soft md-btn-save">💾 저장</button>` +
+      `    <button type="button" class="btn-sm md-btn-copy">📋 복사</button>` +
+      `  </div>` +
+      `</div>` +
+      `<div class="md-workspace" data-mode="${initialMode}">` +
+      `  <div class="md-editor-pane">` +
+      `    <textarea class="md-editor-textarea" placeholder="# 제목을 입력하고 마크다운으로 자유롭게 작성하세요..."></textarea>` +
+      `  </div>` +
+      `  <div class="md-viewer-pane">` +
+      `    <div class="md-viewer-inner markdown-body"></div>` +
+      `  </div>` +
+      `</div>` +
+      `<div class="md-statusbar">` +
+      `  <span class="md-stat-left">Markdown Viewer</span>` +
+      `  <span class="md-stat-right">0자 · 0줄</span>` +
+      `</div>`;
+
+    const workspace = root.querySelector('.md-workspace');
+    const formatBar = root.querySelector('.md-format-bar');
+    const textarea = root.querySelector('.md-editor-textarea');
+    const viewerInner = root.querySelector('.md-viewer-inner');
+    const saveIndicator = root.querySelector('.md-save-indicator');
+    const btnSave = root.querySelector('.md-btn-save');
+    const btnCopy = root.querySelector('.md-btn-copy');
+    const statRight = root.querySelector('.md-stat-right');
+    const modeButtons = root.querySelectorAll('.md-mode-btn');
+
+    let isDirty = false;
+    let currentMode = initialMode;
+
+    const updateStats = () => {
+      const val = textarea.value || '';
+      const chars = val.length;
+      const lines = val ? val.split('\n').length : 0;
+      statRight.textContent = `${chars.toLocaleString()}자 · ${lines.toLocaleString()}줄`;
+    };
+
+    const renderPreview = () => {
+      viewerInner.innerHTML = renderMarkdown(textarea.value);
+      updateStats();
+    };
+
+    const setDirty = (dirty) => {
+      isDirty = dirty;
+      saveIndicator.textContent = dirty ? '수정됨 *' : '저장됨';
+      saveIndicator.classList.toggle('dirty', dirty);
+    };
+
+    const saveMdContent = (silent = false) => {
+      const val = textarea.value;
+      if (val === (item.summary || '') && !isDirty) return;
+      saveStateForUndo();
+      item.summary = val;
+      saveAndRender();
+      if (state.selectedItem && state.selectedItem.id === item.id && !isEditing) {
+        selectItem(item);
+      }
+      setDirty(false);
+      if (!silent) showToast(`💾 "${item.name}" 저장되었습니다.`);
+    };
+
+    const setMode = (mode) => {
+      currentMode = mode;
+      workspace.dataset.mode = mode;
+      modeButtons.forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
+      formatBar.style.display = mode === 'view' ? 'none' : 'inline-flex';
+      if (mode !== 'view') textarea.focus();
+      renderPreview();
+    };
+
+    const insertFormat = (fmt) => {
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      const selected = textarea.value.slice(start, end);
+      let replacement = '';
+      let cursorOffset = 0;
+
+      if (fmt === 'h1') { replacement = `# ${selected || '제목'}`; cursorOffset = replacement.length; }
+      else if (fmt === 'h2') { replacement = `## ${selected || '소제목'}`; cursorOffset = replacement.length; }
+      else if (fmt === 'bold') { replacement = `**${selected || '굵은 텍스트'}**`; cursorOffset = replacement.length - 2; }
+      else if (fmt === 'italic') { replacement = `*${selected || '기울임'}*`; cursorOffset = replacement.length - 1; }
+      else if (fmt === 'code') { replacement = `\n\`\`\`\n${selected || '코드 입력'}\n\`\`\`\n`; cursorOffset = replacement.length - 5; }
+      else if (fmt === 'check') { replacement = `\n- [ ] ${selected || '할 일 항목'}`; cursorOffset = replacement.length; }
+      else if (fmt === 'table') {
+        replacement = `\n| 항목 | 내용 |\n| --- | --- |\n| 예시 1 | 설명 1 |\n`;
+        cursorOffset = replacement.length;
+      }
+
+      textarea.value = textarea.value.slice(0, start) + replacement + textarea.value.slice(end);
+      textarea.focus();
+      textarea.setSelectionRange(start + cursorOffset, start + cursorOffset);
+      setDirty(true);
+      renderPreview();
+    };
+
+    // Init content
+    textarea.value = item.summary || '';
+    setMode(initialMode);
+
+    modeButtons.forEach((btn) => {
+      btn.addEventListener('click', () => setMode(btn.dataset.mode));
+    });
+
+    root.querySelectorAll('.md-fmt-btn').forEach((btn) => {
+      btn.addEventListener('click', () => insertFormat(btn.dataset.fmt));
+    });
+
+    textarea.addEventListener('input', () => {
+      setDirty(true);
+      renderPreview();
+    });
+
+    textarea.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        e.stopPropagation();
+        saveMdContent(false);
+      }
+    });
+
+    // Interactive checkboxes directly inside MD viewer!
+    viewerInner.addEventListener('change', (e) => {
+      const chk = e.target.closest('.md-task-checkbox');
+      if (!chk) return;
+      const idx = Number(chk.dataset.checkboxIndex);
+      if (Number.isNaN(idx)) return;
+      textarea.value = toggleCheckboxInMarkdown(textarea.value, idx);
+      renderPreview();
+      saveMdContent(true);
+    });
+
+    btnSave.addEventListener('click', () => saveMdContent(false));
+    btnCopy.addEventListener('click', () => {
+      navigator.clipboard.writeText(textarea.value || '').then(() => showToast('📋 마크다운 본문을 복사했습니다.'));
+    });
+
+    const win = WinManager.openWindow({
+      id: winId,
+      title: item.name,
+      icon: item.icon || '📝',
+      meta: 'MD Viewer',
+      width: 860,
+      height: 620,
+      contentEl: root,
+      headerActions: [
+        {
+          label: '✏️ 이름 변경',
+          title: '파일 이름 바꾸기',
+          onClick: () => {
+            const next = prompt('새 파일 이름을 입력하세요:', item.name || '');
+            if (next !== null) applyItemRename(item, next);
+          }
+        }
+      ],
+      onClose: () => {
+        if (isDirty) {
+          saveMdContent(true);
+        }
+        openMdWindows.delete(item.id);
+      }
+    });
+
+    openMdWindows.set(item.id, {
+      win,
+      setMode,
+      syncFromItem: () => {
+        win.setTitle(item.name);
+        if (!isDirty) {
+          textarea.value = item.summary || '';
+          renderPreview();
+        }
+      }
+    });
+  }
+
+  function openHtmlWindow(item) {
+    const content = String(item?.summary || '');
+    if (!content.trim()) {
+      showToast('실행할 HTML 내용이 비어 있습니다.');
+      return;
+    }
+
+    const winId = `html-${item.id}`;
+    const existing = WinManager.getWindow(winId);
+    if (existing) {
+      existing.restore();
+      return;
+    }
+
+    const blob = new Blob([content], { type: 'text/html;charset=utf-8' });
+    const blobUrl = URL.createObjectURL(blob);
+
+    const iframe = document.createElement('iframe');
+    iframe.src = blobUrl;
+    iframe.title = item.name || 'HTML 미리보기';
+    iframe.style.width = '100%';
+    iframe.style.height = '100%';
+    iframe.style.border = 'none';
+    iframe.style.background = '#ffffff';
+
+    WinManager.openWindow({
+      id: winId,
+      title: item.name || 'HTML 미리보기',
+      icon: item.icon || '🌐',
+      meta: 'HTML',
+      width: 960,
+      height: 680,
+      bodyClass: 'media-viewer-body',
+      contentEl: iframe,
+      headerActions: [
+        {
+          label: '↗ 새 탭',
+          title: '브라우저 새 탭으로 열기',
+          onClick: () => runHtmlContent(item)
+        },
+        {
+          label: '🖥️ PC 브라우저',
+          title: 'PC 기본 브라우저로 열기',
+          onClick: () => openMemoInLocalApp(item)
+        }
+      ],
+      onClose: () => {
+        try {
+          URL.revokeObjectURL(blobUrl);
+        } catch (_) {}
+      }
+    });
   }
 
   async function openDriveFileViewer(item) {
     const df = item?.driveFile;
     if (!df || !df.id) return;
 
-    activeViewerItem = item;
-    activeViewerBlobUrl = '';
+    const winId = `file-${item.id}`;
+    const existing = WinManager.getWindow(winId);
+    if (existing) {
+      existing.restore();
+      return;
+    }
 
     const cat = BrainDrive.getFileCategory(df);
     const sizeText = BrainDrive.formatFileSize(df.size);
+    let currentBlobUrl = '';
 
-    $('viewer-icon').textContent = item.icon || '📄';
-    $('viewer-title').textContent = df.name || item.name;
-    $('viewer-meta').textContent = sizeText ? `(${sizeText})` : '';
-    elViewerBody.innerHTML = `<div class="drive-preview-loading" style="color:#e5e7eb;">☁️ 파일 불러오는 중...</div>`;
-    elViewerModal.style.display = 'flex';
+    const win = WinManager.openWindow({
+      id: winId,
+      title: df.name || item.name,
+      icon: item.icon || '📄',
+      meta: sizeText ? `(${sizeText})` : '',
+      width: 940,
+      height: 660,
+      bodyClass: 'media-viewer-body',
+      contentHtml: `<div class="drive-preview-loading" style="color:#e5e7eb;">☁️ 파일 불러오는 중...</div>`,
+      headerActions: [
+        {
+          label: '↗ 새 탭',
+          title: '새 탭에서 열기',
+          onClick: () => {
+            if (currentBlobUrl) window.open(currentBlobUrl, '_blank');
+            else window.open(BrainDrive.getWebViewUrl(df), '_blank', 'noopener,noreferrer');
+          }
+        },
+        {
+          label: '🖥️ PC앱',
+          title: 'PC 연결 프로그램으로 바로 열기',
+          onClick: () => openMemoInLocalApp(item)
+        },
+        {
+          label: '⬇️ 저장',
+          title: '파일 다운로드',
+          onClick: () => downloadDriveFile(item)
+        }
+      ]
+    });
+    if (!win) return;
 
-    // 이미지 / PDF / 동영상 / 오디오 → 인증된 Blob URL로 앱 내부에서 지연 없이 바로 열기
+    // 이미지 / PDF / 동영상 / 오디오 → 인증된 Blob URL로 창 내부에 바로 표시
     if (['image', 'pdf', 'video', 'audio'].includes(cat)) {
       let token;
       try {
         token = await ensureDriveToken(true);
       } catch (err) {
-        closeDriveFileViewer();
+        win.close();
         showToast(`⚠️ ${err.message}`);
         return;
       }
 
       try {
         const entry = await BrainDrive.getFileBlobUrl(token, df.id, df.mimeType);
-        if (activeViewerItem !== item) return;
-        activeViewerBlobUrl = entry.url;
+        if (!WinManager.getWindow(winId)) return; // 로드 중 창 닫힘
+        currentBlobUrl = entry.url;
 
-        elViewerBody.innerHTML = '';
         if (cat === 'image') {
           const img = document.createElement('img');
           img.src = entry.url;
           img.alt = df.name || item.name;
-          elViewerBody.appendChild(img);
+          win.setBody(img);
         } else if (cat === 'pdf') {
           const iframe = document.createElement('iframe');
           iframe.src = entry.url;
           iframe.title = df.name || item.name;
-          elViewerBody.appendChild(iframe);
+          win.setBody(iframe);
         } else if (cat === 'video') {
           const video = document.createElement('video');
           video.src = entry.url;
           video.controls = true;
           video.autoplay = true;
-          elViewerBody.appendChild(video);
+          win.setBody(video);
         } else if (cat === 'audio') {
           const audio = document.createElement('audio');
           audio.src = entry.url;
           audio.controls = true;
           audio.autoplay = true;
-          elViewerBody.appendChild(audio);
+          win.setBody(audio);
         }
       } catch (err) {
+        if (!WinManager.getWindow(winId)) return;
         handleDriveError(err);
-        elViewerBody.innerHTML =
+        win.setBody(
           `<div class="viewer-fallback">` +
           `  <div class="viewer-fallback-icon">⚠️</div>` +
           `  <div>파일을 불러오지 못했습니다.</div>` +
           `  <p>${escapeHtml(err.message)}</p>` +
-          `  <button type="button" class="btn btn-drive" id="btn-viewer-retry-web">☁️ Google Drive에서 직접 열기</button>` +
-          `</div>`;
-        const retryBtn = $('btn-viewer-retry-web');
+          `  <button type="button" class="btn btn-drive btn-win-retry-web">☁️ Google Drive에서 직접 열기</button>` +
+          `</div>`
+        );
+        const retryBtn = win.bodyEl.querySelector('.btn-win-retry-web');
         if (retryBtn) {
           retryBtn.addEventListener('click', () => {
             window.open(BrainDrive.getWebViewUrl(df), '_blank', 'noopener,noreferrer');
@@ -2352,13 +2782,14 @@
       return;
     }
 
-    // PowerPoint(PPT/PPTX) / Word / Excel / 기타 → Google Drive 내장 뷰어 iframe + 새 탭 바로 열기 지원
+    // PowerPoint(PPT/PPTX) / Word / Excel / 기타 → Google Drive 내장 뷰어 iframe
     const previewUrl = BrainDrive.getPreviewEmbedUrl(df.id);
-    elViewerBody.innerHTML =
+    win.setBody(
       `<div class="viewer-notice-bar">` +
-      `  <span>☁️ Google Drive 뷰어로 표시 중입니다. 화면이 비어 있거나 로그인 안내가 뜨면 우측 상단 <b>[↗ 새 탭에서 열기]</b>를 눌러주세요.</span>` +
+      `  <span>☁️ Google Drive 뷰어로 표시 중입니다. 화면이 비어 보이면 상단 <b>[↗ 새 탭]</b> 또는 <b>[🖥️ PC앱]</b>을 눌러주세요.</span>` +
       `</div>` +
-      `<iframe src="${escapeHtml(previewUrl)}" allow="autoplay; fullscreen" title="${escapeHtml(df.name || item.name)}"></iframe>`;
+      `<iframe src="${escapeHtml(previewUrl)}" allow="autoplay; fullscreen" title="${escapeHtml(df.name || item.name)}"></iframe>`
+    );
   }
 
   async function downloadDriveFile(item) {
@@ -2387,6 +2818,14 @@
       showToast(`⚠️ 다운로드 실패: ${err.message}`);
     }
   }
+
+  $('btn-open-md-viewer').addEventListener('click', () => {
+    if (state.selectedItem) openMarkdownWindow(state.selectedItem, 'view');
+  });
+
+  $('btn-open-md-split').addEventListener('click', () => {
+    if (state.selectedItem) openMarkdownWindow(state.selectedItem, 'split');
+  });
 
   $('btn-drive-sync').addEventListener('click', () => {
     if (!BrainAuth.isConfigComplete(state.settings.firebaseConfig) || !isOwnerAuthenticated()) {
@@ -2466,7 +2905,7 @@
       const uploaded = await BrainDrive.uploadFile(driveToken, file, BrainAuth.getUser()?.email || '');
       saveStateForUndo();
       state.selectedItem.driveFile = uploaded;
-      if (!state.selectedItem.name || state.selectedItem.name === '새 메모') {
+      if (!state.selectedItem.name || state.selectedItem.name === '새 메모' || state.selectedItem.name === '새 메모.md') {
         state.selectedItem.name = file.name;
       }
       saveAndRender();
@@ -2479,24 +2918,6 @@
         openAuthModal();
       }
     }
-  });
-
-  $('btn-close-viewer').addEventListener('click', closeDriveFileViewer);
-  elViewerModal.addEventListener('click', (e) => {
-    if (e.target === elViewerModal) closeDriveFileViewer();
-  });
-
-  $('btn-viewer-newtab').addEventListener('click', () => {
-    if (!activeViewerItem?.driveFile) return;
-    if (activeViewerBlobUrl) {
-      window.open(activeViewerBlobUrl, '_blank');
-    } else {
-      window.open(BrainDrive.getWebViewUrl(activeViewerItem.driveFile), '_blank', 'noopener,noreferrer');
-    }
-  });
-
-  $('btn-viewer-download').addEventListener('click', () => {
-    if (activeViewerItem?.driveFile) downloadDriveFile(activeViewerItem);
   });
 
   window.addEventListener('focus', () => {
