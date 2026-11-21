@@ -1967,12 +1967,11 @@ html, body {
 
 .os-win.maximized {
   left: 0 !important;
-  top: 48px !important;
+  top: 0 !important;
   width: 100vw !important;
-  height: calc(100vh - 48px - 52px) !important;
-  border-radius: 0;
-  border-left: none;
-  border-right: none;
+  height: 100vh !important;
+  border-radius: 0 !important;
+  border: none !important;
 }
 
 .os-win-header {
@@ -2175,23 +2174,63 @@ html, body {
 .os-resize-se { bottom: -3px; right: -3px; width: 14px; height: 14px; cursor: nwse-resize; }
 .os-resize-sw { bottom: -3px; left: -3px; width: 12px; height: 12px; cursor: nesw-resize; }
 
-/* ================= macOS Floating Dock (Taskbar) ================= */
+/* ================= macOS Auto-Hide Floating Dock (Taskbar) ================= */
+.os-taskbar-hotzone {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 10px;
+  z-index: 4190;
+  display: none;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 2px;
+}
+
+.os-taskbar-pill {
+  width: 56px;
+  height: 4px;
+  border-radius: 99px;
+  background: rgba(100, 116, 139, 0.45);
+  transition: background 0.15s, width 0.15s;
+}
+
+.os-taskbar-hotzone:hover .os-taskbar-pill {
+  width: 78px;
+  background: var(--primary);
+}
+
 .os-taskbar {
-  height: 52px;
-  background: transparent;
+  position: fixed;
+  left: 50%;
+  bottom: 8px;
+  transform: translateX(-50%) translateY(calc(100% + 18px));
+  opacity: 0;
+  pointer-events: none;
+  max-width: calc(100vw - 24px);
+  height: 48px;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 6px 16px;
+  padding: 6px 14px;
   overflow-x: auto;
-  flex-shrink: 0;
-  z-index: 2400;
+  z-index: 4200;
   user-select: none;
-  border-top: 1px solid var(--border);
-  background: rgba(245, 245, 247, 0.78);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  border-radius: 16px;
+  border: 1px solid var(--border-strong);
+  background: rgba(245, 245, 247, 0.88);
+  backdrop-filter: blur(22px);
+  -webkit-backdrop-filter: blur(22px);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
+  transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.18s ease;
+}
+
+.os-taskbar.visible {
+  transform: translateX(-50%) translateY(0);
+  opacity: 1;
+  pointer-events: auto;
 }
 
 [data-theme="dark"] .os-taskbar {
@@ -3214,8 +3253,8 @@ html, body {
   color: var(--text-main);
 }
 
-.sb-cell.selected {
-  background: rgba(16, 185, 129, 0.12) !important;
+.sb-cell.selected:not(.active-cell) {
+  box-shadow: inset 0 0 0 999px rgba(33, 115, 70, 0.13);
 }
 
 .sb-cell.active-cell {
@@ -3389,13 +3428,13 @@ html, body {
 
 .xl-rtab {
   height: 30px;
-  padding: 0 12px;
+  padding: 0 9px;
   border: none;
   border-radius: 5px 5px 0 0;
   background: transparent;
   color: rgba(255, 255, 255, 0.88);
   font-family: inherit;
-  font-size: 0.78rem;
+  font-size: 0.77rem;
   font-weight: 500;
   cursor: pointer;
   transition: 0.12s;
@@ -3485,7 +3524,7 @@ html, body {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding: 0 10px;
+  padding: 0 7px;
   border-right: 1px solid var(--border);
 }
 
@@ -3501,7 +3540,7 @@ html, body {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 2px;
 }
 
 .xl-rgroup-lbl {
@@ -3680,12 +3719,12 @@ html, body {
 }
 
 .xl-workspace.mode-split .xl-grid-pane {
-  flex: 1.05;
+  flex: 0.72;
 }
 
 .xl-workspace.mode-split .xl-plot-pane {
   display: flex;
-  flex: 1.15;
+  flex: 1.55;
 }
 
 .xl-workspace.mode-plot .xl-grid-pane {
@@ -3730,25 +3769,35 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
-  padding: 5px 10px;
+  gap: 5px;
+  padding: 4px 8px;
   background: var(--surface-alt);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow-x: auto;
 }
 
 .origin-plot-bar-title {
-  font-size: 0.76rem;
+  font-size: 0.73rem;
   font-weight: 700;
   color: var(--text-main);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .origin-plot-bar-tools {
   display: flex;
   align-items: center;
-  gap: 4px;
-  flex-wrap: wrap;
+  gap: 3px;
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+}
+
+.origin-plot-bar-tools .sb-tb-btn {
+  height: 23px;
+  padding: 0 6px;
+  font-size: 0.7rem;
 }
 
 .origin-svg-stage {
@@ -4041,4 +4090,1492 @@ html, body {
 .xl-autobackup-lbl {
   font-size: 0.7rem;
   color: var(--text-muted);
+}
+
+/* ================= Math & Engineering Markdown Studio ================= */
+.os-win-body.mmd-win-body {
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.mmd-root {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 100%;
+  height: 100%;
+  background: var(--surface);
+  color: var(--text-main);
+  position: relative;
+  overflow: hidden;
+}
+
+.mmd-toolbar {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-alt);
+  flex-shrink: 0;
+  overflow-x: auto;
+}
+
+.mmd-tb-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mmd-tb-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-wrap: wrap;
+}
+
+.mmd-tb-right {
+  margin-left: auto;
+}
+
+.mmd-btn {
+  height: 26px;
+  padding: 0 7px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-main);
+  font-size: 0.75rem;
+  font-family: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  white-space: nowrap;
+  transition: 0.12s;
+}
+
+.mmd-btn:hover {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+.mmd-btn.active {
+  background: var(--primary-soft);
+  border-color: var(--primary);
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.mmd-btn.primary {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.mmd-btn.math-accent {
+  font-family: "Cambria Math", Georgia, serif;
+  color: #4f46e5;
+  border-color: rgba(79, 70, 229, 0.35);
+  background: rgba(79, 70, 229, 0.08);
+  font-weight: 700;
+}
+
+[data-theme="dark"] .mmd-btn.math-accent {
+  color: #a5b4fc;
+}
+
+/* Visual Formula Palette Bar (MT-03) */
+.mmd-palette-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+  overflow-x: auto;
+}
+
+.mmd-palette-tabs {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding-right: 8px;
+  border-right: 1px solid var(--border-strong);
+  flex-shrink: 0;
+}
+
+.mmd-ptab {
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-sub);
+  font-size: 0.72rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.mmd-ptab.active {
+  background: rgba(79, 70, 229, 0.12);
+  color: #4f46e5;
+  border-color: rgba(79, 70, 229, 0.3);
+}
+
+[data-theme="dark"] .mmd-ptab.active {
+  color: #a5b4fc;
+}
+
+.mmd-palette-items {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.mmd-pitem {
+  height: 25px;
+  min-width: 28px;
+  padding: 0 7px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--surface-alt);
+  color: var(--text-main);
+  font-family: "Cambria Math", "Times New Roman", Pretendard, serif;
+  font-size: 0.82rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: 0.1s;
+}
+
+.mmd-pitem:hover {
+  background: rgba(79, 70, 229, 0.14);
+  border-color: #4f46e5;
+  color: #4f46e5;
+}
+
+/* Find & Replace Bar (ED-05) */
+.mmd-find-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-strong);
+  background: var(--surface-alt);
+  flex-shrink: 0;
+}
+
+.mmd-find-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.mmd-find-inp {
+  width: 170px;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-main);
+  font-size: 0.77rem;
+  outline: none;
+}
+
+.mmd-find-inp:focus {
+  border-color: var(--primary);
+}
+
+.mmd-find-count {
+  font-size: 0.73rem;
+  color: var(--text-sub);
+  min-width: 38px;
+  text-align: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* Table Wizard Popover (ED-03) */
+.mmd-table-wizard {
+  position: absolute;
+  top: 42px;
+  left: 260px;
+  z-index: 65;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
+  padding: 10px;
+}
+
+.mmd-tw-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.mmd-tw-align {
+  height: 24px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--surface-alt);
+  color: var(--text-main);
+  font-size: 0.72rem;
+  padding: 0 4px;
+}
+
+.mmd-tw-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 20px);
+  gap: 3px;
+}
+
+.mmd-tw-cell {
+  width: 20px;
+  height: 18px;
+  border-radius: 3px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-alt);
+  cursor: pointer;
+}
+
+.mmd-tw-cell.active {
+  background: rgba(79, 70, 229, 0.28);
+  border-color: #4f46e5;
+}
+
+/* 3-Column Workspace (TOC + Editor + Preview) */
+.mmd-workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.mmd-toc-pane {
+  width: 196px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  background: var(--surface-alt);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.mmd-toc-head {
+  padding: 8px 10px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--text-sub);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.mmd-toc-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mmd-toc-empty {
+  font-size: 0.73rem;
+  color: var(--text-muted);
+  padding: 8px 6px;
+  line-height: 1.45;
+}
+
+.mmd-toc-item {
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 0.76rem;
+  font-family: inherit;
+  padding: 4px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mmd-toc-item:hover {
+  background: var(--surface-hover);
+  color: var(--primary);
+}
+
+.mmd-toc-item.lvl-1 { font-weight: 700; }
+.mmd-toc-item.lvl-2 { padding-left: 14px; font-weight: 600; }
+.mmd-toc-item.lvl-3 { padding-left: 24px; color: var(--text-sub); }
+.mmd-toc-item.lvl-4 { padding-left: 34px; color: var(--text-muted); font-size: 0.72rem; }
+
+/* Editor Pane with Line Numbers */
+.mmd-editor-pane {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.mmd-editor-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.mmd-gutter {
+  width: 44px;
+  flex-shrink: 0;
+  padding: 12px 4px 12px 2px;
+  background: var(--surface-alt);
+  border-right: 1px solid var(--border);
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.62;
+  text-align: right;
+  overflow: hidden;
+  user-select: none;
+}
+
+.mmd-ln {
+  padding-right: 5px;
+  height: 1.62em;
+}
+
+.mmd-ln.has-err {
+  background: rgba(239, 68, 68, 0.18);
+  color: #dc2626;
+  font-weight: 800;
+  border-radius: 3px;
+}
+
+.mmd-textarea {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  resize: none;
+  padding: 12px 14px;
+  background: var(--surface);
+  color: var(--text-main);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "D2Coding", monospace;
+  font-size: 13.5px;
+  line-height: 1.62;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* LaTeX Autocomplete Popup (MT-02) */
+.mmd-ac-popup {
+  position: absolute;
+  left: 56px;
+  z-index: 40;
+  width: 260px;
+  max-height: 210px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.2);
+  padding: 4px;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mmd-ac-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 0.76rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.mmd-ac-item.active,
+.mmd-ac-item:hover {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.mmd-ac-cmd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 700;
+}
+
+.mmd-ac-desc {
+  font-size: 0.71rem;
+  color: var(--text-sub);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Cursor Mini Math Preview Tooltip (MT-04) */
+.mmd-math-tooltip {
+  position: absolute;
+  left: 58px;
+  right: 18px;
+  max-width: 460px;
+  z-index: 35;
+  background: var(--surface);
+  border: 1px solid rgba(79, 70, 229, 0.45);
+  border-radius: 8px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.16);
+  padding: 7px 12px;
+  pointer-events: none;
+}
+
+.mmd-mt-lbl {
+  font-size: 0.67rem;
+  font-weight: 700;
+  color: #4f46e5;
+  margin-bottom: 4px;
+}
+
+.mmd-mt-body {
+  overflow-x: auto;
+  padding: 2px 0;
+}
+
+/* Preview Pane */
+.mmd-preview-pane {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  background: var(--surface);
+  padding: 18px 24px 36px;
+}
+
+.mmd-preview-inner {
+  max-width: 780px;
+  margin: 0 auto;
+}
+
+/* Mode Switching */
+.mmd-workspace[data-mode="edit"] .mmd-preview-pane { display: none; }
+.mmd-workspace[data-mode="edit"] .mmd-editor-pane { border-right: none; }
+.mmd-workspace[data-mode="view"] .mmd-editor-pane { display: none; }
+
+/* Status Bar */
+.mmd-statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-alt);
+  font-size: 0.72rem;
+  color: var(--text-sub);
+  flex-shrink: 0;
+}
+
+.mmd-stat-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mmd-err-badge {
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  background: rgba(239, 68, 68, 0.12);
+  color: #dc2626;
+  border-radius: 99px;
+  padding: 1px 8px;
+  font-size: 0.71rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mmd-stat-right {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* Rendered Math, Code Highlighting, Mermaid, Images, Footnotes */
+.md-math-block {
+  text-align: center;
+  margin: 12px 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+}
+
+.md-math-err-inline {
+  background: rgba(239, 68, 68, 0.12);
+  color: #dc2626;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85em;
+}
+
+.md-offline-math {
+  font-family: "Cambria Math", "Times New Roman", Georgia, serif;
+}
+
+.md-offline-math.display {
+  font-size: 1.22em;
+}
+
+.md-m-frac {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  vertical-align: middle;
+  margin: 0 3px;
+  font-size: 0.9em;
+}
+
+.md-m-num {
+  border-bottom: 1px solid currentColor;
+  padding: 0 4px 1px;
+}
+
+.md-m-den {
+  padding: 1px 4px 0;
+}
+
+.md-m-rad {
+  border-top: 1px solid currentColor;
+  padding: 0 3px;
+}
+
+.md-m-env table {
+  display: inline-table;
+  width: auto;
+  border-collapse: collapse;
+  vertical-align: middle;
+}
+
+.md-m-env td {
+  border: none !important;
+  padding: 2px 6px !important;
+  text-align: center;
+}
+
+.md-m-bmatrix table {
+  border-left: 2px solid currentColor;
+  border-right: 2px solid currentColor;
+}
+
+.md-m-pmatrix table {
+  border-left: 2px solid currentColor;
+  border-right: 2px solid currentColor;
+  border-radius: 8px;
+}
+
+.md-m-cases table {
+  border-left: 2px solid currentColor;
+}
+
+.md-inline-img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  margin: 8px 0;
+  border: 1px solid var(--border);
+}
+
+.md-mermaid-wrap {
+  text-align: center;
+  margin: 12px 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-alt);
+  overflow-x: auto;
+}
+
+.md-mermaid-wrap svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.md-mermaid-fallback {
+  text-align: left;
+  font-size: 0.78rem;
+  margin: 0;
+}
+
+.md-mermaid-err {
+  color: #dc2626;
+  font-size: 0.78rem;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.md-footnotes {
+  margin-top: 22px;
+  font-size: 0.84rem;
+  color: var(--text-sub);
+}
+
+.md-fn-ref a {
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.hl-comment { color: #94a3b8; font-style: italic; }
+.hl-str { color: #86efac; }
+.hl-num { color: #fda4af; }
+.hl-kw { color: #93c5fd; font-weight: 600; }
+
+
+/* ================= Excel Mode / Origin Mode & Full Ribbon UI ================= */
+.sb-sheet-root {
+  max-width: 100%;
+  overflow: hidden;
+  position: relative;
+}
+
+.sb-sheet-root.appmode-excel .xl-rtab-origin,
+.sb-sheet-root.appmode-excel .xl-view-switcher {
+  display: none;
+}
+
+.xl-ribbon-top {
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.xl-ribbon-top::-webkit-scrollbar { display: none; }
+
+.xl-rtab-file {
+  background: rgba(0, 0, 0, 0.22);
+  font-weight: 700;
+  margin-right: 2px;
+}
+.xl-rtab-file:hover {
+  background: rgba(0, 0, 0, 0.34);
+}
+
+.xl-top-right-controls {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.xl-mode-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.xl-mode-btn {
+  height: 24px;
+  padding: 0 9px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.88);
+  font-family: inherit;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: 0.14s;
+}
+
+.xl-mode-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.xl-mode-btn.active[data-appmode="excel"] {
+  background: #ffffff;
+  color: #217346;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.16);
+}
+
+.xl-mode-btn.active[data-appmode="origin"] {
+  background: #eff6ff;
+  color: #1d4ed8;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.16);
+}
+
+.xl-ribbon-body {
+  min-height: 78px;
+  padding: 5px 10px 4px;
+}
+
+.xl-rgroup {
+  min-height: 68px;
+}
+
+.xl-rgroup-origin {
+  background: rgba(37, 99, 235, 0.045);
+  border-radius: 6px;
+  padding: 2px 9px !important;
+  margin-right: 6px;
+  border: 1px solid rgba(37, 99, 235, 0.22) !important;
+}
+
+.xl-rgroup-origin .xl-rgroup-lbl {
+  color: #1d4ed8;
+  font-weight: 700;
+}
+
+[data-theme="dark"] .xl-rgroup-origin .xl-rgroup-lbl {
+  color: #60a5fa;
+}
+
+.xl-rgroup-grid {
+  display: flex;
+  align-items: stretch;
+  gap: 5px;
+}
+
+.xl-stack-col {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+}
+
+.xl-stack-rows {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+}
+
+.xl-rrow {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.xl-big-btn {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: 38px;
+  height: 50px;
+  padding: 2px 5px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-main);
+  font-family: inherit;
+  font-size: 0.66rem;
+  font-weight: 500;
+  line-height: 1.15;
+  text-align: center;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: 0.12s;
+}
+
+.xl-big-btn:hover {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+.xl-big-btn.active {
+  background: rgba(33, 115, 70, 0.14);
+  border-color: #217346;
+  color: #217346;
+  font-weight: 700;
+}
+
+.xl-big-btn.primary-lit {
+  background: rgba(33, 115, 70, 0.08);
+  border-color: rgba(33, 115, 70, 0.25);
+}
+
+.xl-big-btn.origin-accent {
+  background: rgba(37, 99, 235, 0.09);
+  border-color: rgba(37, 99, 235, 0.28);
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
+[data-theme="dark"] .xl-big-btn.origin-accent {
+  color: #93c5fd;
+}
+
+.xl-big-ico {
+  font-size: 1.12rem;
+  line-height: 1.1;
+}
+
+.xl-mini-btn {
+  height: 20px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-main);
+  font-family: inherit;
+  font-size: 0.68rem;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.xl-rrow .sb-tb-btn {
+  padding: 0 5px;
+  height: 24px;
+  min-width: 24px;
+  font-size: 0.72rem;
+}
+
+.xl-rrow .sb-tb-color {
+  height: 24px;
+  padding: 0 4px;
+  font-size: 0.72rem;
+}
+
+.xl-mini-btn:hover {
+  background: var(--surface-hover);
+  border-color: var(--border);
+}
+
+.xl-mini-btn.active {
+  background: rgba(33, 115, 70, 0.16);
+  border-color: #217346;
+  color: #217346;
+  font-weight: 700;
+}
+
+.xl-rselect {
+  height: 24px;
+  padding: 0 4px;
+  border-radius: 4px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-main);
+  font-family: inherit;
+  font-size: 0.73rem;
+  outline: none;
+}
+
+/* Floating Ribbon Dropdown */
+.xl-ribbon-dropdown {
+  position: absolute;
+  z-index: 95;
+  min-width: 215px;
+  max-width: 310px;
+  max-height: 360px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.2);
+  padding: 5px;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.xl-dd-title {
+  font-size: 0.69rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  padding: 4px 8px 3px;
+}
+
+.xl-ribbon-dropdown button {
+  text-align: left;
+  padding: 6px 9px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 0.76rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.xl-ribbon-dropdown button:hover {
+  background: var(--surface-hover);
+}
+
+.xl-ribbon-dropdown button.danger {
+  color: #dc2626;
+}
+
+.xl-ribbon-dropdown hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 3px 0;
+}
+
+.xl-sym-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 3px;
+  padding: 3px;
+}
+
+.xl-sym-cell {
+  text-align: center !important;
+  padding: 5px 2px !important;
+  border: 1px solid var(--border) !important;
+  font-size: 0.84rem !important;
+  font-weight: 600;
+}
+
+.xl-sym-cell:hover {
+  background: rgba(33, 115, 70, 0.14) !important;
+  border-color: #217346 !important;
+}
+
+/* Excel Column Filter Button & Popover */
+.sb-cell.has-filter-btn {
+  position: relative;
+  padding-right: 22px;
+}
+
+.sb-cell-txt {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.xl-filter-btn {
+  position: absolute;
+  right: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 17px;
+  height: 17px;
+  padding: 0;
+  border-radius: 3px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-alt);
+  color: var(--text-sub);
+  font-size: 0.62rem;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.xl-filter-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text-main);
+}
+
+.xl-filter-btn.is-active {
+  background: #217346;
+  border-color: #217346;
+  color: #ffffff;
+}
+
+.sb-row-th.is-filtered-row {
+  color: #2563eb;
+  font-weight: 700;
+}
+
+.xl-filter-popover {
+  position: absolute;
+  z-index: 90;
+  width: 242px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.22);
+  padding: 8px;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.xl-fp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.76rem;
+  font-weight: 700;
+  color: #217346;
+}
+
+.xl-fp-sorts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 5px;
+}
+
+.xl-fp-sorts button {
+  text-align: left;
+  padding: 4px 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 0.73rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.xl-fp-sorts button:hover {
+  background: var(--surface-hover);
+}
+
+.xl-fp-search {
+  height: 26px;
+  padding: 0 7px;
+  border-radius: 5px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-alt);
+  color: var(--text-main);
+  font-size: 0.74rem;
+  outline: none;
+}
+
+.xl-fp-list {
+  max-height: 155px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.xl-fp-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 5px;
+  border-radius: 4px;
+  font-size: 0.73rem;
+  cursor: pointer;
+}
+
+.xl-fp-item:hover {
+  background: var(--surface-hover);
+}
+
+.xl-fp-val {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xl-fp-cnt {
+  font-size: 0.67rem;
+  color: var(--text-muted);
+}
+
+.xl-fp-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  padding-top: 2px;
+}
+
+/* Freeze Panes (틀 고정) */
+.sb-cell.xl-frozen-cell {
+  background: var(--surface);
+}
+
+.xl-frozen-row-edge {
+  border-bottom: 2px solid #217346 !important;
+}
+
+.xl-frozen-col-edge {
+  border-right: 2px solid #217346 !important;
+}
+
+/* Wrap text, Gridlines toggle, Format Painter, Sparklines */
+.sb-cell.is-wrap {
+  white-space: pre-wrap;
+  line-height: 1.35;
+  height: auto;
+  min-height: 26px;
+}
+
+.sb-sheet-table.hide-gridlines .sb-cell {
+  border-right-color: transparent;
+  border-bottom-color: transparent;
+}
+
+.sb-sheet-grid-wrap.format-painter-cursor .sb-cell {
+  cursor: copy !important;
+}
+
+.xl-sparkline-svg {
+  display: block;
+  width: 100%;
+  height: 20px;
+}
+
+/* Find & Replace Bar */
+.xl-find-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 5px 10px;
+  background: var(--surface-alt);
+  border-bottom: 1px solid var(--border-strong);
+  flex-shrink: 0;
+}
+
+.xl-find-lbl {
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: #217346;
+}
+
+.xl-find-inp {
+  height: 24px;
+  width: 140px;
+  padding: 0 7px;
+  border-radius: 5px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-main);
+  font-size: 0.74rem;
+  outline: none;
+}
+
+.xl-find-count {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  min-width: 44px;
+  text-align: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Footer Zoom Controls */
+.xl-zoom-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+}
+
+.xl-zoom-step {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-main);
+  font-size: 0.78rem;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.xl-zoom-step:hover {
+  background: var(--surface-hover);
+}
+
+.xl-zoom-val {
+  min-width: 38px;
+  text-align: center;
+  font-size: 0.72rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-sub);
+}
+
+/* Name Manager */
+.xl-nm-list {
+  max-height: 140px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.xl-nm-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-alt);
+  font-size: 0.76rem;
+}
+
+/* ================= Origin Plot Interactive Upgrades ================= */
+.origin-insp-resizer {
+  width: 6px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: var(--border);
+  position: relative;
+  transition: background 0.14s;
+}
+
+.origin-insp-resizer:hover,
+.origin-insp-resizer.dragging {
+  background: #2563eb;
+}
+
+.origin-insp-resizer::after {
+  content: '⋮';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 11px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.origin-plot-shell {
+  outline: none;
+}
+
+.origin-sel-hud {
+  position: absolute;
+  bottom: 10px;
+  right: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(37, 99, 235, 0.92);
+  color: #ffffff;
+  font-size: 0.71rem;
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.28);
+}
+
+.insp-series-card.is-selected {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.22);
+}
+
+/* Plot Context Menu */
+.origin-plot-ctxmenu {
+  position: absolute;
+  z-index: 88;
+  min-width: 215px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.22);
+  padding: 5px;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.origin-plot-ctxmenu button {
+  text-align: left;
+  padding: 6px 9px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 0.76rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.origin-plot-ctxmenu button:hover {
+  background: var(--surface-hover);
+}
+
+.origin-plot-ctxmenu button.danger {
+  color: #dc2626;
+}
+
+.origin-plot-ctxmenu hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 3px 0;
+}
+
+/* Single Point Editor & Text Annotation Popover */
+.origin-float-popover {
+  position: absolute;
+  z-index: 92;
+  width: 266px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.24);
+  padding: 10px 12px;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.origin-pop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #1d4ed8;
+}
+
+[data-theme="dark"] .origin-pop-head {
+  color: #60a5fa;
+}
+
+.origin-pop-close {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.82rem;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+
+.origin-pop-close:hover {
+  background: var(--surface-hover);
+  color: var(--text-main);
+}
+
+.origin-pop-sub {
+  font-size: 0.71rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-sub);
+  background: var(--surface-alt);
+  padding: 4px 7px;
+  border-radius: 5px;
+}
+
+.origin-pop-textarea {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-main);
+  font-family: inherit;
+  font-size: 0.78rem;
+  resize: vertical;
+  outline: none;
+}
+
+.origin-pop-textarea:focus {
+  border-color: #2563eb;
+}
+
+.origin-pop-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.sb-tb-btn.danger {
+  color: #dc2626;
+  border-color: rgba(220, 38, 38, 0.35);
+}
+
+/* Plot Modal Overlay (Curve Fitting Live Preview & Legend Properties) */
+.origin-plot-modal-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 96;
+  background: rgba(15, 23, 42, 0.48);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+}
+
+.origin-fit-preview-wrap {
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: #ffffff;
+  overflow: hidden;
+  min-height: 165px;
+}
+
+.origin-fit-eq-box {
+  padding: 7px 10px;
+  border-radius: 6px;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  word-break: break-all;
+}
+
+.origin-fit-eq-box.ok {
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1e3a8a;
+}
+
+.origin-fit-eq-box.err {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+}
+
+.origin-leg-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 190px;
+  overflow-y: auto;
+}
+
+.origin-leg-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-alt);
+}
+
+.origin-leg-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.origin-leg-name {
+  flex: 1;
+  min-width: 70px;
+  height: 24px;
+  padding: 0 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-main);
+  font-size: 0.74rem;
 }

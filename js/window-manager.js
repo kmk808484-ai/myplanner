@@ -8,6 +8,8 @@
   const windows = new Map(); // id -> winState
   let topZ = 2100;
   let cascadeCount = 0;
+  let taskbarHideTimer = null;
+  let taskbarHoverBound = false;
 
   function getLayer() {
     return document.getElementById('os-window-layer');
@@ -17,17 +19,74 @@
     return document.getElementById('os-taskbar');
   }
 
+  function ensureTaskbarAutoHide() {
+    if (taskbarHoverBound) return;
+    const taskbar = getTaskbar();
+    if (!taskbar) return;
+    taskbarHoverBound = true;
+
+    let hotzone = document.getElementById('os-taskbar-hotzone');
+    if (!hotzone) {
+      hotzone = document.createElement('div');
+      hotzone.id = 'os-taskbar-hotzone';
+      hotzone.className = 'os-taskbar-hotzone';
+      hotzone.innerHTML = '<span class="os-taskbar-pill"></span>';
+      document.body.appendChild(hotzone);
+    }
+
+    const showDock = () => {
+      if (windows.size === 0) return;
+      if (taskbarHideTimer) { clearTimeout(taskbarHideTimer); taskbarHideTimer = null; }
+      taskbar.classList.add('visible');
+    };
+
+    const scheduleHideDock = (delay = 320) => {
+      if (taskbarHideTimer) clearTimeout(taskbarHideTimer);
+      taskbarHideTimer = setTimeout(() => {
+        taskbarHideTimer = null;
+        if (!taskbar.matches(':hover') && !hotzone.matches(':hover')) {
+          taskbar.classList.remove('visible');
+        }
+      }, delay);
+    };
+
+    hotzone.addEventListener('mouseenter', showDock);
+    hotzone.addEventListener('mouseleave', () => scheduleHideDock(360));
+    taskbar.addEventListener('mouseenter', showDock);
+    taskbar.addEventListener('mouseleave', () => scheduleHideDock(320));
+  }
+
+  function peekTaskbar(durationMs = 1400) {
+    const taskbar = getTaskbar();
+    if (!taskbar || windows.size === 0) return;
+    ensureTaskbarAutoHide();
+    taskbar.classList.add('visible');
+    if (taskbarHideTimer) clearTimeout(taskbarHideTimer);
+    taskbarHideTimer = setTimeout(() => {
+      taskbarHideTimer = null;
+      const hotzone = document.getElementById('os-taskbar-hotzone');
+      if (!taskbar.matches(':hover') && !(hotzone && hotzone.matches(':hover'))) {
+        taskbar.classList.remove('visible');
+      }
+    }, durationMs);
+  }
+
   function renderTaskbar() {
     const taskbar = getTaskbar();
     if (!taskbar) return;
+    ensureTaskbarAutoHide();
+    const hotzone = document.getElementById('os-taskbar-hotzone');
 
     if (windows.size === 0) {
       taskbar.style.display = 'none';
+      taskbar.classList.remove('visible');
       taskbar.innerHTML = '';
+      if (hotzone) hotzone.style.display = 'none';
       return;
     }
 
     taskbar.style.display = 'flex';
+    if (hotzone) hotzone.style.display = 'flex';
     taskbar.innerHTML = '';
 
     // Determine highest z-index visible window
@@ -371,6 +430,7 @@
         winState.minimized = true;
         winEl.style.display = 'none';
         renderTaskbar();
+        peekTaskbar(1400);
       },
       restore() {
         winState.minimized = false;
@@ -462,10 +522,50 @@
     return Array.from(windows.keys());
   }
 
+  function tileWindows(ids = null, direction = 'vertical') {
+    const targetIds = Array.isArray(ids) && ids.length > 0 ? ids : Array.from(windows.keys());
+    const list = targetIds.map((id) => windows.get(String(id))).filter(Boolean);
+    if (list.length === 0) return;
+
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const gap = 6;
+    const topPad = 4;
+
+    list.forEach((w, idx) => {
+      if (w.minimized) {
+        w.minimized = false;
+        w.el.style.display = 'flex';
+      }
+      if (w.maximized) {
+        w.maximized = false;
+        w.el.classList.remove('maximized');
+        w.btnMax.innerHTML = '<span>+</span>';
+      }
+      if (direction === 'horizontal') {
+        const h = Math.max(MIN_HEIGHT, Math.floor((vh - topPad * 2 - gap * (list.length - 1)) / list.length));
+        w.el.style.left = `${gap}px`;
+        w.el.style.top = `${topPad + idx * (h + gap)}px`;
+        w.el.style.width = `${Math.max(MIN_WIDTH, vw - gap * 2)}px`;
+        w.el.style.height = `${h}px`;
+      } else {
+        const widthEach = Math.max(MIN_WIDTH, Math.floor((vw - gap * (list.length + 1)) / list.length));
+        w.el.style.left = `${gap + idx * (widthEach + gap)}px`;
+        w.el.style.top = `${topPad}px`;
+        w.el.style.width = `${widthEach}px`;
+        w.el.style.height = `${Math.max(MIN_HEIGHT, vh - topPad * 2 - 8)}px`;
+      }
+      w.z = ++topZ;
+      w.el.style.zIndex = String(w.z);
+    });
+    renderTaskbar();
+  }
+
   global.BrainWindowManager = {
     openWindow,
     getWindow,
     listOpenWindowIds,
+    tileWindows,
     closeAll
   };
 })(window);

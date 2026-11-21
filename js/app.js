@@ -1046,6 +1046,7 @@
     }
 
     $('p-summary').innerHTML = renderMarkdown(item.summary);
+    window.BrainMarkdown.renderMermaidBlocks($('p-summary')).catch(() => {});
     renderContextChips();
   }
 
@@ -3015,7 +3016,7 @@
     });
   }
 
-  function openMarkdownWindow(item, initialMode = 'view') {
+  function openMarkdownWindow(item, initialMode = 'split') {
     if (!item || item.type !== 'doc') return;
     const winId = `md-${item.id}`;
     const existing = WinManager.getWindow(winId);
@@ -3026,186 +3027,37 @@
       return;
     }
 
-    const root = document.createElement('div');
-    root.className = 'md-app';
-    root.innerHTML =
-      `<div class="md-toolbar">` +
-      `  <div class="md-toolbar-left">` +
-      `    <div class="md-mode-tabs">` +
-      `      <button type="button" class="md-mode-btn" data-mode="view">📖 보기</button>` +
-      `      <button type="button" class="md-mode-btn" data-mode="split">⚡ 분할</button>` +
-      `      <button type="button" class="md-mode-btn" data-mode="edit">✏️ 편집</button>` +
-      `    </div>` +
-      `    <div class="md-format-bar">` +
-      `      <button type="button" class="md-fmt-btn" data-fmt="h1" title="제목 1">H1</button>` +
-      `      <button type="button" class="md-fmt-btn" data-fmt="h2" title="제목 2">H2</button>` +
-      `      <button type="button" class="md-fmt-btn" data-fmt="bold" title="굵게"><b>B</b></button>` +
-      `      <button type="button" class="md-fmt-btn" data-fmt="italic" title="기울임"><i>I</i></button>` +
-      `      <button type="button" class="md-fmt-btn" data-fmt="code" title="코드 블록">&lt;/&gt;</button>` +
-      `      <button type="button" class="md-fmt-btn" data-fmt="check" title="체크리스트">☑️</button>` +
-      `      <button type="button" class="md-fmt-btn" data-fmt="table" title="표 삽입">표</button>` +
-      `    </div>` +
-      `  </div>` +
-      `  <div class="md-toolbar-right">` +
-      `    <span class="md-save-indicator">저장됨</span>` +
-      `    <button type="button" class="btn-sm btn-primary-soft md-btn-save">💾 저장</button>` +
-      `    <button type="button" class="btn-sm md-btn-copy">📋 복사</button>` +
-      `  </div>` +
-      `</div>` +
-      `<div class="md-workspace" data-mode="${initialMode}">` +
-      `  <div class="md-editor-pane">` +
-      `    <textarea class="md-editor-textarea" placeholder="# 제목을 입력하고 마크다운으로 자유롭게 작성하세요..."></textarea>` +
-      `  </div>` +
-      `  <div class="md-viewer-pane">` +
-      `    <div class="md-viewer-inner markdown-body"></div>` +
-      `  </div>` +
-      `</div>` +
-      `<div class="md-statusbar">` +
-      `  <span class="md-stat-left">Markdown Viewer</span>` +
-      `  <span class="md-stat-right">0자 · 0줄</span>` +
-      `</div>`;
+    const hostEl = document.createElement('div');
+    hostEl.style.width = '100%';
+    hostEl.style.height = '100%';
 
-    const workspace = root.querySelector('.md-workspace');
-    const formatBar = root.querySelector('.md-format-bar');
-    const textarea = root.querySelector('.md-editor-textarea');
-    const viewerInner = root.querySelector('.md-viewer-inner');
-    const saveIndicator = root.querySelector('.md-save-indicator');
-    const btnSave = root.querySelector('.md-btn-save');
-    const btnCopy = root.querySelector('.md-btn-copy');
-    const statRight = root.querySelector('.md-stat-right');
-    const modeButtons = root.querySelectorAll('.md-mode-btn');
-
-    let isDirty = false;
-    let currentMode = initialMode;
-    let mdAutoSaveTimer = null;
-
-    const updateStats = () => {
-      const val = textarea.value || '';
-      const chars = val.length;
-      const lines = val ? val.split('\n').length : 0;
-      statRight.textContent = `${chars.toLocaleString()}자 · ${lines.toLocaleString()}줄`;
-    };
-
-    const renderPreview = () => {
-      viewerInner.innerHTML = renderMarkdown(textarea.value);
-      updateStats();
-    };
-
-    const setDirty = (dirty) => {
-      isDirty = dirty;
-      saveIndicator.textContent = dirty ? '저장 중...' : '☁️ 저장됨';
-      saveIndicator.classList.toggle('dirty', dirty);
-    };
-
-    const saveMdContent = (silent = false) => {
-      if (mdAutoSaveTimer) {
-        clearTimeout(mdAutoSaveTimer);
-        mdAutoSaveTimer = null;
+    const controller = window.BrainMathMarkdown.mountMathMarkdownEditor(hostEl, {
+      initialContent: item.summary || '',
+      initialMode,
+      fileName: item.name,
+      onToast: showToast,
+      onSave(newVal, silent) {
+        if (newVal === (item.summary || '') && silent) return;
+        saveStateForUndo();
+        item.summary = newVal;
+        saveAndRender();
+        scheduleDocFileSyncToDrive(item, true);
+        if (state.selectedItem && state.selectedItem.id === item.id && !isEditing) {
+          selectItem(item);
+        }
+        if (!silent) showToast(`💾 "${item.name}" 저장 및 Google Drive 동기화됨`);
       }
-      const val = textarea.value;
-      if (val === (item.summary || '') && !isDirty) return;
-      saveStateForUndo();
-      item.summary = val;
-      saveAndRender();
-      scheduleDocFileSyncToDrive(item, true);
-      if (state.selectedItem && state.selectedItem.id === item.id && !isEditing) {
-        selectItem(item);
-      }
-      setDirty(false);
-      if (!silent) showToast(`💾 "${item.name}" 저장 및 Google Drive 동기화됨`);
-    };
-
-    const triggerRealtimeAutoSave = () => {
-      setDirty(true);
-      renderPreview();
-      if (mdAutoSaveTimer) clearTimeout(mdAutoSaveTimer);
-      mdAutoSaveTimer = setTimeout(() => {
-        mdAutoSaveTimer = null;
-        saveMdContent(true);
-      }, 1600);
-    };
-
-    const setMode = (mode) => {
-      currentMode = mode;
-      workspace.dataset.mode = mode;
-      modeButtons.forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
-      formatBar.style.display = mode === 'view' ? 'none' : 'inline-flex';
-      if (mode !== 'view') textarea.focus();
-      renderPreview();
-    };
-
-    const insertFormat = (fmt) => {
-      const start = textarea.selectionStart;
-      const end = textarea.selectionEnd;
-      const selected = textarea.value.slice(start, end);
-      let replacement = '';
-      let cursorOffset = 0;
-
-      if (fmt === 'h1') { replacement = `# ${selected || '제목'}`; cursorOffset = replacement.length; }
-      else if (fmt === 'h2') { replacement = `## ${selected || '소제목'}`; cursorOffset = replacement.length; }
-      else if (fmt === 'bold') { replacement = `**${selected || '굵은 텍스트'}**`; cursorOffset = replacement.length - 2; }
-      else if (fmt === 'italic') { replacement = `*${selected || '기울임'}*`; cursorOffset = replacement.length - 1; }
-      else if (fmt === 'code') { replacement = `\n\`\`\`\n${selected || '코드 입력'}\n\`\`\`\n`; cursorOffset = replacement.length - 5; }
-      else if (fmt === 'check') { replacement = `\n- [ ] ${selected || '할 일 항목'}`; cursorOffset = replacement.length; }
-      else if (fmt === 'table') {
-        replacement = `\n| 항목 | 내용 |\n| --- | --- |\n| 예시 1 | 설명 1 |\n`;
-        cursorOffset = replacement.length;
-      }
-
-      textarea.value = textarea.value.slice(0, start) + replacement + textarea.value.slice(end);
-      textarea.focus();
-      textarea.setSelectionRange(start + cursorOffset, start + cursorOffset);
-      triggerRealtimeAutoSave();
-    };
-
-    // Init content
-    textarea.value = item.summary || '';
-    setMode(initialMode);
-
-    modeButtons.forEach((btn) => {
-      btn.addEventListener('click', () => setMode(btn.dataset.mode));
-    });
-
-    root.querySelectorAll('.md-fmt-btn').forEach((btn) => {
-      btn.addEventListener('click', () => insertFormat(btn.dataset.fmt));
-    });
-
-    textarea.addEventListener('input', () => {
-      triggerRealtimeAutoSave();
-    });
-
-    textarea.addEventListener('keydown', (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
-        e.preventDefault();
-        e.stopPropagation();
-        saveMdContent(false);
-      }
-    });
-
-    // Interactive checkboxes directly inside MD viewer!
-    viewerInner.addEventListener('change', (e) => {
-      const chk = e.target.closest('.md-task-checkbox');
-      if (!chk) return;
-      const idx = Number(chk.dataset.checkboxIndex);
-      if (Number.isNaN(idx)) return;
-      textarea.value = toggleCheckboxInMarkdown(textarea.value, idx);
-      renderPreview();
-      saveMdContent(true);
-    });
-
-    btnSave.addEventListener('click', () => saveMdContent(false));
-    btnCopy.addEventListener('click', () => {
-      navigator.clipboard.writeText(textarea.value || '').then(() => showToast('📋 마크다운 본문을 복사했습니다.'));
     });
 
     const win = WinManager.openWindow({
       id: winId,
       title: item.name,
       icon: item.icon || '📝',
-      meta: 'MD Viewer',
-      width: 860,
-      height: 620,
-      contentEl: root,
+      meta: 'Math · Engineering MD',
+      width: 1120,
+      height: 700,
+      bodyClass: 'mmd-win-body',
+      contentEl: hostEl,
       headerActions: [
         {
           label: '✏️ 이름 변경',
@@ -3217,22 +3069,20 @@
         }
       ],
       onClose: () => {
-        if (isDirty) {
-          saveMdContent(true);
+        if (controller.isDirty()) {
+          controller.save(true);
         }
+        controller.destroy();
         openMdWindows.delete(item.id);
       }
     });
 
     openMdWindows.set(item.id, {
       win,
-      setMode,
+      setMode: controller.setMode,
       syncFromItem: () => {
         win.setTitle(item.name);
-        if (!isDirty) {
-          textarea.value = item.summary || '';
-          renderPreview();
-        }
+        controller.setContent(item.summary || '');
       }
     });
   }
@@ -3869,16 +3719,42 @@
     }
   }
 
-  async function openSpreadsheetWindow(item) {
+  const openSheetViews = new Map(); // itemId -> Set<{ winId, win, controller }>
+  let sheetViewSeq = 0;
+
+  function updateSheetWindowTitles(item) {
+    const views = openSheetViews.get(item.id);
+    if (!views) return;
+    const arr = Array.from(views);
+    arr.forEach((v, idx) => {
+      const suffix = arr.length > 1 ? `:${idx + 1}` : '';
+      v.win.setTitle(`${item.name}${suffix}`);
+    });
+  }
+
+  async function openSpreadsheetWindow(item, opts = {}) {
     if (!item || item.type !== 'doc') return;
-    const winId = `sheet-${item.id}`;
-    const existing = WinManager.getWindow(winId);
-    if (existing) {
-      existing.restore();
-      return;
+    const allowMultiple = Boolean(opts.allowMultiple);
+    const existingViews = openSheetViews.get(item.id);
+    if (!allowMultiple && existingViews && existingViews.size > 0) {
+      const firstView = Array.from(existingViews)[0];
+      if (firstView?.win) {
+        firstView.win.restore();
+        return;
+      }
+    }
+
+    const winId = allowMultiple ? `sheet-${item.id}-${++sheetViewSeq}` : `sheet-${item.id}`;
+    if (!allowMultiple) {
+      const existing = WinManager.getWindow(winId);
+      if (existing) {
+        existing.restore();
+        return;
+      }
     }
 
     let sheetController = null;
+    let viewEntry = null;
     const win = WinManager.openWindow({
       id: winId,
       title: item.name,
@@ -3892,6 +3768,12 @@
         if (sheetController && typeof sheetController.destroy === 'function') {
           sheetController.destroy();
           sheetController = null;
+        }
+        const set = openSheetViews.get(item.id);
+        if (set && viewEntry) {
+          set.delete(viewEntry);
+          if (set.size === 0) openSheetViews.delete(item.id);
+          else updateSheetWindowTitles(item);
         }
       }
     });
@@ -3940,10 +3822,44 @@
     sheetController = BrainSheet.mountSpreadsheetUI(win.bodyEl, {
       workbook,
       fileName: item.name,
-      initialViewMode: 'split',
+      initialAppMode: opts.initialAppMode || 'excel',
       onToast: showToast,
       onDirtyChange(dirty) {
         win.setMeta(dirty ? '● 수정됨' : 'Excel · Origin 분석기');
+      },
+      onWorkbookMutate(updatedWb) {
+        item.sheetData = updatedWb;
+        const siblings = openSheetViews.get(item.id);
+        if (siblings && siblings.size > 1) {
+          siblings.forEach((v) => {
+            if (v !== viewEntry && v.controller && typeof v.controller.syncWorkbook === 'function') {
+              v.controller.syncWorkbook(updatedWb);
+            }
+          });
+        }
+      },
+      onNewWindow(latestWb, currentMode) {
+        item.sheetData = latestWb;
+        openSpreadsheetWindow(item, { allowMultiple: true, initialAppMode: currentMode });
+        setTimeout(() => {
+          const views = openSheetViews.get(item.id);
+          if (views && views.size >= 2 && typeof WinManager.tileWindows === 'function') {
+            WinManager.tileWindows(Array.from(views).map((v) => v.winId), 'horizontal');
+          }
+        }, 60);
+        showToast(`🪟 "${item.name}" 새 창이 열렸습니다 (두 창이 실시간 동기화됩니다).`);
+      },
+      onArrangeWindows() {
+        const sameFileViews = openSheetViews.get(item.id);
+        const ids = sameFileViews && sameFileViews.size >= 2
+          ? Array.from(sameFileViews).map((v) => v.winId)
+          : (WinManager.listOpenWindowIds ? WinManager.listOpenWindowIds() : []);
+        if (ids.length >= 2 && typeof WinManager.tileWindows === 'function') {
+          WinManager.tileWindows(ids, 'horizontal');
+          showToast(`◫ 열려 있는 창 ${ids.length}개를 나란히 정렬했습니다.`);
+        } else {
+          showToast('💡 먼저 [새 창]을 눌러 창을 2개 이상 열어주세요.');
+        }
       },
       onAutoSave(updatedWb, mdSummary) {
         item.sheetData = updatedWb;
@@ -3988,6 +3904,11 @@
         showToast(`🤖 "${item.name}" 시트가 AI 컨텍스트에 첨부되었습니다.`);
       }
     });
+
+    viewEntry = { winId, win, controller: sheetController };
+    if (!openSheetViews.has(item.id)) openSheetViews.set(item.id, new Set());
+    openSheetViews.get(item.id).add(viewEntry);
+    updateSheetWindowTitles(item);
   }
 
   $('btn-open-sheet').addEventListener('click', () => {
