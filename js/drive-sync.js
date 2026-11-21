@@ -366,6 +366,23 @@
     return entry;
   }
 
+  async function getFileBase64(accessToken, fileId) {
+    if (!fileId) throw createDriveError('유효하지 않은 Drive 파일 ID입니다.', 400, 'INVALID_ID');
+    const url = `${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media`;
+    const res = await driveFetch(url, accessToken, { method: 'GET' });
+    const blob = await res.blob();
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = String(reader.result || '');
+        const idx = result.indexOf(',');
+        resolve(idx >= 0 ? result.slice(idx + 1) : result);
+      };
+      reader.onerror = () => reject(createDriveError('파일 데이터를 읽지 못했습니다.', 500, 'READ_ERROR'));
+      reader.readAsDataURL(blob);
+    });
+  }
+
   function getPreviewEmbedUrl(fileId) {
     return `https://drive.google.com/file/d/${encodeURIComponent(fileId)}/preview`;
   }
@@ -423,6 +440,7 @@
     uploadDatabase,
     uploadFile,
     getFileBlobUrl,
+    getFileBase64,
     getPreviewEmbedUrl,
     getWebViewUrl,
     getFileCategory,

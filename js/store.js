@@ -251,6 +251,7 @@
   }
 
   global.BrainStore = {
+    DEFAULT_FIREBASE_CONFIG,
     state,
     genId,
     regenerateIds,

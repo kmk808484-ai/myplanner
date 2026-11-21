@@ -1,7 +1,7 @@
 (function () {
   'use strict';
 
-  const { state, genId, regenerateIds, persistFS, persistSettings, persistChat, getSyncMeta, setSyncMeta, saveStateForUndo, findNodeAndParent, isDescendant, getPathToNode, searchNodes, collectDocsInFolder, getTheme, setTheme } = window.BrainStore;
+  const { DEFAULT_FIREBASE_CONFIG, state, genId, regenerateIds, persistFS, persistSettings, persistChat, getSyncMeta, setSyncMeta, saveStateForUndo, findNodeAndParent, isDescendant, getPathToNode, searchNodes, collectDocsInFolder, getTheme, setTheme } = window.BrainStore;
   const { PROVIDERS, sendChat } = window.BrainAI;
   const { render: renderMarkdown, escapeHtml } = window.BrainMarkdown;
   const BrainAuth = window.BrainAuth;
@@ -17,6 +17,8 @@
   let driveSyncTimer = null;
   let isDriveSyncing = false;
   let driveSyncStatus = 'disconnected'; // 'disconnected' | 'syncing' | 'synced' | 'expired' | 'error'
+  let lastDriveErrorMessage = '';
+  let lastDriveErrorCode = '';
   let hasSyncedDriveThisSession = false;
   let previewRenderSeq = 0;
   let activeViewerItem = null;
@@ -53,17 +55,19 @@
   const elSettingsModal = $('settings-modal');
 
   // ================= Toast =================
-  function showToast(msg) {
+  function showToast(msg, durationMs) {
     const container = $('toast-container');
     const toast = document.createElement('div');
     toast.className = 'toast';
     toast.textContent = msg;
     container.appendChild(toast);
     requestAnimationFrame(() => toast.classList.add('show'));
+    const isWarn = typeof msg === 'string' && (msg.startsWith('⚠️') || msg.startsWith('🚫'));
+    const timeout = durationMs || (isWarn ? 5800 : 2600);
     setTimeout(() => {
       toast.classList.remove('show');
       setTimeout(() => toast.remove(), 220);
-    }, 2400);
+    }, timeout);
   }
 
   // ================= Theme =================
@@ -758,6 +762,27 @@
       linkBadge.style.display = 'none';
       delete linkBadge.dataset.localPath;
       localActionRow.style.display = 'none';
+    } else if (item.type === 'doc' && isBinaryFileName(item.name)) {
+      linkBadge.style.display = 'none';
+      delete linkBadge.dataset.localPath;
+      localActionRow.style.display = 'none';
+      const box = $('drive-preview-box');
+      if (box) {
+        box.style.display = 'block';
+        box.innerHTML =
+          `<div style="padding:12px 14px;">` +
+          `  <div style="font-size:0.83rem; font-weight:700; margin-bottom:4px;">⚠️ 원본 파일이 연결되어 있지 않습니다</div>` +
+          `  <div style="font-size:0.76rem; color:var(--text-sub); line-height:1.45; margin-bottom:10px;">이 카드에는 파일 이름만 저장되어 있어 바로 열 수 없습니다. 원본 파일을 Google Drive에 올리거나 PC 경로를 연결해 주세요.</div>` +
+          `  <div class="action-row">` +
+          `    <button type="button" class="btn btn-drive" id="btn-inline-reattach-drive" style="padding:6px 10px; font-size:0.78rem;">📤 원본 파일 업로드(Drive)</button>` +
+          `    <button type="button" class="btn btn-secondary" id="btn-inline-link-local" style="padding:6px 10px; font-size:0.78rem;">📂 PC 경로 연결</button>` +
+          `  </div>` +
+          `</div>`;
+        const btnReattach = $('btn-inline-reattach-drive');
+        const btnLinkLocal = $('btn-inline-link-local');
+        if (btnReattach) btnReattach.addEventListener('click', () => $('reattach-file-input').click());
+        if (btnLinkLocal) btnLinkLocal.addEventListener('click', () => { toggleEditMode(true); });
+      }
     } else if (item.type === 'doc' && isHtmlContentItem(item)) {
       linkBadge.style.display = 'none';
       delete linkBadge.dataset.localPath;
@@ -1485,9 +1510,28 @@
     const btnSignOut = $('btn-google-signout');
     const driveActions = $('auth-drive-actions');
     const fileWarn = $('auth-file-warning');
+    const driveErrBox = $('auth-drive-error-box');
 
     card.classList.remove('unlocked', 'denied');
     fileWarn.style.display = isFile ? 'block' : 'none';
+
+    if (driveErrBox) {
+      if (lastDriveErrorMessage) {
+        const projId = (state.settings.firebaseConfig?.projectId || '').trim();
+        const enableUrl = projId
+          ? `https://console.cloud.google.com/apis/library/drive.googleapis.com?project=${encodeURIComponent(projId)}`
+          : 'https://console.cloud.google.com/apis/library/drive.googleapis.com';
+        const extraLink =
+          lastDriveErrorCode === 'API_DISABLED'
+            ? `<div style="margin-top:6px;"><a href="${escapeHtml(enableUrl)}" target="_blank" rel="noopener" style="font-weight:700; color:var(--primary);">👉 Google Drive API 지금 켜러 가기 (${escapeHtml(projId || '프로젝트 선택')}) ↗</a></div>`
+            : '';
+        driveErrBox.innerHTML = `<b>⚠️ Google Drive 연동 오류:</b> ${escapeHtml(lastDriveErrorMessage)}${extraLink}`;
+        driveErrBox.style.display = 'block';
+      } else {
+        driveErrBox.style.display = 'none';
+        driveErrBox.innerHTML = '';
+      }
+    }
 
     if (unlocked && user) {
       card.classList.add('unlocked');
@@ -1697,8 +1741,10 @@
     }
 
     if (showFeedback) {
-      if (ok && (!health.allowedEmailConfigured || !health.firebaseConfigured)) {
-        showToast('⚠️ 로컬 브릿지 연결됨 — local-bridge/bridge-config.json에 firebaseApiKey와 allowedEmail을 설정해 주세요.');
+      if (ok && !health.firebaseConfigured) {
+        showToast('⚠️ 로컬 브릿지 연결됨 — local-bridge/bridge-config.json에 firebaseApiKey를 설정해 주세요.');
+      } else if (ok && !health.allowedEmailConfigured) {
+        showToast('🟢 로컬 실행 도우미 연결됨! Google 로그인 후 처음 로컬 실행 시 본인 계정이 자동 등록됩니다.');
       } else if (ok) {
         showToast('🟢 로컬 실행 도우미가 정상 연결되어 있습니다.');
       } else {
@@ -1772,9 +1818,22 @@
     showToast(`🌐 "${item.name}" HTML 실행됨`);
   }
 
+  const TEXT_EDITABLE_EXTS = new Set([
+    'txt', 'md', 'html', 'htm', 'css', 'js', 'ts', 'jsx', 'tsx',
+    'json', 'csv', 'xml', 'yml', 'yaml', 'py', 'java', 'c', 'cpp',
+    'h', 'sql', 'log', 'ini', 'conf', 'sh', 'bat', 'ps1'
+  ]);
+
+  function isBinaryFileName(fileName) {
+    const raw = String(fileName || '').trim();
+    const m = raw.match(/\.([a-z0-9]{1,8})$/i);
+    if (!m) return false;
+    return !TEXT_EDITABLE_EXTS.has(m[1].toLowerCase());
+  }
+
   function resolveVirtualFileName(item) {
     const rawName = String(item?.name || 'memo').trim() || 'memo';
-    if (/\.[a-z0-9]{1,6}$/i.test(rawName)) return rawName;
+    if (/\.[a-z0-9]{1,8}$/i.test(rawName)) return rawName;
     if (isHtmlContentItem(item)) return `${rawName}.html`;
     return `${rawName}.txt`;
   }
@@ -1802,10 +1861,43 @@
       return;
     }
 
+    // Google Drive에 저장된 실제 바이너리 파일(PPT/PDF/Excel/Word/이미지 등)을 PC 앱으로 바로 열기
+    if (item.driveFile && item.driveFile.id) {
+      let driveToken;
+      try {
+        driveToken = await ensureDriveToken(true);
+      } catch (err) {
+        showToast(`⚠️ ${err.message}`);
+        return;
+      }
+      const targetName = item.driveFile.name || resolveVirtualFileName(item);
+      showToast(`🚀 "${targetName}" PC 앱으로 불러오는 중...`);
+      try {
+        const base64 = await BrainDrive.getFileBase64(driveToken, item.driveFile.id);
+        const res = await LocalBridge.openContentLocal(targetName, base64, getBridgeUrl(), token, true);
+        isBridgeConnected = true;
+        const dot = $('bridge-status-dot');
+        const text = $('bridge-status-text');
+        if (dot) dot.classList.add('connected');
+        if (text) text.textContent = '로컬 연결됨';
+        showToast(`🚀 PC 앱에서 열림: ${res.fileName || targetName}`);
+      } catch (err) {
+        handleDriveError(err);
+        refreshBridgeStatus(false);
+        showToast(`⚠️ ${err.message}`);
+      }
+      return;
+    }
+
     const fileName = resolveVirtualFileName(item);
+    if (isBinaryFileName(fileName)) {
+      showToast('⚠️ 이 항목에는 원본 파일이 저장되어 있지 않습니다. 우측 패널에서 [원본 파일 업로드] 또는 [PC 경로 연결]을 진행해 주세요.');
+      return;
+    }
+
     const content = String(item.summary || '');
     try {
-      const res = await LocalBridge.openContentLocal(fileName, content, getBridgeUrl(), token);
+      const res = await LocalBridge.openContentLocal(fileName, content, getBridgeUrl(), token, false);
       isBridgeConnected = true;
       const dot = $('bridge-status-dot');
       const text = $('bridge-status-text');
@@ -1878,8 +1970,10 @@
     const testUrl = $('local-bridge-url').value.trim() || LocalBridge.DEFAULT_URL;
     const health = await LocalBridge.checkHealth(testUrl);
     if (health && health.ok) {
-      if (!health.allowedEmailConfigured || !health.firebaseConfigured) {
-        showToast('⚠️ 연결됨 — local-bridge/bridge-config.json에 firebaseApiKey와 allowedEmail을 입력해 주세요.');
+      if (!health.firebaseConfigured) {
+        showToast('⚠️ 연결됨 — local-bridge/bridge-config.json에 firebaseApiKey를 입력해 주세요.');
+      } else if (!health.allowedEmailConfigured) {
+        showToast('🟢 연결 성공! Google 로그인 후 첫 로컬 실행 시 본인 계정이 자동 등록됩니다.');
       } else {
         showToast('🟢 연결 성공! Firebase Google 로그인 후 로컬 프로그램을 실행할 수 있습니다.');
       }
@@ -1939,6 +2033,8 @@
 
   function handleDriveError(err) {
     if (!err) return;
+    lastDriveErrorMessage = err.message || '알 수 없는 Google Drive 오류';
+    lastDriveErrorCode = err.code || '';
     if (
       err.code === 'AUTH_EXPIRED' ||
       err.code === 'INSUFFICIENT_SCOPE' ||
@@ -2054,6 +2150,8 @@
 
     isDriveSyncing = true;
     driveSyncStatus = 'syncing';
+    lastDriveErrorMessage = '';
+    lastDriveErrorCode = '';
     updateDriveStatusUI();
 
     try {
@@ -2143,6 +2241,9 @@
     } catch (err) {
       handleDriveError(err);
       showToast(`⚠️ Drive 동기화 실패: ${err.message}`);
+      if (err?.code === 'API_DISABLED' || err?.code === 'INSUFFICIENT_SCOPE') {
+        openAuthModal();
+      }
       return false;
     } finally {
       isDriveSyncing = false;
@@ -2292,7 +2393,27 @@
       openAuthModal();
       return;
     }
+    if (driveSyncStatus === 'error' && lastDriveErrorCode === 'API_DISABLED') {
+      openAuthModal();
+      return;
+    }
     syncWithDrive({ mode: 'manual', interactive: true, showSuccessToast: true });
+  });
+
+  $('btn-reset-firebase-default').addEventListener('click', async () => {
+    state.settings.firebaseConfig = { ...DEFAULT_FIREBASE_CONFIG };
+    persistSettings();
+    $('auth-fb-apikey').value = DEFAULT_FIREBASE_CONFIG.apiKey;
+    $('auth-fb-authdomain').value = DEFAULT_FIREBASE_CONFIG.authDomain;
+    $('auth-fb-projectid').value = DEFAULT_FIREBASE_CONFIG.projectId;
+    lastDriveErrorMessage = '';
+    lastDriveErrorCode = '';
+    try {
+      await BrainAuth.init(state.settings.firebaseConfig, handleAuthUserChanged);
+    } catch (_) {}
+    onAuthStateChanged();
+    renderAuthModalContent();
+    showToast('✅ 기본 Firebase 프로젝트(gen-lang-client-0519883143)로 복원되었습니다.');
   });
 
   $('btn-auth-drive-sync').addEventListener('click', () => {
@@ -2313,6 +2434,10 @@
     if (state.selectedItem?.driveFile) openDriveFileViewer(state.selectedItem);
   });
 
+  $('btn-drive-open-pc').addEventListener('click', () => {
+    if (state.selectedItem?.driveFile) openMemoInLocalApp(state.selectedItem);
+  });
+
   $('btn-drive-webview').addEventListener('click', () => {
     const df = state.selectedItem?.driveFile;
     if (df) window.open(BrainDrive.getWebViewUrl(df), '_blank', 'noopener,noreferrer');
@@ -2320,6 +2445,40 @@
 
   $('btn-drive-download').addEventListener('click', () => {
     if (state.selectedItem?.driveFile) downloadDriveFile(state.selectedItem);
+  });
+
+  $('reattach-file-input').addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || !state.selectedItem) return;
+
+    let driveToken;
+    try {
+      driveToken = await ensureDriveToken(true);
+    } catch (err) {
+      showToast(`⚠️ ${err.message}`);
+      openAuthModal();
+      return;
+    }
+
+    showToast(`☁️ "${file.name}" Google Drive 업로드 중...`);
+    try {
+      const uploaded = await BrainDrive.uploadFile(driveToken, file, BrainAuth.getUser()?.email || '');
+      saveStateForUndo();
+      state.selectedItem.driveFile = uploaded;
+      if (!state.selectedItem.name || state.selectedItem.name === '새 메모') {
+        state.selectedItem.name = file.name;
+      }
+      saveAndRender();
+      selectItem(state.selectedItem);
+      showToast(`✅ "${file.name}" 원본 파일이 연결되었습니다.`);
+    } catch (err) {
+      handleDriveError(err);
+      showToast(`⚠️ 업로드 실패: ${err.message}`);
+      if (err?.code === 'API_DISABLED' || err?.code === 'INSUFFICIENT_SCOPE') {
+        openAuthModal();
+      }
+    }
   });
 
   $('btn-close-viewer').addEventListener('click', closeDriveFileViewer);

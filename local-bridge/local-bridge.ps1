@@ -60,14 +60,16 @@ if ($OpenBrowser) {
 $tokenCache = @{}
 
 Write-Host "=================================================================" -ForegroundColor Cyan
-Write-Host "  Second Brain OS - 로컬 실행 브릿지 (Firebase Auth v1.2)" -ForegroundColor Cyan
+Write-Host "  Second Brain OS - 로컬 실행 브릿지 (Firebase Auth v1.3)" -ForegroundColor Cyan
 Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host "  웹 접속 주소 : http://localhost:$listenPort/" -ForegroundColor Green
 Write-Host "  브릿지 주소  : http://127.0.0.1:$listenPort/ (내 PC 전용)" -ForegroundColor Green
 if ($config.allowedEmail -and $config.firebaseApiKey) {
     Write-Host "  인증 방식    : Firebase Google 로그인 ($($config.allowedEmail))" -ForegroundColor Yellow
+} elseif ($config.firebaseApiKey) {
+    Write-Host "  인증 방식    : Firebase Google 로그인 (최초 로컬 실행 시 본인 계정 자동 등록)" -ForegroundColor Yellow
 } else {
-    Write-Host "  인증 설정    : [미완료] bridge-config.json에 firebaseApiKey와 allowedEmail을 입력해 주세요!" -ForegroundColor Red
+    Write-Host "  인증 설정    : [미완료] bridge-config.json에 firebaseApiKey를 입력해 주세요!" -ForegroundColor Red
 }
 Write-Host "  종료 방법    : Ctrl + C 또는 창 닫기" -ForegroundColor DarkGray
 Write-Host "=================================================================" -ForegroundColor Cyan
@@ -170,17 +172,35 @@ function Decode-JwtPayload {
     }
 }
 
+function Save-BridgeConfig {
+    param([hashtable]$Cfg)
+    try {
+        $ordered = [ordered]@{
+            port               = [int]$Cfg.port
+            firebaseApiKey     = [string]$Cfg.firebaseApiKey
+            firebaseAuthDomain = [string]$Cfg.firebaseAuthDomain
+            firebaseProjectId  = [string]$Cfg.firebaseProjectId
+            allowedEmail       = [string]$Cfg.allowedEmail
+        }
+        $json = $ordered | ConvertTo-Json -Depth 3
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($configPath, $json, $utf8NoBom)
+    } catch {
+        Write-Host "[경고] bridge-config.json 저장 실패: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
 function Verify-FirebaseRequest {
     param(
         [System.Net.HttpListenerRequest]$Request
     )
     $cfg = Load-BridgeConfig
 
-    if ([string]::IsNullOrWhiteSpace($cfg.allowedEmail) -or [string]::IsNullOrWhiteSpace($cfg.firebaseApiKey)) {
+    if ([string]::IsNullOrWhiteSpace($cfg.firebaseApiKey)) {
         return @{
             ok = $false
             status = 403
-            error = "local-bridge/bridge-config.json에 firebaseApiKey와 allowedEmail(내 구글 이메일)을 먼저 설정해 주세요."
+            error = "local-bridge/bridge-config.json에 firebaseApiKey를 먼저 설정해 주세요."
         }
     }
 
@@ -208,6 +228,11 @@ function Verify-FirebaseRequest {
     if ($tokenCache.ContainsKey($idToken)) {
         $cached = $tokenCache[$idToken]
         if ($cached.exp -gt ($nowUnix + 30)) {
+            if ([string]::IsNullOrWhiteSpace($cfg.allowedEmail)) {
+                $cfg.allowedEmail = $cached.email
+                Save-BridgeConfig -Cfg $cfg
+                Write-Host "[소유자 자동 등록] 허용 계정: $($cached.email)" -ForegroundColor Yellow
+            }
             if ($cached.email -eq $cfg.allowedEmail) {
                 if ([string]::IsNullOrWhiteSpace($cfg.firebaseProjectId) -or $cached.aud -eq $cfg.firebaseProjectId) {
                     return @{ ok = $true; email = $cached.email }
@@ -276,6 +301,13 @@ function Verify-FirebaseRequest {
         exp = $exp
     }
 
+    # allowedEmail이 비어 있으면 최초 인증된 본인 계정을 자동 등록
+    if ([string]::IsNullOrWhiteSpace($cfg.allowedEmail)) {
+        $cfg.allowedEmail = $email
+        Save-BridgeConfig -Cfg $cfg
+        Write-Host "[소유자 자동 등록] 허용 계정: $email" -ForegroundColor Yellow
+    }
+
     if ($email -ne $cfg.allowedEmail) {
         Write-Host "[접근 차단] 비허용 계정: $email" -ForegroundColor Red
         return @{
@@ -326,7 +358,7 @@ try {
             $cfg = Load-BridgeConfig
             Send-JsonResponse -Response $response -StatusCode 200 -Body @{
                 ok = $true
-                version = "1.2"
+                version = "1.3"
                 platform = "windows"
                 port = $listenPort
                 authProvider = "firebase"
@@ -471,6 +503,105 @@ try {
                 }
             } catch {
                 Write-Host "[실행 오류] $($_.Exception.Message)" -ForegroundColor Red
+                Send-JsonResponse -Response $response -StatusCode 500 -Body @{
+                    ok = $false
+                    error = $_.Exception.Message
+                }
+            }
+            continue
+        }
+
+        if ($method -eq "POST" -and $trimmedPath -eq "/open-content") {
+            $auth = Verify-FirebaseRequest -Request $request
+            if (-not $auth.ok) {
+                Send-JsonResponse -Response $response -StatusCode $auth.status -Body @{
+                    ok = $false
+                    error = $auth.error
+                }
+                continue
+            }
+
+            $reader = New-Object System.IO.StreamReader($request.InputStream, [System.Text.Encoding]::UTF8)
+            $rawBody = $reader.ReadToEnd()
+            $reader.Close()
+
+            try {
+                $payload = $rawBody | ConvertFrom-Json
+            } catch {
+                Send-JsonResponse -Response $response -StatusCode 400 -Body @{
+                    ok = $false
+                    error = "잘못된 JSON 요청입니다."
+                }
+                continue
+            }
+
+            try {
+                $rawName = if ($payload.fileName) { [string]$payload.fileName } else { "memo.txt" }
+                $safeName = [System.IO.Path]::GetFileName($rawName).Trim()
+                $safeName = $safeName -replace '[\\/:*?"<>|]', '_'
+                $safeName = $safeName.Trim('. ')
+                if ([string]::IsNullOrWhiteSpace($safeName)) { $safeName = "memo.txt" }
+                if ($safeName.Length -gt 100) {
+                    $ext = [System.IO.Path]::GetExtension($safeName)
+                    $base = [System.IO.Path]::GetFileNameWithoutExtension($safeName)
+                    $safeName = $base.Substring(0, [Math]::Min($base.Length, 90)) + $ext
+                }
+                if ([string]::IsNullOrWhiteSpace([System.IO.Path]::GetExtension($safeName))) {
+                    $safeName = "$safeName.txt"
+                }
+
+                $previewDir = Join-Path ([System.IO.Path]::GetTempPath()) "SecondBrainOS-Preview"
+                if (-not (Test-Path -LiteralPath $previewDir)) {
+                    New-Item -ItemType Directory -Path $previewDir -Force | Out-Null
+                }
+
+                $tempPath = [System.IO.Path]::GetFullPath((Join-Path $previewDir $safeName))
+                $previewDirFull = [System.IO.Path]::GetFullPath($previewDir)
+                if (-not $tempPath.StartsWith($previewDirFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    Send-JsonResponse -Response $response -StatusCode 400 -Body @{
+                        ok = $false
+                        error = "허용되지 않은 파일명입니다."
+                    }
+                    continue
+                }
+
+                $contentStr = if ($null -ne $payload.content) { [string]$payload.content } else { "" }
+                $isBase64 = [bool]$payload.isBase64
+                $extLower = [System.IO.Path]::GetExtension($safeName).ToLowerInvariant()
+                $binaryExts = @(".pdf",".ppt",".pptx",".doc",".docx",".xls",".xlsx",".hwp",".hwpx",".png",".jpg",".jpeg",".gif",".webp",".bmp",".ico",".mp4",".mov",".avi",".mkv",".mp3",".wav",".zip",".7z",".rar",".exe",".msi")
+
+                if ($isBase64) {
+                    if ([string]::IsNullOrWhiteSpace($contentStr)) {
+                        Send-JsonResponse -Response $response -StatusCode 400 -Body @{
+                            ok = $false
+                            error = "원본 파일 데이터가 비어 있습니다."
+                        }
+                        continue
+                    }
+                    $rawBytes = [Convert]::FromBase64String($contentStr)
+                    [System.IO.File]::WriteAllBytes($tempPath, $rawBytes)
+                } else {
+                    if ($binaryExts -contains $extLower) {
+                        Send-JsonResponse -Response $response -StatusCode 400 -Body @{
+                            ok = $false
+                            error = "이 항목($safeName)에는 원본 파일이 저장되어 있지 않습니다. 파일을 다시 업로드하거나 로컬 경로를 연결해 주세요."
+                        }
+                        continue
+                    }
+                    $useBom = ($extLower -eq ".csv")
+                    $encoding = New-Object System.Text.UTF8Encoding($useBom)
+                    [System.IO.File]::WriteAllText($tempPath, $contentStr, $encoding)
+                }
+
+                Start-Process -FilePath $tempPath
+                Write-Host "[PC 앱 열기 / $($auth.email)] $safeName -> $tempPath" -ForegroundColor Green
+                Send-JsonResponse -Response $response -StatusCode 200 -Body @{
+                    ok = $true
+                    fileName = $safeName
+                    path = $tempPath
+                }
+            } catch {
+                Write-Host "[PC 앱 열기 오류] $($_.Exception.Message)" -ForegroundColor Red
                 Send-JsonResponse -Response $response -StatusCode 500 -Body @{
                     ok = $false
                     error = $_.Exception.Message

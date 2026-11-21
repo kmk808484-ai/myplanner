@@ -229,11 +229,13 @@
     const customParams = {};
     if (options.loginHint) {
       customParams.login_hint = options.loginHint;
-    } else {
-      customParams.prompt = options.prompt || 'select_account';
     }
     if (options.forceConsent) {
       customParams.prompt = 'consent';
+    } else if (options.requestDrive !== false) {
+      customParams.prompt = options.loginHint ? 'consent' : 'select_account consent';
+    } else {
+      customParams.prompt = options.prompt || 'select_account';
     }
     provider.setCustomParameters(customParams);
 
@@ -243,6 +245,8 @@
       const accessToken = result?.credential?.accessToken || '';
       if (accessToken && currentUser) {
         saveDriveToken(accessToken, currentUser.email);
+      } else {
+        clearDriveAccessToken();
       }
       return currentUser;
     } catch (err) {

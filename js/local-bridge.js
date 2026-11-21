@@ -88,7 +88,7 @@
     return data;
   }
 
-  async function openContentLocal(fileName, content, baseUrl, idToken) {
+  async function openContentLocal(fileName, content, baseUrl, idToken, isBase64 = false) {
     if (!idToken) {
       throw new Error('내 구글 계정으로 로그인해야 PC 연결 프로그램으로 열 수 있습니다.');
     }
@@ -98,7 +98,7 @@
       res = await fetch(url, {
         method: 'POST',
         headers: buildAuthHeaders(idToken),
-        body: JSON.stringify({ fileName, content })
+        body: JSON.stringify({ fileName, content, isBase64: Boolean(isBase64) })
       });
     } catch (_) {
       throw new Error(

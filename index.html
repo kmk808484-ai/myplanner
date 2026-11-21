@@ -145,9 +145,11 @@
               <div class="detail-actions">
                 <div class="action-row" id="drive-action-row" style="display:none;">
                   <button class="btn btn-drive" id="btn-drive-open">👁️ 바로 열기</button>
+                  <button class="btn btn-local" id="btn-drive-open-pc" style="flex:0 0 auto;" title="PC 연결 프로그램(파워포인트·엑셀·PDF 등)으로 열기">🖥️ PC앱</button>
                   <button class="btn btn-secondary" id="btn-drive-webview" style="flex:0 0 auto;">☁️ 드라이브</button>
-                  <button class="btn btn-secondary" id="btn-drive-download" style="flex:0 0 auto;">⬇️ 저장</button>
+                  <button class="btn btn-secondary" id="btn-drive-download" style="flex:0 0 auto;">⬇️</button>
                 </div>
+                <input type="file" id="reattach-file-input" style="display:none;">
                 <div class="action-row" id="local-action-row" style="display:none;">
                   <button class="btn btn-local" id="btn-open-local">🚀 로컬에서 실행</button>
                   <button class="btn btn-secondary" id="btn-reveal-local">📂 폴더 열기</button>
@@ -326,6 +328,8 @@
           <div class="auth-status-sub" id="auth-status-sub">내 구글 계정으로 로그인하면 내 드라이브(SecondBrainOS 폴더)에 메모·HTML·MD·이미지·PDF·PPT가 자동 동기화됩니다.</div>
         </div>
 
+        <div id="auth-drive-error-box" class="auth-notice-warn" style="display:none; margin-bottom: 10px;"></div>
+
         <div id="auth-signin-section" class="auth-signin-section">
           <div id="auth-file-warning" class="auth-notice-warn" style="display:none;">
             ⚠️ Google 로그인은 <code>file://</code> 주소에서 동작하지 않습니다.<br>
@@ -343,7 +347,10 @@
         </div>
 
         <div class="settings-section" style="margin-top: 14px;">
-          <h4>🔥 Firebase 설정</h4>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+            <h4 style="margin:0;">🔥 Firebase 설정</h4>
+            <button type="button" class="btn-sm" id="btn-reset-firebase-default" title="기본 Firebase 프로젝트(gen-lang-client-0519883143)로 복원">🔄 기본값 복원</button>
+          </div>
           <div class="api-field">
             <label for="auth-owner-email">
               <span>📧 허용할 내 Google 이메일 (필수)</span>
@@ -415,12 +422,12 @@
   <div id="toast-container"></div>
 
   <!-- 스크립트 (file:// 및 GitHub Pages 모두 호환) -->
-  <script src="js/markdown.js?v=12"></script>
-  <script src="js/store.js?v=12"></script>
-  <script src="js/ai-client.js?v=12"></script>
-  <script src="js/auth.js?v=12"></script>
-  <script src="js/drive-sync.js?v=12"></script>
-  <script src="js/local-bridge.js?v=12"></script>
-  <script src="js/app.js?v=12"></script>
+  <script src="js/markdown.js?v=14"></script>
+  <script src="js/store.js?v=14"></script>
+  <script src="js/ai-client.js?v=14"></script>
+  <script src="js/auth.js?v=14"></script>
+  <script src="js/drive-sync.js?v=14"></script>
+  <script src="js/local-bridge.js?v=14"></script>
+  <script src="js/app.js?v=14"></script>
 </body>
 </html>
