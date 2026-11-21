@@ -462,6 +462,30 @@
     input.addEventListener('blur', () => finish(true));
   }
 
+  function getFolderPathSegments(folderNode) {
+    if (!folderNode || folderNode.id === 'root') return [];
+    const pathNodes = getPathToNode(folderNode.id) || [];
+    if (pathNodes.length <= 1) return [];
+    return pathNodes.slice(1).map((n) => n.name);
+  }
+
+  function syncMovedNodeToDrive(node) {
+    if (!node || !isOwnerAuthenticated()) return;
+    const driveToken = BrainAuth.getDriveAccessToken();
+    if (!driveToken) return;
+    const userEmail = BrainAuth.getUser()?.email || '';
+    const driveId = node.driveDocId || node.driveFile?.id;
+    if (driveId) {
+      const newFolderPath = getRelativeFolderPathForItem(node.id);
+      BrainDrive.moveFile(driveToken, driveId, newFolderPath, userEmail).catch((err) => {
+        console.warn('Drive 파일 이동 실패:', err);
+      });
+    }
+    if (Array.isArray(node.children)) {
+      node.children.forEach((child) => syncMovedNodeToDrive(child));
+    }
+  }
+
   function createNew(type) {
     saveStateForUndo();
     const newName = type === 'folder'
@@ -482,6 +506,11 @@
     saveAndRender();
     selectItem(newItem);
     if (type === 'folder') {
+      const driveToken = BrainAuth.getDriveAccessToken();
+      if (driveToken && isOwnerAuthenticated()) {
+        const folderSegs = getFolderPathSegments(newItem);
+        BrainDrive.ensureFolderPath(driveToken, folderSegs, BrainAuth.getUser()?.email || '').catch(() => {});
+      }
       startRenameItem(newItem);
     } else {
       scheduleDocFileSyncToDrive(newItem, true);
@@ -507,7 +536,8 @@
     saveStateForUndo();
     const newItem = JSON.parse(JSON.stringify(state.clipboard.itemData));
 
-    if (state.clipboard.action === 'cut') {
+    const wasCut = state.clipboard.action === 'cut';
+    if (wasCut) {
       if (isDescendant(newItem.id, state.currentFolder.id)) {
         showToast('폴더를 자기 자신의 하위 폴더로 이동할 수 없습니다.');
         return;
@@ -519,12 +549,16 @@
       state.clipboard = null;
     } else {
       newItem.name += ' - 복사본';
+      delete newItem.driveDocId;
       regenerateIds(newItem);
     }
 
     if (!state.currentFolder.children) state.currentFolder.children = [];
     state.currentFolder.children.push(newItem);
     saveAndRender();
+    if (wasCut) {
+      syncMovedNodeToDrive(newItem);
+    }
     showToast(`붙여넣기 완료: ${newItem.name}`);
   }
 
@@ -579,6 +613,7 @@
       if (!targetFolder.children) targetFolder.children = [];
       targetFolder.children.push(original.node);
       saveAndRender();
+      syncMovedNodeToDrive(original.node);
       showToast(`"${original.node.name}" 이동 완료`);
     }
   }
@@ -678,7 +713,8 @@
       } else {
         showToast(`☁️ "${file.name}" Google Drive 업로드 중...`);
         try {
-          const uploaded = await BrainDrive.uploadFile(driveToken, file, userEmail);
+          const folderPath = getFolderPathSegments(state.currentFolder);
+          const uploaded = await BrainDrive.uploadFile(driveToken, file, userEmail, folderPath);
           const newItem = {
             id: genId(),
             type: 'doc',
@@ -937,6 +973,7 @@
     }
 
     $('p-summary').innerHTML = renderMarkdown(item.summary);
+    renderContextChips();
   }
 
   function toggleEditMode(forceState) {
@@ -1254,11 +1291,51 @@
     return docs;
   }
 
+  // 열려 있는 HTML 창이나 현재 선택된 문서에 AI 마커가 있으면 자동으로 AI가 인식할 수 있도록 수집
+  function getAutoMarkedDocs(excludeIds = new Set()) {
+    const result = [];
+    const seen = new Set(excludeIds);
+
+    const tryAdd = (node) => {
+      if (!node || node.type !== 'doc' || seen.has(node.id) || !isItemVisible(node)) return;
+      if (Array.isArray(node.aiMarkers) && node.aiMarkers.length > 0) {
+        seen.add(node.id);
+        result.push(node);
+      }
+    };
+
+    // 1. 현재 열려 있는 HTML/MD 창의 문서들
+    const openWinIds = WinManager.listOpenWindowIds ? WinManager.listOpenWindowIds() : [];
+    openWinIds.forEach((wid) => {
+      const m = String(wid).match(/^(?:html|md)-(.+)$/);
+      if (m) {
+        const found = findNodeAndParent(m[1]);
+        if (found?.node) tryAdd(found.node);
+      }
+    });
+
+    // 2. 현재 탐색기에서 선택 중인 문서
+    if (state.selectedItem) tryAdd(state.selectedItem);
+
+    return result;
+  }
+
+  function getContextDocsForAI() {
+    const manualDocs = getAttachedDocs();
+    const exclude = new Set(manualDocs.map((d) => d.id));
+    const autoMarked = getAutoMarkedDocs(exclude);
+    return [...manualDocs, ...autoMarked];
+  }
+
   function renderContextChips() {
-    const docs = getAttachedDocs();
+    const manualDocs = getAttachedDocs();
+    const exclude = new Set(manualDocs.map((d) => d.id));
+    const autoMarkedDocs = getAutoMarkedDocs(exclude);
+    const totalCount = manualDocs.length + autoMarkedDocs.length;
+
     elContextChips.innerHTML = '';
 
-    if (docs.length === 0) {
+    if (totalCount === 0) {
       elContextBar.style.display = 'none';
       elContextCountBadge.style.display = 'none';
       return;
@@ -1266,16 +1343,28 @@
 
     elContextBar.style.display = 'flex';
     elContextCountBadge.style.display = 'inline-block';
-    elContextCountBadge.textContent = String(docs.length);
+    elContextCountBadge.textContent = String(totalCount);
 
-    docs.forEach((doc) => {
+    manualDocs.forEach((doc) => {
+      const mCount = Array.isArray(doc.aiMarkers) ? doc.aiMarkers.length : 0;
       const chip = document.createElement('span');
       chip.className = 'context-chip';
-      chip.innerHTML = `<span>${escapeHtml(doc.icon || '📄')} ${escapeHtml(doc.name)}</span><button title="제거">✕</button>`;
+      chip.innerHTML =
+        `<span>${escapeHtml(doc.icon || '📄')} ${escapeHtml(doc.name)}${mCount > 0 ? ` · 🖍️${mCount}` : ''}</span>` +
+        `<button title="제거">✕</button>`;
       chip.querySelector('button').addEventListener('click', () => {
         state.attachedContextIds = state.attachedContextIds.filter((id) => id !== doc.id);
         renderContextChips();
       });
+      elContextChips.appendChild(chip);
+    });
+
+    autoMarkedDocs.forEach((doc) => {
+      const mCount = doc.aiMarkers.length;
+      const chip = document.createElement('span');
+      chip.className = 'context-chip marker-auto-chip';
+      chip.title = '형광펜 마커가 표시된 문서입니다. 채팅에서 "거기 마커 쳐놓은 거 어떻게 생각해?"처럼 바로 물어볼 수 있습니다.';
+      chip.innerHTML = `<span>🖍️ ${escapeHtml(doc.name)} (마커 ${mCount}개)</span>`;
       elContextChips.appendChild(chip);
     });
   }
@@ -1427,7 +1516,7 @@
         model,
         apiKey,
         messages: historyForApi,
-        contextDocs: getAttachedDocs()
+        contextDocs: getContextDocsForAI()
       });
 
       state.chatHistory.push({
@@ -3085,26 +3174,397 @@
       return;
     }
 
+    if (!Array.isArray(item.aiMarkers)) item.aiMarkers = [];
+
     const blob = new Blob([content], { type: 'text/html;charset=utf-8' });
     const blobUrl = URL.createObjectURL(blob);
 
-    const iframe = document.createElement('iframe');
+    let highlighterOn = false;
+    let selectedColor = 'yellow';
+
+    const root = document.createElement('div');
+    root.className = 'html-app';
+    root.innerHTML =
+      `<div class="html-marker-toolbar">` +
+      `  <div class="html-marker-toolbar-left">` +
+      `    <button type="button" class="btn-marker-toggle" title="켜면 텍스트를 드래그하자마자 형광펜 AI 마커가 표시됩니다">🖍️ 형광펜 OFF</button>` +
+      `    <div class="marker-palette" title="형광펜 색상 선택">` +
+      `      <button type="button" class="marker-color-dot active" data-color="yellow" title="노랑"></button>` +
+      `      <button type="button" class="marker-color-dot" data-color="green" title="민트"></button>` +
+      `      <button type="button" class="marker-color-dot" data-color="pink" title="핑크"></button>` +
+      `      <button type="button" class="marker-color-dot" data-color="blue" title="블루"></button>` +
+      `    </div>` +
+      `    <button type="button" class="btn-sm html-btn-mark-sel" title="선택한 텍스트에 AI 마커 추가">➕ 선택영역 마커</button>` +
+      `  </div>` +
+      `  <div class="html-marker-toolbar-right">` +
+      `    <button type="button" class="btn-sm btn-primary-soft html-btn-link-ai" title="마커가 표시된 문서를 AI 대화 컨텍스트에 연결 (자동 질문 안 함)">🤖 AI에 마커 연결</button>` +
+      `    <button type="button" class="btn-sm html-btn-clear-markers" title="모든 마커 지우기">🗑️ 초기화</button>` +
+      `  </div>` +
+      `</div>` +
+      `<div class="html-iframe-wrap">` +
+      `  <iframe title="${escapeHtml(item.name || 'HTML 미리보기')}"></iframe>` +
+      `</div>` +
+      `<div class="html-marker-tray" style="display:none;"></div>`;
+
+    const btnToggle = root.querySelector('.btn-marker-toggle');
+    const colorBtns = root.querySelectorAll('.marker-color-dot');
+    const btnMarkSel = root.querySelector('.html-btn-mark-sel');
+    const btnLinkAi = root.querySelector('.html-btn-link-ai');
+    const btnClearMarkers = root.querySelector('.html-btn-clear-markers');
+    const iframe = root.querySelector('iframe');
+    const trayEl = root.querySelector('.html-marker-tray');
+
+    function renumberMarkers() {
+      item.aiMarkers.forEach((m, idx) => {
+        m.number = idx + 1;
+      });
+    }
+
+    function persistMarkers() {
+      renumberMarkers();
+      persistFS();
+      scheduleDriveSync();
+      renderContextChips();
+      renderMarkerTray();
+      refreshMarkerBadgesInDoc();
+    }
+
+    function injectMarkerStyles(doc) {
+      if (!doc || doc.getElementById('sb-ai-marker-style')) return;
+      const style = doc.createElement('style');
+      style.id = 'sb-ai-marker-style';
+      style.textContent = `
+        mark.sb-ai-marker {
+          padding: 1px 3px;
+          border-radius: 4px;
+          cursor: pointer;
+          color: inherit;
+          transition: box-shadow 0.2s ease;
+          position: relative;
+        }
+        mark.sb-ai-marker.sb-marker-yellow { background: rgba(254, 240, 138, 0.92); color: #111827; }
+        mark.sb-ai-marker.sb-marker-green  { background: rgba(167, 243, 208, 0.92); color: #064e3b; }
+        mark.sb-ai-marker.sb-marker-pink   { background: rgba(251, 207, 232, 0.92); color: #831843; }
+        mark.sb-ai-marker.sb-marker-blue   { background: rgba(191, 219, 254, 0.92); color: #1e3a8a; }
+        mark.sb-ai-marker[data-marker-num]::before {
+          content: "#" attr(data-marker-num);
+          display: inline-block;
+          font-size: 10px;
+          font-weight: 800;
+          line-height: 1;
+          padding: 2px 4px;
+          margin-right: 3px;
+          border-radius: 99px;
+          background: #111827;
+          color: #ffffff;
+          vertical-align: middle;
+          font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+        }
+        mark.sb-ai-marker.sb-marker-pulse {
+          box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.65);
+        }
+        body.sb-highlighter-cursor {
+          cursor: text;
+        }
+      `;
+      (doc.head || doc.documentElement).appendChild(style);
+    }
+
+    function createMarkElement(doc, marker) {
+      const mark = doc.createElement('mark');
+      mark.className = `sb-ai-marker sb-marker-${marker.color || 'yellow'}`;
+      mark.dataset.markerId = marker.id;
+      mark.dataset.markerNum = String(marker.number || 1);
+      mark.title = marker.note
+        ? `[AI 마커 #${marker.number}] ${marker.note} (클릭하여 메모 수정)`
+        : `[AI 마커 #${marker.number}] 클릭하여 메모 추가/수정`;
+      mark.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const nextNote = prompt(
+          `[AI 마커 #${marker.number}] 이 부분에 대한 짧은 메모를 입력하세요 (비워두면 메모 없음):\n"${marker.text.slice(0, 80)}"`,
+          marker.note || ''
+        );
+        if (nextNote !== null) {
+          marker.note = nextNote.trim();
+          persistMarkers();
+          showToast(`🖍️ 마커 #${marker.number} 메모가 저장되었습니다.`);
+        }
+      });
+      return mark;
+    }
+
+    function wrapRangeWithMarker(doc, range, marker) {
+      // 단일 텍스트 노드 내부인 경우 빠르게 감싸기
+      if (
+        range.startContainer === range.endContainer &&
+        range.startContainer.nodeType === Node.TEXT_NODE
+      ) {
+        const mark = createMarkElement(doc, marker);
+        range.surroundContents(mark);
+        return true;
+      }
+
+      // 여러 노드/태그를 걸친 선택인 경우: 범위 안의 텍스트 노드만 안전하게 분리해 감싸기
+      const textNodes = [];
+      const walker = doc.createTreeWalker(
+        range.commonAncestorContainer.nodeType === Node.TEXT_NODE
+          ? range.commonAncestorContainer.parentNode
+          : range.commonAncestorContainer,
+        NodeFilter.SHOW_TEXT,
+        null
+      );
+      let node;
+      while ((node = walker.nextNode())) {
+        if (!node.nodeValue || !node.nodeValue.trim()) continue;
+        if (node.parentElement && node.parentElement.closest('script, style, mark.sb-ai-marker')) continue;
+        if (range.intersectsNode(node)) {
+          textNodes.push(node);
+        }
+      }
+      if (textNodes.length === 0) return false;
+
+      let wrappedFirst = false;
+      textNodes.forEach((tn) => {
+        let start = 0;
+        let end = tn.nodeValue.length;
+        if (tn === range.startContainer) start = range.startOffset;
+        if (tn === range.endContainer) end = range.endOffset;
+        if (end <= start) return;
+
+        const targetNode = start > 0 ? tn.splitText(start) : tn;
+        if (end - start < targetNode.nodeValue.length) {
+          targetNode.splitText(end - start);
+        }
+
+        const mark = createMarkElement(doc, marker);
+        if (wrappedFirst) {
+          // 이어지는 조각은 번호 배지 중복 숨김
+          mark.removeAttribute('data-marker-num');
+          mark.style.setProperty('--hide-badge', '1');
+        }
+        targetNode.parentNode.insertBefore(mark, targetNode);
+        mark.appendChild(targetNode);
+        wrappedFirst = true;
+      });
+      return wrappedFirst;
+    }
+
+    function unwrapMarkerFromDoc(doc, markerId) {
+      if (!doc) return;
+      const marks = doc.querySelectorAll(`mark.sb-ai-marker[data-marker-id="${CSS.escape(markerId)}"]`);
+      marks.forEach((mark) => {
+        const parent = mark.parentNode;
+        while (mark.firstChild) {
+          parent.insertBefore(mark.firstChild, mark);
+        }
+        parent.removeChild(mark);
+        parent.normalize();
+      });
+    }
+
+    function refreshMarkerBadgesInDoc() {
+      const doc = iframe.contentDocument;
+      if (!doc) return;
+      item.aiMarkers.forEach((m) => {
+        const marks = doc.querySelectorAll(`mark.sb-ai-marker[data-marker-id="${CSS.escape(m.id)}"]`);
+        marks.forEach((mark, idx) => {
+          if (idx === 0) mark.dataset.markerNum = String(m.number);
+          mark.title = m.note
+            ? `[AI 마커 #${m.number}] ${m.note} (클릭하여 메모 수정)`
+            : `[AI 마커 #${m.number}] 클릭하여 메모 추가/수정`;
+        });
+      });
+    }
+
+    function applySavedMarkersToDoc(doc) {
+      if (!doc || !doc.body || !Array.isArray(item.aiMarkers) || item.aiMarkers.length === 0) return;
+      renumberMarkers();
+
+      item.aiMarkers.forEach((marker) => {
+        const needle = String(marker.text || '').trim();
+        if (!needle) return;
+        if (doc.querySelector(`mark.sb-ai-marker[data-marker-id="${CSS.escape(marker.id)}"]`)) return;
+
+        const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT, null);
+        let node;
+        let bestMatch = null;
+
+        while ((node = walker.nextNode())) {
+          if (!node.nodeValue || node.parentElement?.closest('script, style, mark.sb-ai-marker')) continue;
+          const idx = node.nodeValue.indexOf(needle);
+          if (idx !== -1) {
+            bestMatch = { node, idx };
+            if (!marker.context || node.nodeValue.includes(marker.context.slice(0, 24))) {
+              break;
+            }
+          }
+        }
+
+        if (bestMatch) {
+          try {
+            const range = doc.createRange();
+            range.setStart(bestMatch.node, bestMatch.idx);
+            range.setEnd(bestMatch.node, bestMatch.idx + needle.length);
+            wrapRangeWithMarker(doc, range, marker);
+          } catch (_) {}
+        }
+      });
+    }
+
+    function addMarkerFromSelection() {
+      const doc = iframe.contentDocument;
+      const winObj = iframe.contentWindow;
+      if (!doc || !winObj) return false;
+
+      const sel = winObj.getSelection();
+      if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return false;
+
+      const rawText = sel.toString().replace(/\s+/g, ' ').trim();
+      if (!rawText || rawText.length < 1) return false;
+
+      const range = sel.getRangeAt(0);
+      const containerText = String(range.commonAncestorContainer?.textContent || '').replace(/\s+/g, ' ').trim();
+      const contextSnippet = containerText.length > 220 ? containerText.slice(0, 220) + '…' : containerText;
+
+      const marker = {
+        id: `mk-${genId()}`,
+        number: item.aiMarkers.length + 1,
+        color: selectedColor,
+        text: rawText.slice(0, 600),
+        context: contextSnippet,
+        note: '',
+        createdAt: new Date().toISOString()
+      };
+
+      try {
+        wrapRangeWithMarker(doc, range, marker);
+      } catch (_) {}
+
+      sel.removeAllRanges();
+      item.aiMarkers.push(marker);
+      persistMarkers();
+      showToast(`🖍️ AI 마커 #${marker.number} 표시됨 — 나중에 AI에게 "마커 쳐놓은 거 어떻게 생각해?"라고 물어보세요!`);
+      return true;
+    }
+
+    function scrollToMarker(markerId) {
+      const doc = iframe.contentDocument;
+      if (!doc) return;
+      const target = doc.querySelector(`mark.sb-ai-marker[data-marker-id="${CSS.escape(markerId)}"]`);
+      if (!target) {
+        showToast('해당 마커 위치를 화면에서 찾지 못했습니다.');
+        return;
+      }
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      target.classList.add('sb-marker-pulse');
+      setTimeout(() => target.classList.remove('sb-marker-pulse'), 1300);
+    }
+
+    function renderMarkerTray() {
+      trayEl.innerHTML = '';
+      if (!item.aiMarkers || item.aiMarkers.length === 0) {
+        trayEl.style.display = 'none';
+        return;
+      }
+      trayEl.style.display = 'flex';
+      const label = document.createElement('span');
+      label.className = 'html-marker-tray-label';
+      label.textContent = `🖍️ AI 마커 (${item.aiMarkers.length}):`;
+      trayEl.appendChild(label);
+
+      item.aiMarkers.forEach((m) => {
+        const chip = document.createElement('div');
+        chip.className = 'html-marker-chip';
+        chip.title = m.note ? `#${m.number} ${m.text}\n메모: ${m.note}` : `#${m.number} ${m.text} (클릭하여 이동)`;
+        chip.innerHTML =
+          `<span class="html-marker-chip-dot ${escapeHtml(m.color || 'yellow')}"></span>` +
+          `<span class="html-marker-chip-text">#${m.number} ${escapeHtml(m.text.slice(0, 28))}${m.note ? ` · 💬` : ''}</span>` +
+          `<button type="button" class="html-marker-chip-del" title="마커 삭제">✕</button>`;
+
+        chip.addEventListener('click', () => scrollToMarker(m.id));
+        chip.querySelector('.html-marker-chip-del').addEventListener('click', (e) => {
+          e.stopPropagation();
+          unwrapMarkerFromDoc(iframe.contentDocument, m.id);
+          item.aiMarkers = item.aiMarkers.filter((x) => x.id !== m.id);
+          persistMarkers();
+        });
+        trayEl.appendChild(chip);
+      });
+    }
+
+    // Toolbar interactions
+    btnToggle.addEventListener('click', () => {
+      highlighterOn = !highlighterOn;
+      btnToggle.classList.toggle('active', highlighterOn);
+      btnToggle.textContent = highlighterOn ? '🖍️ 형광펜 ON' : '🖍️ 형광펜 OFF';
+      if (iframe.contentDocument?.body) {
+        iframe.contentDocument.body.classList.toggle('sb-highlighter-cursor', highlighterOn);
+      }
+      if (highlighterOn) {
+        showToast('🖍️ 형광펜 ON: HTML 안의 텍스트를 드래그하면 AI 마커가 표시됩니다.');
+      }
+    });
+
+    colorBtns.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        selectedColor = btn.dataset.color || 'yellow';
+        colorBtns.forEach((b) => b.classList.toggle('active', b === btn));
+      });
+    });
+
+    btnMarkSel.addEventListener('click', () => {
+      if (!addMarkerFromSelection()) {
+        showToast('먼저 HTML 화면에서 표시할 텍스트를 드래그해 선택해 주세요.');
+      }
+    });
+
+    btnLinkAi.addEventListener('click', () => {
+      attachNodeToContext(item);
+      switchRightTab('chat');
+      const count = item.aiMarkers.length;
+      showToast(
+        count > 0
+          ? `🤖 AI 대화에 마커 ${count}개가 연결되었습니다. "거기 마커 쳐놓은 거 어떻게 생각해?"처럼 편하게 물어보세요!`
+          : '🤖 이 HTML 문서가 AI 대화에 연결되었습니다.'
+      );
+    });
+
+    btnClearMarkers.addEventListener('click', () => {
+      if (!item.aiMarkers.length) return;
+      if (!confirm(`표시된 AI 마커 ${item.aiMarkers.length}개를 모두 지울까요?`)) return;
+      const doc = iframe.contentDocument;
+      item.aiMarkers.forEach((m) => unwrapMarkerFromDoc(doc, m.id));
+      item.aiMarkers = [];
+      persistMarkers();
+      showToast('모든 AI 마커가 초기화되었습니다.');
+    });
+
+    iframe.addEventListener('load', () => {
+      try {
+        const doc = iframe.contentDocument;
+        if (!doc) return;
+        injectMarkerStyles(doc);
+        applySavedMarkersToDoc(doc);
+        renderMarkerTray();
+        doc.addEventListener('mouseup', () => {
+          if (!highlighterOn) return;
+          setTimeout(() => addMarkerFromSelection(), 10);
+        });
+      } catch (err) {
+        console.warn('HTML 마커 초기화 실패:', err);
+      }
+    });
+
     iframe.src = blobUrl;
-    iframe.title = item.name || 'HTML 미리보기';
-    iframe.style.width = '100%';
-    iframe.style.height = '100%';
-    iframe.style.border = 'none';
-    iframe.style.background = '#ffffff';
 
     WinManager.openWindow({
       id: winId,
       title: item.name || 'HTML 미리보기',
       icon: item.icon || '🌐',
       meta: 'HTML',
-      width: 960,
-      height: 680,
-      bodyClass: 'media-viewer-body',
-      contentEl: iframe,
+      width: 980,
+      height: 700,
+      contentEl: root,
       headerActions: [
         {
           label: '↗ 새 탭',
@@ -3121,8 +3581,11 @@
         try {
           URL.revokeObjectURL(blobUrl);
         } catch (_) {}
+        renderContextChips();
       }
     });
+
+    renderContextChips();
   }
 
   async function openDriveFileViewer(item) {
@@ -3352,7 +3815,8 @@
 
     showToast(`☁️ "${file.name}" Google Drive 업로드 중...`);
     try {
-      const uploaded = await BrainDrive.uploadFile(driveToken, file, BrainAuth.getUser()?.email || '');
+      const folderPath = getRelativeFolderPathForItem(state.selectedItem.id);
+      const uploaded = await BrainDrive.uploadFile(driveToken, file, BrainAuth.getUser()?.email || '', folderPath);
       saveStateForUndo();
       state.selectedItem.driveFile = uploaded;
       if (!state.selectedItem.name || state.selectedItem.name === '새 메모' || state.selectedItem.name === '새 메모.md') {

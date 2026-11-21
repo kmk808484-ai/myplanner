@@ -145,8 +145,7 @@
     if (
       cachedFolders &&
       cachedFolders.email === normalizedEmail &&
-      cachedFolders.rootFolderId &&
-      cachedFolders.filesFolderId
+      cachedFolders.rootFolderId
     ) {
       return cachedFolders;
     }
@@ -156,20 +155,18 @@
       rootFolder = await createFolder(accessToken, ROOT_FOLDER_NAME, 'root');
     }
 
-    let filesFolder = await findFileInFolder(
+    // 기존 레거시 files 폴더가 이미 있으면 스캔 호환용으로 ID만 기록 (신규 생성 안 함)
+    const legacyFilesFolder = await findFileInFolder(
       accessToken,
       FILES_FOLDER_NAME,
       rootFolder.id,
       'application/vnd.google-apps.folder'
     );
-    if (!filesFolder) {
-      filesFolder = await createFolder(accessToken, FILES_FOLDER_NAME, rootFolder.id);
-    }
 
     cachedFolders = {
       email: normalizedEmail,
       rootFolderId: rootFolder.id,
-      filesFolderId: filesFolder.id
+      filesFolderId: legacyFilesFolder ? legacyFilesFolder.id : ''
     };
     return cachedFolders;
   }
@@ -398,15 +395,15 @@
     return putRes.json();
   }
 
-  async function uploadFile(accessToken, file, userEmail = '') {
-    const folders = await ensureAppFolders(accessToken, userEmail);
+  async function uploadFile(accessToken, file, userEmail = '', folderPath = []) {
+    const targetParentId = await ensureFolderPath(accessToken, folderPath, userEmail);
     const mimeType = guessMimeType(file);
     let data;
 
     if (file.size <= MULTIPART_LIMIT_BYTES) {
-      data = await uploadFileMultipart(accessToken, file, folders.filesFolderId, mimeType);
+      data = await uploadFileMultipart(accessToken, file, targetParentId, mimeType);
     } else {
-      data = await uploadFileResumable(accessToken, file, folders.filesFolderId, mimeType);
+      data = await uploadFileResumable(accessToken, file, targetParentId, mimeType);
     }
 
     return {
@@ -417,6 +414,27 @@
       webViewLink: data.webViewLink || `https://drive.google.com/file/d/${data.id}/view`,
       uploadedAt: data.modifiedTime || new Date().toISOString()
     };
+  }
+
+  async function moveFile(accessToken, fileId, targetFolderPath = [], userEmail = '') {
+    if (!fileId) return null;
+    const targetParentId = await ensureFolderPath(accessToken, targetFolderPath, userEmail);
+    const metaRes = await driveFetch(
+      `${DRIVE_API}/files/${encodeURIComponent(fileId)}?fields=id,parents`,
+      accessToken,
+      { method: 'GET' }
+    );
+    const meta = await metaRes.json();
+    const prevParents = Array.isArray(meta.parents) ? meta.parents : [];
+    if (prevParents.length === 1 && prevParents[0] === targetParentId) return meta;
+
+    const removeParam = prevParents.length > 0 ? `&removeParents=${encodeURIComponent(prevParents.join(','))}` : '';
+    const moveRes = await driveFetch(
+      `${DRIVE_API}/files/${encodeURIComponent(fileId)}?addParents=${encodeURIComponent(targetParentId)}${removeParam}&fields=id,parents`,
+      accessToken,
+      { method: 'PATCH' }
+    );
+    return moveRes.json();
   }
 
   async function getFileBlobUrl(accessToken, fileId, fallbackMimeType = '') {
@@ -605,8 +623,8 @@
       const children = await listChildrenInFolder(accessToken, folderId);
       for (const child of children) {
         if (child.mimeType === 'application/vnd.google-apps.folder') {
-          // 내부 업로드 전용 files 폴더는 하위 파일만 루트로 스캔 (폴더 자체는 가상 폴더로 중복 생성 안 함)
-          if (depth === 0 && child.id === folders.filesFolderId) {
+          // 레거시 files 폴더가 남아있으면 하위 파일만 루트로 스캔
+          if (depth === 0 && folders.filesFolderId && child.id === folders.filesFolderId) {
             await walk(child.id, relPath, depth + 1);
           } else {
             const nextPath = [...relPath, child.name];
@@ -651,6 +669,7 @@
     downloadDatabase,
     uploadDatabase,
     uploadFile,
+    moveFile,
     upsertTextFile,
     renameFile,
     downloadTextFile,

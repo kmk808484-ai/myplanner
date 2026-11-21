@@ -296,34 +296,35 @@
       });
     }
 
+    // macOS Traffic Light Controls (왼쪽 상단: 닫기 · 최소화 · 최대화)
     const controlsEl = document.createElement('div');
-    controlsEl.className = 'os-win-controls';
-
-    const btnMin = document.createElement('button');
-    btnMin.type = 'button';
-    btnMin.className = 'os-win-ctrl-btn';
-    btnMin.textContent = '─';
-    btnMin.title = '최소화';
-
-    const btnMax = document.createElement('button');
-    btnMax.type = 'button';
-    btnMax.className = 'os-win-ctrl-btn';
-    btnMax.textContent = '□';
-    btnMax.title = '최대화 / 복원';
+    controlsEl.className = 'os-win-controls mac-traffic-lights';
 
     const btnClose = document.createElement('button');
     btnClose.type = 'button';
-    btnClose.className = 'os-win-ctrl-btn os-win-close';
-    btnClose.textContent = '✕';
+    btnClose.className = 'mac-dot mac-dot-close';
+    btnClose.innerHTML = '<span>×</span>';
     btnClose.title = '닫기';
 
+    const btnMin = document.createElement('button');
+    btnMin.type = 'button';
+    btnMin.className = 'mac-dot mac-dot-min';
+    btnMin.innerHTML = '<span>−</span>';
+    btnMin.title = '최소화 (Dock으로 내리기)';
+
+    const btnMax = document.createElement('button');
+    btnMax.type = 'button';
+    btnMax.className = 'mac-dot mac-dot-max';
+    btnMax.innerHTML = '<span>+</span>';
+    btnMax.title = '최대화 / 원래 크기';
+
+    controlsEl.appendChild(btnClose);
     controlsEl.appendChild(btnMin);
     controlsEl.appendChild(btnMax);
-    controlsEl.appendChild(btnClose);
 
     rightGroup.appendChild(actionsEl);
-    rightGroup.appendChild(controlsEl);
 
+    headerEl.appendChild(controlsEl);
     headerEl.appendChild(titleGroup);
     headerEl.appendChild(rightGroup);
 
@@ -386,7 +387,7 @@
           };
           winState.maximized = true;
           winEl.classList.add('maximized');
-          btnMax.textContent = '❐';
+          btnMax.innerHTML = '<span>↙</span>';
         } else {
           winState.maximized = false;
           winEl.classList.remove('maximized');
@@ -396,7 +397,7 @@
             winEl.style.width = winState.prevRect.width;
             winEl.style.height = winState.prevRect.height;
           }
-          btnMax.textContent = '□';
+          btnMax.innerHTML = '<span>+</span>';
         }
         handle.focus();
       },
@@ -457,9 +458,14 @@
     }
   }
 
+  function listOpenWindowIds() {
+    return Array.from(windows.keys());
+  }
+
   global.BrainWindowManager = {
     openWindow,
     getWindow,
+    listOpenWindowIds,
     closeAll
   };
 })(window);

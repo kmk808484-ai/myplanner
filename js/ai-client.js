@@ -50,15 +50,48 @@
       '당신은 사용자의 개인 지식 관리 시스템(Second Brain OS)에 통합된 AI 어시스턴트입니다. ' +
       '명확하고 구조화된 한국어 마크다운으로 답변하세요.';
 
+    const colorNames = {
+      yellow: '노란 형광펜',
+      green: '민트 형광펜',
+      pink: '핑크 형광펜',
+      blue: '블루 형광펜'
+    };
+
+    const docsWithMarkers = (contextDocs || []).filter((d) => Array.isArray(d.aiMarkers) && d.aiMarkers.length > 0);
+    if (docsWithMarkers.length > 0) {
+      base +=
+        '\n\n[중요 지침 — AI 형광펜 마커]\n' +
+        '사용자가 HTML/문서 뷰어에서 중요하거나 질문하고 싶은 구간에 형광펜 마커를 표시해 두었습니다. ' +
+        '사용자가 "거기 마커 쳐놓은 거", "형광펜 표시한 부분", "마커 1번", "표시해 둔 곳 어떻게 생각해?" 등 마커를 언급하면 ' +
+        '아래 [⭐ AI 마커 목록]을 최우선으로 참고하여 해당 부분을 중점적으로 분석·피드백하세요.\n';
+
+      docsWithMarkers.forEach((doc) => {
+        base += `\n=== [⭐ AI 마커 — 문서: ${doc.name}] ===\n`;
+        doc.aiMarkers.forEach((m, idx) => {
+          const num = m.number || (idx + 1);
+          const colorLabel = colorNames[m.color] || m.color || '형광펜';
+          base += `• [마커 #${num} / ${colorLabel}]\n`;
+          base += `  - 표시한 원문: "${m.text}"\n`;
+          if (m.note) base += `  - 사용자 메모: ${m.note}\n`;
+          if (m.context && m.context !== m.text) base += `  - 주변 문맥: ${m.context}\n`;
+        });
+      });
+    }
+
     if (contextDocs && contextDocs.length > 0) {
-      base += '\n\n아래는 사용자가 현재 세컨드 브레인에서 첨부한 메모 컨텍스트입니다. 답변 시 이 내용을 우선 참고하세요:\n';
+      base += '\n\n아래는 사용자가 현재 세컨드 브레인에서 첨부한 문서/메모 전체 컨텍스트입니다:\n';
       contextDocs.forEach((doc, idx) => {
+        const rawSummary = String(doc.summary || '');
+        // HTML 문서가 매우 길면 토큰 절약을 위해 적당히 잘라서 전달 (마커 원문은 위에서 이미 전문 제공됨)
+        const trimmedSummary = rawSummary.length > 16000
+          ? rawSummary.slice(0, 16000) + '\n... (이하 생략됨)'
+          : rawSummary;
         base +=
           `\n--- [메모 ${idx + 1}] ---\n` +
           `제목: ${doc.name}\n` +
           (doc.tag ? `태그: ${doc.tag}\n` : '') +
           (doc.link ? `링크: ${doc.link}\n` : '') +
-          `내용:\n${doc.summary || '(내용 없음)'}\n`;
+          `내용:\n${trimmedSummary || '(내용 없음)'}\n`;
       });
     }
     return base;
