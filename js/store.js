@@ -29,6 +29,40 @@
     };
   }
 
+  function createGuestDefaultData() {
+    return {
+      id: 'root',
+      name: '오프라인 작업공간 (게스트)',
+      type: 'folder',
+      icon: '💻',
+      children: [
+        {
+          id: 'guest-welcome-folder',
+          name: '시작 가이드',
+          type: 'folder',
+          icon: '📁',
+          children: [
+            {
+              id: 'guest-welcome-note',
+              type: 'doc',
+              name: '오프라인 게스트 안내.md',
+              icon: '📘',
+              tag: '#오프라인 #게스트 #MD',
+              link: '',
+              summary:
+                '## 오프라인 게스트 모드입니다\n\n' +
+                '인터넷 연결이나 로그인 없이 **100% 오프라인**으로 모든 문서·수식·엑셀·Origin 그래프 작업을 할 수 있습니다.\n\n' +
+                '### 바로 쓸 수 있는 기능\n' +
+                '- **📊 엑셀 & OriginLab 그래프**: 상단 **📊+ 시트** 버튼으로 빈 시트를 만들고, **파일 → 예제**에서 다양한 과학 그래프 샘플을 불러올 수 있습니다.\n' +
+                '- **📝 수학·공학 마크다운 에디터**: `.md` 문서를 더블클릭하면 LaTeX 수식(`$$...$$`)과 다이어그램 실시간 편집기가 열립니다.\n' +
+                '- **💾 로컬 자동 저장 & JSON 백업**: 모든 작업은 브라우저에 저장되며 상단 **⚙️ 백업 설정**에서 JSON 파일로 내보내거나 복원할 수 있습니다.'
+            }
+          ]
+        }
+      ]
+    };
+  }
+
   function createDefaultData() {
     return {
       id: 'root',
@@ -154,10 +188,11 @@
         hasLocalUserDb = true;
       } else {
         // 기존 ownerEmail 또는 최초 사용자가 레거시 단일 DB를 보유한 경우 1회 안전 이전
+        const isGuest = clean === 'guest@local.offline';
         const claimedBy = String(localStorage.getItem(LEGACY_CLAIMED_KEY) || '').trim().toLowerCase();
         const prevOwner = String(state.settings.ownerEmail || '').trim().toLowerCase();
         const legacyRaw = localStorage.getItem(LEGACY_V6_DB_KEY) || localStorage.getItem(LEGACY_DB_KEY);
-        const canClaimLegacy = Boolean(legacyRaw) && (
+        const canClaimLegacy = !isGuest && Boolean(legacyRaw) && (
           claimedBy === clean ||
           (!claimedBy && (!prevOwner || prevOwner === clean))
         );
@@ -182,7 +217,7 @@
     }
 
     if (!loadedFS) {
-      loadedFS = createDefaultData();
+      loadedFS = clean === 'guest@local.offline' ? createGuestDefaultData() : createDefaultData();
     }
 
     // 2. 해당 계정 전용 채팅 로드
@@ -260,19 +295,25 @@
 
   function persistFS(options = {}) {
     if (!activeUserEmail) return;
-    localStorage.setItem(getUserKeys(activeUserEmail).db, JSON.stringify(state.fileSystem));
+    try {
+      localStorage.setItem(getUserKeys(activeUserEmail).db, JSON.stringify(state.fileSystem));
+    } catch (_) {}
     if (!options.silent) {
       setSyncMeta({ updatedAt: Date.now(), hasUserEdits: true });
     }
   }
 
   function persistSettings() {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings));
+    try {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings));
+    } catch (_) {}
   }
 
   function persistChat(options = {}) {
     if (!activeUserEmail) return;
-    localStorage.setItem(getUserKeys(activeUserEmail).chat, JSON.stringify(state.chatHistory.slice(-60)));
+    try {
+      localStorage.setItem(getUserKeys(activeUserEmail).chat, JSON.stringify(state.chatHistory.slice(-60)));
+    } catch (_) {}
     if (!options.silent) {
       setSyncMeta({ updatedAt: Date.now(), hasUserEdits: true });
     }

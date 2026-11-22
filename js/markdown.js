@@ -41,6 +41,7 @@
 
   async function ensureKaTeX() {
     if (global.katex) return global.katex;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return null;
     if (!katexLoadPromise) {
       loadCssOnce(KATEX_CSS_URL);
       katexLoadPromise = (async () => {
@@ -57,6 +58,7 @@
 
   async function ensureMermaid() {
     if (global.mermaid) return global.mermaid;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return null;
     if (!mermaidLoadPromise) {
       mermaidLoadPromise = (async () => {
         await loadScriptOnce(MERMAID_JS_URL);

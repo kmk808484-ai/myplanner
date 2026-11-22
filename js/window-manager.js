@@ -355,35 +355,40 @@
       });
     }
 
-    // macOS Traffic Light Controls (왼쪽 상단: 닫기 · 최소화 · 최대화)
-    const controlsEl = document.createElement('div');
-    controlsEl.className = 'os-win-controls mac-traffic-lights';
+    // Windows-style Right-Aligned Larger Controls (최소화 · 최대화 · 닫기)
+    const SVG_MIN = '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><line x1="2" y1="7" x2="12" y2="7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>';
+    const SVG_MAX = '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><rect x="2.2" y="2.2" width="9.6" height="9.6" rx="1" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>';
+    const SVG_RESTORE = '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><rect x="2" y="4.2" width="7.4" height="7.4" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M4.6 4.2V2.2h7.2v7.2H9.6" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>';
+    const SVG_CLOSE = '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><line x1="2.4" y1="2.4" x2="11.6" y2="11.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><line x1="11.6" y1="2.4" x2="2.4" y2="11.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
 
-    const btnClose = document.createElement('button');
-    btnClose.type = 'button';
-    btnClose.className = 'mac-dot mac-dot-close';
-    btnClose.innerHTML = '<span>×</span>';
-    btnClose.title = '닫기';
+    const controlsEl = document.createElement('div');
+    controlsEl.className = 'os-win-controls win-controls-right';
 
     const btnMin = document.createElement('button');
     btnMin.type = 'button';
-    btnMin.className = 'mac-dot mac-dot-min';
-    btnMin.innerHTML = '<span>−</span>';
-    btnMin.title = '최소화 (Dock으로 내리기)';
+    btnMin.className = 'os-win-ctrl-btn win-btn-min';
+    btnMin.innerHTML = SVG_MIN;
+    btnMin.title = '최소화';
 
     const btnMax = document.createElement('button');
     btnMax.type = 'button';
-    btnMax.className = 'mac-dot mac-dot-max';
-    btnMax.innerHTML = '<span>+</span>';
+    btnMax.className = 'os-win-ctrl-btn win-btn-max';
+    btnMax.innerHTML = SVG_MAX;
     btnMax.title = '최대화 / 원래 크기';
 
-    controlsEl.appendChild(btnClose);
+    const btnClose = document.createElement('button');
+    btnClose.type = 'button';
+    btnClose.className = 'os-win-ctrl-btn win-btn-close';
+    btnClose.innerHTML = SVG_CLOSE;
+    btnClose.title = '닫기';
+
     controlsEl.appendChild(btnMin);
     controlsEl.appendChild(btnMax);
+    controlsEl.appendChild(btnClose);
 
     rightGroup.appendChild(actionsEl);
+    rightGroup.appendChild(controlsEl);
 
-    headerEl.appendChild(controlsEl);
     headerEl.appendChild(titleGroup);
     headerEl.appendChild(rightGroup);
 
@@ -447,7 +452,7 @@
           };
           winState.maximized = true;
           winEl.classList.add('maximized');
-          btnMax.innerHTML = '<span>↙</span>';
+          btnMax.innerHTML = SVG_RESTORE;
         } else {
           winState.maximized = false;
           winEl.classList.remove('maximized');
@@ -457,7 +462,7 @@
             winEl.style.width = winState.prevRect.width;
             winEl.style.height = winState.prevRect.height;
           }
-          btnMax.innerHTML = '<span>+</span>';
+          btnMax.innerHTML = SVG_MAX;
         }
         handle.focus();
       },

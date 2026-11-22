@@ -7,15 +7,24 @@
   const BrainAuth = window.BrainAuth;
   const BrainDrive = window.BrainDrive;
   const LocalBridge = window.BrainLocalBridge;
+  const BrainLocalFolder = window.BrainLocalFolder;
   const WinManager = window.BrainWindowManager;
   const BrainSheet = window.BrainSpreadsheet;
 
   let isEditing = false;
   let isSendingChat = false;
   let isBridgeConnected = false;
+  let isGuestMode = false;
   let searchQuery = '';
+  let offlineBannerDismissed = false;
 
-  // Google Drive sync & OS window state
+  // Desktop multi-selection & marquee state
+  let selectedItemIds = new Set();
+  let lastClickedItemId = null;
+  let currentRenderedItems = [];
+  let justFinishedMarquee = false;
+
+  // Google Drive & Local Folder sync + OS window state
   let driveSyncTimer = null;
   let isDriveSyncing = false;
   let driveSyncStatus = 'disconnected'; // 'disconnected' | 'syncing' | 'synced' | 'expired' | 'error'
@@ -25,6 +34,8 @@
   let previewRenderSeq = 0;
   const openMdWindows = new Map(); // itemId -> { win, syncFromItem }
   const mdDriveSyncTimers = new Map(); // itemId -> timerId
+  const localFolderTimers = new Map(); // itemId -> timerId
+  let localMetaSaveTimer = null;
 
   // ================= DOM References =================
   const $ = (id) => document.getElementById(id);
@@ -39,6 +50,7 @@
 
   // Preview panel
   const elEmptyState = $('empty-state');
+  const elMultiSelectState = $('multi-select-state');
   const elDetailState = $('detail-state');
   const elViewMode = $('view-mode');
   const elEditMode = $('edit-mode');
@@ -53,8 +65,9 @@
   const elContextChips = $('context-chips');
   const elContextCountBadge = $('context-count-badge');
 
-  // Settings modal
+  // Settings & Local Folder modals
   const elSettingsModal = $('settings-modal');
+  const elLocalFolderModal = $('local-folder-modal');
 
   // ================= Toast =================
   function showToast(msg, durationMs) {
@@ -135,6 +148,7 @@
 
   // ================= Right Panel Tabs =================
   function switchRightTab(tabName) {
+    if (isGuestMode && tabName === 'chat') tabName = 'preview';
     document.querySelectorAll('.panel-tab').forEach((t) => {
       t.classList.toggle('active', t.dataset.tab === tabName);
     });
@@ -230,12 +244,103 @@
     });
   }
 
+  // ================= Desktop Multi-Selection & Marquee =================
+  function getSelectedItems() {
+    const items = [];
+    const seen = new Set();
+    const pushNode = (node) => {
+      if (!node || node.id === 'root' || seen.has(node.id) || !isItemVisible(node)) return;
+      seen.add(node.id);
+      items.push(node);
+    };
+
+    // Preserve visual order for currently rendered items
+    currentRenderedItems.forEach((item) => {
+      if (selectedItemIds.has(item.id)) pushNode(item);
+    });
+    // Include any selected ID not in currentRenderedItems
+    selectedItemIds.forEach((id) => {
+      if (!seen.has(id)) {
+        const found = findNodeAndParent(id);
+        if (found?.node) pushNode(found.node);
+      }
+    });
+    if (items.length === 0 && state.selectedItem && state.selectedItem.id !== 'root') {
+      pushNode(state.selectedItem);
+    }
+    return items;
+  }
+
+  function syncCardSelectionVisuals() {
+    elContentArea.querySelectorAll('.item-card').forEach((card) => {
+      card.classList.toggle('selected', selectedItemIds.has(card.dataset.itemId));
+    });
+  }
+
+  function renderMultiSelectPanel(items) {
+    isEditing = false;
+    elEmptyState.style.display = 'none';
+    elDetailState.style.display = 'none';
+    if (!elMultiSelectState) return;
+    elMultiSelectState.style.display = 'flex';
+    const countEl = $('multi-select-count');
+    const listEl = $('multi-select-list');
+    if (countEl) countEl.textContent = `✅ ${items.length}개 항목 선택됨`;
+    if (listEl) {
+      const preview = items.slice(0, 12);
+      listEl.innerHTML = preview.map((it) =>
+        `<div class="multi-select-row">` +
+        `  <span class="multi-select-ico">${escapeHtml(it.icon || (it.type === 'folder' ? '📁' : '📄'))}</span>` +
+        `  <span class="multi-select-name">${escapeHtml(it.name)}</span>` +
+        `</div>`
+      ).join('') + (items.length > 12 ? `<div class="multi-select-more">… 외 ${items.length - 12}개 항목</div>` : '');
+    }
+  }
+
+  function updateSelectionPanel() {
+    const items = getSelectedItems();
+    if (items.length === 0) {
+      clearSelectionView();
+      return;
+    }
+    if (items.length === 1) {
+      selectItem(items[0], { preserveMulti: true });
+      return;
+    }
+    state.selectedItem = items[items.length - 1];
+    renderMultiSelectPanel(items);
+  }
+
+  function setSelectedItemIds(ids, primaryId = null) {
+    selectedItemIds = new Set(Array.from(ids || []).filter(Boolean));
+    if (selectedItemIds.size === 0) {
+      state.selectedItem = null;
+      syncCardSelectionVisuals();
+      clearSelectionView();
+      return;
+    }
+    if (primaryId && selectedItemIds.has(primaryId)) {
+      const found = findNodeAndParent(primaryId);
+      state.selectedItem = found?.node || null;
+    }
+    syncCardSelectionVisuals();
+    updateSelectionPanel();
+  }
+
+  function selectAllVisibleItems() {
+    if (!currentRenderedItems.length) return;
+    const ids = currentRenderedItems.map((it) => it.id);
+    lastClickedItemId = ids[0] || null;
+    setSelectedItemIds(ids, ids[ids.length - 1]);
+  }
+
   function renderItemsGrid(items, emptyMessage) {
     elContentArea.innerHTML = '';
     updateLocalLockBanner();
 
     const visibleItems = (items || []).filter((item) => isItemVisible(item));
     if (visibleItems.length === 0) {
+      currentRenderedItems = [];
       const empty = document.createElement('div');
       empty.className = 'empty-folder-hint';
       empty.textContent = emptyMessage || '이 폴더는 비어 있습니다. 우클릭하거나 상단 버튼으로 폴더/메모를 만들어 보세요.';
@@ -248,10 +353,12 @@
       if (a.type === b.type) return 0;
       return a.type === 'folder' ? -1 : 1;
     });
+    currentRenderedItems = sorted;
 
     sorted.forEach((item) => {
+      const isSelected = selectedItemIds.has(item.id) || (selectedItemIds.size === 0 && state.selectedItem && state.selectedItem.id === item.id);
       const card = document.createElement('div');
-      card.className = 'item-card' + (state.selectedItem && state.selectedItem.id === item.id ? ' selected' : '');
+      card.className = 'item-card' + (isSelected ? ' selected' : '');
       card.dataset.itemId = item.id;
       card.draggable = true;
       card.innerHTML =
@@ -261,7 +368,11 @@
         (item.tag ? `<div class="item-tag-mini">${escapeHtml(item.tag)}</div>` : '');
 
       card.addEventListener('dragstart', (e) => {
+        const dragIds = (selectedItemIds.has(item.id) && selectedItemIds.size > 1)
+          ? Array.from(selectedItemIds)
+          : [item.id];
         e.dataTransfer.setData('text/plain', item.id);
+        e.dataTransfer.setData('application/x-brain-ids', JSON.stringify(dragIds));
       });
 
       if (item.type === 'folder') {
@@ -280,8 +391,36 @@
 
       card.addEventListener('click', (e) => {
         e.stopPropagation();
-        document.querySelectorAll('.item-card').forEach((el) => el.classList.remove('selected'));
-        card.classList.add('selected');
+        if (e.target.closest('.item-rename-input')) return;
+        elContextMenu.style.display = 'none';
+
+        if (e.shiftKey && lastClickedItemId) {
+          const idxA = currentRenderedItems.findIndex((x) => x.id === lastClickedItemId);
+          const idxB = currentRenderedItems.findIndex((x) => x.id === item.id);
+          if (idxA !== -1 && idxB !== -1) {
+            const lo = Math.min(idxA, idxB);
+            const hi = Math.max(idxA, idxB);
+            const rangeIds = currentRenderedItems.slice(lo, hi + 1).map((x) => x.id);
+            const nextIds = (e.ctrlKey || e.metaKey)
+              ? new Set([...selectedItemIds, ...rangeIds])
+              : new Set(rangeIds);
+            setSelectedItemIds(nextIds, item.id);
+            return;
+          }
+        }
+
+        if (e.ctrlKey || e.metaKey) {
+          const nextIds = new Set(selectedItemIds);
+          if (nextIds.has(item.id)) nextIds.delete(item.id);
+          else nextIds.add(item.id);
+          lastClickedItemId = item.id;
+          setSelectedItemIds(nextIds, item.id);
+          return;
+        }
+
+        lastClickedItemId = item.id;
+        selectedItemIds = new Set([item.id]);
+        syncCardSelectionVisuals();
         selectItem(item);
       });
 
@@ -318,9 +457,12 @@
       card.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        document.querySelectorAll('.item-card').forEach((el) => el.classList.remove('selected'));
-        card.classList.add('selected');
-        selectItem(item);
+        if (!(selectedItemIds.has(item.id) && selectedItemIds.size > 1)) {
+          lastClickedItemId = item.id;
+          selectedItemIds = new Set([item.id]);
+          syncCardSelectionVisuals();
+          selectItem(item);
+        }
         showContextMenu(e);
       });
 
@@ -328,8 +470,110 @@
     });
   }
 
+  // 바탕화면 빈 영역 왼쪽 클릭 드래그로 영역 선택 (Rubber-band Marquee Selection)
+  elContentArea.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if (e.target.closest('.item-card, .item-rename-input')) return;
+    e.preventDefault();
+    elContextMenu.style.display = 'none';
+
+    const areaRect = elContentArea.getBoundingClientRect();
+    const startX = e.clientX - areaRect.left + elContentArea.scrollLeft;
+    const startY = e.clientY - areaRect.top + elContentArea.scrollTop;
+    const additive = e.ctrlKey || e.metaKey || e.shiftKey;
+    const toggleMode = e.ctrlKey || e.metaKey;
+    const baseIds = additive ? new Set(selectedItemIds) : new Set();
+
+    let marqueeEl = null;
+    let didDrag = false;
+
+    const onMove = (ev) => {
+      const curRect = elContentArea.getBoundingClientRect();
+      const maxW = Math.max(elContentArea.scrollWidth, curRect.width);
+      const maxH = Math.max(elContentArea.scrollHeight, curRect.height);
+      const curX = Math.max(0, Math.min(maxW, ev.clientX - curRect.left + elContentArea.scrollLeft));
+      const curY = Math.max(0, Math.min(maxH, ev.clientY - curRect.top + elContentArea.scrollTop));
+
+      if (!didDrag) {
+        if (Math.hypot(curX - startX, curY - startY) < 4) return;
+        didDrag = true;
+        marqueeEl = document.createElement('div');
+        marqueeEl.className = 'desktop-marquee';
+        elContentArea.appendChild(marqueeEl);
+      }
+
+      const left = Math.min(startX, curX);
+      const top = Math.min(startY, curY);
+      const width = Math.abs(curX - startX);
+      const height = Math.abs(curY - startY);
+
+      marqueeEl.style.left = `${left}px`;
+      marqueeEl.style.top = `${top}px`;
+      marqueeEl.style.width = `${width}px`;
+      marqueeEl.style.height = `${height}px`;
+
+      // Convert marquee box to viewport coords for pixel-accurate intersection test
+      const mLeft = curRect.left - elContentArea.scrollLeft + left;
+      const mTop = curRect.top - elContentArea.scrollTop + top;
+      const mRight = mLeft + width;
+      const mBottom = mTop + height;
+
+      const hitIds = new Set();
+      elContentArea.querySelectorAll('.item-card').forEach((card) => {
+        const r = card.getBoundingClientRect();
+        const intersects = !(r.right < mLeft || r.left > mRight || r.bottom < mTop || r.top > mBottom);
+        if (intersects) hitIds.add(card.dataset.itemId);
+      });
+
+      const nextIds = new Set(baseIds);
+      if (toggleMode) {
+        hitIds.forEach((id) => {
+          if (baseIds.has(id)) nextIds.delete(id);
+          else nextIds.add(id);
+        });
+      } else {
+        hitIds.forEach((id) => nextIds.add(id));
+      }
+
+      selectedItemIds = nextIds;
+      syncCardSelectionVisuals();
+    };
+
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      if (marqueeEl) {
+        marqueeEl.remove();
+        marqueeEl = null;
+      }
+
+      if (didDrag) {
+        justFinishedMarquee = true;
+        setTimeout(() => { justFinishedMarquee = false; }, 0);
+        const items = getSelectedItems();
+        if (items.length > 0) {
+          lastClickedItemId = items[items.length - 1].id;
+        }
+        updateSelectionPanel();
+      } else if (!additive) {
+        selectedItemIds.clear();
+        lastClickedItemId = null;
+        syncCardSelectionVisuals();
+        clearSelectionView();
+      }
+    };
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+
   function openFolder(folder) {
+    const folderChanged = state.currentFolder && folder && state.currentFolder.id !== folder.id;
     state.currentFolder = folder;
+    if (folderChanged) {
+      selectedItemIds.clear();
+      lastClickedItemId = null;
+    }
     renderBreadcrumb(folder);
     renderItemsGrid(folder.children || []);
   }
@@ -385,6 +629,8 @@
   function applyItemRename(item, rawNewName) {
     const trimmed = String(rawNewName || '').trim();
     if (!item || !trimmed || trimmed === item.name) return false;
+    const oldName = item.type === 'folder' ? item.name : getLocalFileNameForItem(item);
+    const parentSegs = getRelativeFolderPathForItem(item.id);
     saveStateForUndo();
     item.name = trimmed;
     if (item.driveFile) item.driveFile.name = trimmed;
@@ -393,6 +639,23 @@
       selectItem(item);
     }
     syncOpenWindowsForItem(item);
+
+    // 로컬 폴더 동기화 (이름 변경 반영)
+    if (BrainLocalFolder && BrainLocalFolder.isConnected()) {
+      const newLocalName = item.type === 'folder' ? item.name : getLocalFileNameForItem(item);
+      if (BrainLocalFolder.getStatus().mode === 'bridge') {
+        BrainLocalFolder.renameEntry(parentSegs, oldName, parentSegs, newLocalName)
+          .then(() => scheduleLocalWorkspaceMetaSave())
+          .catch(() => {});
+      } else {
+        syncSubtreeToLocalFolder(item)
+          .then(() => {
+            if (oldName !== newLocalName) return BrainLocalFolder.removeEntry(parentSegs, oldName);
+          })
+          .then(() => scheduleLocalWorkspaceMetaSave())
+          .catch(() => {});
+      }
+    }
 
     // Google Drive 실제 파일 이름도 함께 변경
     const driveIdToRename = item.driveDocId || item.driveFile?.id;
@@ -496,24 +759,32 @@
     saveStateForUndo();
     if (type === 'sheet') {
       const newName = getUniqueNameInFolder(state.currentFolder, '새 스프레드시트', '.xlsx');
-      const starterWb = BrainSheet.createStarterWorkbook();
+      const emptyWb = BrainSheet.createEmptyWorkbook('Sheet1');
       const newItem = {
         id: genId(),
         type: 'doc',
         name: newName,
         icon: '📊',
         tag: '#Excel #시트',
-        summary: BrainSheet.workbookToMarkdownSummary(starterWb),
+        summary: BrainSheet.workbookToMarkdownSummary(emptyWb),
         link: '',
-        sheetData: starterWb
+        sheetData: emptyWb
       };
       if (!state.currentFolder.children) state.currentFolder.children = [];
       state.currentFolder.children.push(newItem);
+      selectedItemIds = new Set([newItem.id]);
+      lastClickedItemId = newItem.id;
       saveAndRender();
       selectItem(newItem);
       syncSpreadsheetToDriveNow(newItem).catch(() => {});
+      syncItemToLocalFolderNow(newItem, { allowAutoDownload: true }).catch(() => {});
       openSpreadsheetWindow(newItem);
-      showToast(`📊 새 엑셀 시트(${newName})를 만들었습니다.`);
+      const lfStatus = BrainLocalFolder?.getStatus();
+      showToast(
+        lfStatus?.connected
+          ? `📊 "${newName}" 생성 및 로컬 폴더(${lfStatus.folderName})에 저장됨`
+          : `📊 새 빈 엑셀 시트(${newName})를 만들었습니다. [파일 → 예제]에서 그래프 샘플을 불러올 수 있습니다.`
+      );
       return;
     }
 
@@ -532,6 +803,8 @@
     };
     if (!state.currentFolder.children) state.currentFolder.children = [];
     state.currentFolder.children.push(newItem);
+    selectedItemIds = new Set([newItem.id]);
+    lastClickedItemId = newItem.id;
     saveAndRender();
     selectItem(newItem);
     if (type === 'folder') {
@@ -540,55 +813,120 @@
         const folderSegs = getFolderPathSegments(newItem);
         BrainDrive.ensureFolderPath(driveToken, folderSegs, BrainAuth.getUser()?.email || '').catch(() => {});
       }
+      syncItemToLocalFolderNow(newItem).catch(() => {});
       startRenameItem(newItem);
     } else {
       scheduleDocFileSyncToDrive(newItem, true);
+      syncItemToLocalFolderNow(newItem, { allowAutoDownload: true }).catch(() => {});
       openMarkdownWindow(newItem, 'split');
     }
-    showToast(type === 'folder' ? '새 폴더를 만들었습니다.' : `새 마크다운 메모(${newName})를 만들었습니다.`);
+    const lfStatus = BrainLocalFolder?.getStatus();
+    if (lfStatus?.connected) {
+      showToast(
+        type === 'folder'
+          ? `📁 새 폴더 생성 및 로컬 폴더(${lfStatus.folderName})에 반영됨`
+          : `📝 "${newName}" 생성 및 로컬 폴더(${lfStatus.folderName})에 저장됨`
+      );
+    } else {
+      showToast(type === 'folder' ? '새 폴더를 만들었습니다.' : `새 마크다운 메모(${newName})를 만들었습니다.`);
+    }
   }
 
   function execCopy() {
-    if (!state.selectedItem || state.selectedItem.id === 'root') return;
-    state.clipboard = { action: 'copy', itemData: JSON.parse(JSON.stringify(state.selectedItem)) };
-    showToast(`복사됨: ${state.selectedItem.name}`);
+    const items = getSelectedItems();
+    if (items.length === 0) return;
+    state.clipboard = {
+      action: 'copy',
+      itemsData: items.map((it) => JSON.parse(JSON.stringify(it)))
+    };
+    showToast(items.length === 1 ? `복사됨: ${items[0].name}` : `복사됨: ${items.length}개 항목`);
   }
 
   function execCut() {
-    if (!state.selectedItem || state.selectedItem.id === 'root') return;
-    state.clipboard = { action: 'cut', itemData: JSON.parse(JSON.stringify(state.selectedItem)) };
-    showToast(`잘라내기됨: ${state.selectedItem.name}`);
+    const items = getSelectedItems();
+    if (items.length === 0) return;
+    state.clipboard = {
+      action: 'cut',
+      itemsData: items.map((it) => JSON.parse(JSON.stringify(it)))
+    };
+    showToast(items.length === 1 ? `잘라내기됨: ${items[0].name}` : `잘라내기됨: ${items.length}개 항목`);
   }
 
   function execPaste() {
     if (!state.clipboard) return;
-    saveStateForUndo();
-    const newItem = JSON.parse(JSON.stringify(state.clipboard.itemData));
+    const rawList = Array.isArray(state.clipboard.itemsData)
+      ? state.clipboard.itemsData
+      : (state.clipboard.itemData ? [state.clipboard.itemData] : []);
+    if (rawList.length === 0) return;
 
     const wasCut = state.clipboard.action === 'cut';
-    if (wasCut) {
-      if (isDescendant(newItem.id, state.currentFolder.id)) {
-        showToast('폴더를 자기 자신의 하위 폴더로 이동할 수 없습니다.');
-        return;
+    saveStateForUndo();
+    if (!state.currentFolder.children) state.currentFolder.children = [];
+
+    const pastedItems = [];
+    const oldMoveRecords = [];
+
+    for (const rawItem of rawList) {
+      const newItem = JSON.parse(JSON.stringify(rawItem));
+      if (wasCut) {
+        if (newItem.id === state.currentFolder.id || isDescendant(newItem.id, state.currentFolder.id)) {
+          showToast('폴더를 자기 자신의 하위 폴더로 이동할 수 없습니다.');
+          continue;
+        }
+        const original = findNodeAndParent(newItem.id);
+        if (original && original.parent) {
+          oldMoveRecords.push({
+            item: newItem,
+            oldSegs: getRelativeFolderPathForItem(newItem.id),
+            oldName: newItem.type === 'folder' ? newItem.name : getLocalFileNameForItem(newItem)
+          });
+          original.parent.children = original.parent.children.filter((c) => c.id !== newItem.id);
+        }
+      } else {
+        newItem.name += ' - 복사본';
+        delete newItem.driveDocId;
+        regenerateIds(newItem);
       }
-      const original = findNodeAndParent(newItem.id);
-      if (original && original.parent) {
-        original.parent.children = original.parent.children.filter((c) => c.id !== newItem.id);
-      }
-      state.clipboard = null;
-    } else {
-      newItem.name += ' - 복사본';
-      delete newItem.driveDocId;
-      regenerateIds(newItem);
+      state.currentFolder.children.push(newItem);
+      pastedItems.push(newItem);
     }
 
-    if (!state.currentFolder.children) state.currentFolder.children = [];
-    state.currentFolder.children.push(newItem);
+    if (wasCut) state.clipboard = null;
+    if (pastedItems.length === 0) return;
+
+    selectedItemIds = new Set(pastedItems.map((it) => it.id));
     saveAndRender();
-    if (wasCut) {
-      syncMovedNodeToDrive(newItem);
+    updateSelectionPanel();
+
+    pastedItems.forEach((it) => {
+      if (wasCut) syncMovedNodeToDrive(it);
+      else if (it.type === 'doc') scheduleDocFileSyncToDrive(it, true);
+    });
+
+    if (BrainLocalFolder && BrainLocalFolder.isConnected()) {
+      if (wasCut) {
+        oldMoveRecords.forEach(({ item, oldSegs, oldName }) => {
+          const newSegs = getRelativeFolderPathForItem(item.id);
+          const newName = item.type === 'folder' ? item.name : getLocalFileNameForItem(item);
+          if (BrainLocalFolder.getStatus().mode === 'bridge') {
+            BrainLocalFolder.renameEntry(oldSegs, oldName, newSegs, newName).catch(() => {});
+          } else {
+            syncSubtreeToLocalFolder(item)
+              .then(() => BrainLocalFolder.removeEntry(oldSegs, oldName))
+              .catch(() => {});
+          }
+        });
+      } else {
+        pastedItems.forEach((it) => syncSubtreeToLocalFolder(it).catch(() => {}));
+      }
+      scheduleLocalWorkspaceMetaSave();
     }
-    showToast(`붙여넣기 완료: ${newItem.name}`);
+
+    showToast(
+      pastedItems.length === 1
+        ? `붙여넣기 완료: ${pastedItems[0].name}`
+        : `붙여넣기 완료: ${pastedItems.length}개 항목`
+    );
   }
 
   function execUndo() {
@@ -599,52 +937,131 @@
     state.fileSystem = JSON.parse(state.undoStack.pop());
     const found = findNodeAndParent(state.currentFolder.id);
     state.currentFolder = found ? found.node : state.fileSystem;
-    state.selectedItem = null;
-    elEmptyState.style.display = 'block';
-    elDetailState.style.display = 'none';
+    selectedItemIds.clear();
+    lastClickedItemId = null;
+    clearSelectionView();
     saveAndRender();
+    scheduleLocalWorkspaceMetaSave();
     showToast('실행 취소되었습니다.');
   }
 
   function execDelete(askConfirm = false) {
-    if (!state.selectedItem || state.selectedItem.id === 'root') return;
-    if (askConfirm && !confirm(`"${state.selectedItem.name}" 항목을 삭제할까요?`)) return;
+    const targets = getSelectedItems();
+    if (targets.length === 0) return;
+    if (askConfirm) {
+      const msg = targets.length === 1
+        ? `"${targets[0].name}" 항목을 삭제할까요?`
+        : `선택한 ${targets.length}개 항목을 모두 삭제할까요?`;
+      if (!confirm(msg)) return;
+    }
 
     saveStateForUndo();
-    const deletedId = state.selectedItem.id;
-    const found = findNodeAndParent(deletedId);
-    if (found && found.parent) {
-      found.parent.children = found.parent.children.filter((c) => c.id !== deletedId);
-    }
-    WinManager.getWindow(`md-${deletedId}`)?.close();
-    WinManager.getWindow(`file-${deletedId}`)?.close();
-    WinManager.getWindow(`html-${deletedId}`)?.close();
-    state.attachedContextIds = state.attachedContextIds.filter((id) => id !== deletedId);
-    state.selectedItem = null;
-    elEmptyState.style.display = 'block';
-    elDetailState.style.display = 'none';
+    const deleteLocalRecords = [];
+
+    targets.forEach((target) => {
+      const deletedId = target.id;
+      const found = findNodeAndParent(deletedId);
+      if (found && found.parent) {
+        deleteLocalRecords.push({
+          folderSegs: getRelativeFolderPathForItem(deletedId),
+          entryName: target.type === 'folder' ? target.name : getLocalFileNameForItem(target)
+        });
+        found.parent.children = found.parent.children.filter((c) => c.id !== deletedId);
+      }
+      WinManager.getWindow(`md-${deletedId}`)?.close();
+      WinManager.getWindow(`file-${deletedId}`)?.close();
+      WinManager.getWindow(`html-${deletedId}`)?.close();
+      const sViews = openSheetViews.get(deletedId);
+      if (sViews) Array.from(sViews).forEach((v) => v.win?.close());
+      state.attachedContextIds = state.attachedContextIds.filter((id) => id !== deletedId);
+    });
+
+    selectedItemIds.clear();
+    lastClickedItemId = null;
+    clearSelectionView();
     saveAndRender();
-    showToast('삭제되었습니다. (Ctrl+Z로 복구 가능)');
+
+    if (BrainLocalFolder && BrainLocalFolder.isConnected()) {
+      deleteLocalRecords.forEach(({ folderSegs, entryName }) => {
+        BrainLocalFolder.removeEntry(folderSegs, entryName).catch(() => {});
+      });
+      scheduleLocalWorkspaceMetaSave();
+    }
+
+    showToast(
+      targets.length === 1
+        ? '삭제되었습니다. (Ctrl+Z로 복구 가능)'
+        : `${targets.length}개 항목이 삭제되었습니다. (Ctrl+Z로 복구 가능)`
+    );
   }
 
   // ================= Drag & Drop =================
   function handleInternalDrop(e, targetFolder) {
-    const draggedId = e.dataTransfer.getData('text/plain');
-    if (!draggedId || draggedId === targetFolder.id) return;
-    if (isDescendant(draggedId, targetFolder.id)) {
-      showToast('상위 폴더를 하위 폴더 안으로 이동할 수 없습니다.');
-      return;
+    let draggedIds = [];
+    const rawIds = e.dataTransfer.getData('application/x-brain-ids');
+    if (rawIds) {
+      try {
+        const parsed = JSON.parse(rawIds);
+        if (Array.isArray(parsed)) draggedIds = parsed.filter(Boolean);
+      } catch (_) {}
     }
-    const original = findNodeAndParent(draggedId);
-    if (original && original.parent && original.parent.id !== targetFolder.id) {
-      saveStateForUndo();
-      original.parent.children = original.parent.children.filter((c) => c.id !== draggedId);
-      if (!targetFolder.children) targetFolder.children = [];
-      targetFolder.children.push(original.node);
-      saveAndRender();
-      syncMovedNodeToDrive(original.node);
-      showToast(`"${original.node.name}" 이동 완료`);
+    if (draggedIds.length === 0) {
+      const single = e.dataTransfer.getData('text/plain');
+      if (single) draggedIds = [single];
     }
+    if (draggedIds.length === 0) return;
+
+    const movable = [];
+    for (const id of draggedIds) {
+      if (!id || id === targetFolder.id) continue;
+      if (isDescendant(id, targetFolder.id)) {
+        showToast('상위 폴더를 하위 폴더 안으로 이동할 수 없습니다.');
+        continue;
+      }
+      const original = findNodeAndParent(id);
+      if (original && original.parent && original.parent.id !== targetFolder.id) {
+        movable.push({
+          id,
+          node: original.node,
+          parent: original.parent,
+          oldSegs: getRelativeFolderPathForItem(id),
+          oldName: original.node.type === 'folder' ? original.node.name : getLocalFileNameForItem(original.node)
+        });
+      }
+    }
+    if (movable.length === 0) return;
+
+    saveStateForUndo();
+    if (!targetFolder.children) targetFolder.children = [];
+    movable.forEach(({ id, node, parent }) => {
+      parent.children = parent.children.filter((c) => c.id !== id);
+      targetFolder.children.push(node);
+    });
+    selectedItemIds.clear();
+    lastClickedItemId = null;
+    saveAndRender();
+
+    movable.forEach(({ node, oldSegs, oldName }) => {
+      syncMovedNodeToDrive(node);
+      if (BrainLocalFolder && BrainLocalFolder.isConnected()) {
+        const newSegs = getRelativeFolderPathForItem(node.id);
+        const newName = node.type === 'folder' ? node.name : getLocalFileNameForItem(node);
+        if (BrainLocalFolder.getStatus().mode === 'bridge') {
+          BrainLocalFolder.renameEntry(oldSegs, oldName, newSegs, newName).catch(() => {});
+        } else {
+          syncSubtreeToLocalFolder(node)
+            .then(() => BrainLocalFolder.removeEntry(oldSegs, oldName))
+            .catch(() => {});
+        }
+      }
+    });
+    scheduleLocalWorkspaceMetaSave();
+
+    showToast(
+      movable.length === 1
+        ? `"${movable[0].node.name}" 이동 완료`
+        : `${movable.length}개 항목을 "${targetFolder.name}" 폴더로 이동했습니다.`
+    );
   }
 
   elContentArea.addEventListener('dragover', (e) => {
@@ -693,11 +1110,17 @@
       return !(textReadable.includes(ext) && f.size <= 500 * 1024);
     });
 
-    // 이미지/PDF/PPT 등 바이너리 파일이 있으면 Google Drive 토큰 확보
+    // 이미지/PDF/PPT 등 바이너리 파일이 있으면 Google Drive 또는 연결된 로컬 폴더 확인
+    const hasLocalFolder = Boolean(BrainLocalFolder && BrainLocalFolder.isConnected());
     let driveToken = BrainAuth.getDriveAccessToken();
-    if (binaryFiles.length > 0 && (!driveToken || !isOwnerAuthenticated())) {
+    if (binaryFiles.length > 0 && !hasLocalFolder && (!driveToken || !isOwnerAuthenticated())) {
+      if (isGuestMode) {
+        showToast('📂 오프라인에서 이미지·PDF 등 바이너리 파일을 저장하려면 먼저 상단 [📂 로컬 폴더]를 연결해 주세요.');
+        openLocalFolderModal();
+        return;
+      }
       if (!BrainAuth.isConfigComplete(state.settings.firebaseConfig)) {
-        showToast('☁️ 이미지·PDF·PPT 파일 저장은 Google 로그인(Firebase 설정) 후 이용할 수 있습니다.');
+        showToast('☁️ 이미지·PDF·PPT 파일 저장은 Google 로그인 또는 [📂 로컬 폴더] 연결 후 이용할 수 있습니다.');
         openAuthModal();
         return;
       }
@@ -753,6 +1176,7 @@
           };
           if (!state.currentFolder.children) state.currentFolder.children = [];
           state.currentFolder.children.push(newItem);
+          syncItemToLocalFolderNow(newItem).catch(() => {});
           lastAdded = newItem;
           addedCount++;
         } catch (err) {
@@ -776,13 +1200,37 @@
         if (!state.currentFolder.children) state.currentFolder.children = [];
         state.currentFolder.children.push(newItem);
         scheduleDocFileSyncToDrive(newItem, true);
+        syncItemToLocalFolderNow(newItem).catch(() => {});
         lastAdded = newItem;
         addedCount++;
+      } else if (hasLocalFolder && (!driveToken || !isOwnerAuthenticated())) {
+        try {
+          const folderSegs = getFolderPathSegments(state.currentFolder);
+          await BrainLocalFolder.writeBlobFile(folderSegs, file.name, file);
+          const newItem = {
+            id: genId(),
+            type: 'doc',
+            name: file.name,
+            icon,
+            tag: `${tag} #로컬폴더`,
+            summary: `📂 연결된 로컬 폴더에 저장된 파일입니다. (${file.name}, ${Math.max(1, Math.round(file.size / 1024))} KB)`,
+            link: ''
+          };
+          if (!state.currentFolder.children) state.currentFolder.children = [];
+          state.currentFolder.children.push(newItem);
+          lastAdded = newItem;
+          addedCount++;
+        } catch (err) {
+          showToast(`⚠️ "${file.name}" 로컬 폴더 저장 실패: ${err.message}`);
+        }
       } else {
         showToast(`☁️ "${file.name}" Google Drive 업로드 중...`);
         try {
           const folderPath = getFolderPathSegments(state.currentFolder);
           const uploaded = await BrainDrive.uploadFile(driveToken, file, userEmail, folderPath);
+          if (hasLocalFolder) {
+            BrainLocalFolder.writeBlobFile(folderPath, file.name, file).catch(() => {});
+          }
           const newItem = {
             id: genId(),
             type: 'doc',
@@ -827,6 +1275,7 @@
     state.selectedItem = null;
     isEditing = false;
     elDetailState.style.display = 'none';
+    if (elMultiSelectState) elMultiSelectState.style.display = 'none';
     elEmptyState.style.display = 'flex';
   }
 
@@ -937,14 +1386,19 @@
     }
   }
 
-  function selectItem(item) {
+  function selectItem(item, opts = {}) {
     if (!item || !isItemVisible(item)) {
       clearSelectionView();
       return;
     }
     state.selectedItem = item;
+    if (!opts.preserveMulti) {
+      selectedItemIds = new Set([item.id]);
+      syncCardSelectionVisuals();
+    }
     isEditing = false;
     elEmptyState.style.display = 'none';
+    if (elMultiSelectState) elMultiSelectState.style.display = 'none';
     elDetailState.style.display = 'flex';
     elViewMode.style.display = 'flex';
     elEditMode.style.display = 'none';
@@ -1082,6 +1536,8 @@
     }
 
     saveStateForUndo();
+    const oldLocalName = state.selectedItem.type === 'folder' ? state.selectedItem.name : getLocalFileNameForItem(state.selectedItem);
+    const parentSegs = getRelativeFolderPathForItem(state.selectedItem.id);
     const iconVal = $('edit-icon').value.trim();
     if (iconVal) state.selectedItem.icon = iconVal;
     state.selectedItem.name = $('edit-title').value.trim() || '제목 없음';
@@ -1095,7 +1551,15 @@
     if (state.selectedItem.type === 'doc') {
       scheduleDocFileSyncToDrive(state.selectedItem, true);
     }
-    showToast('저장되었습니다.');
+    if (BrainLocalFolder) {
+      const newLocalName = state.selectedItem.type === 'folder' ? state.selectedItem.name : getLocalFileNameForItem(state.selectedItem);
+      if (BrainLocalFolder.isConnected() && oldLocalName !== newLocalName) {
+        BrainLocalFolder.removeEntry(parentSegs, oldLocalName).catch(() => {});
+      }
+      syncItemToLocalFolderNow(state.selectedItem, { allowAutoDownload: true }).catch(() => {});
+    }
+    const lf = BrainLocalFolder?.getStatus();
+    showToast(lf?.connected ? `💾 저장 및 로컬 폴더(${lf.folderName}) 반영 완료` : '저장되었습니다.');
   }
 
   $('btn-edit-note').addEventListener('click', () => toggleEditMode(true));
@@ -1169,6 +1633,14 @@
 
   // ================= Context Menu & Buttons =================
   function showContextMenu(e) {
+    const selCount = getSelectedItems().length;
+    const cutLbl = $('ctx-cut-label');
+    const copyLbl = $('ctx-copy-label');
+    const delLbl = $('ctx-delete-label');
+    if (cutLbl) cutLbl.textContent = selCount > 1 ? `✂️ ${selCount}개 항목 잘라내기` : '✂️ 잘라내기';
+    if (copyLbl) copyLbl.textContent = selCount > 1 ? `📄 ${selCount}개 항목 복사` : '📄 복사';
+    if (delLbl) delLbl.textContent = selCount > 1 ? `🗑️ ${selCount}개 항목 삭제` : '🗑️ 삭제';
+
     const rect = $('main').getBoundingClientRect();
     let x = e.clientX - rect.left;
     let y = e.clientY - rect.top;
@@ -1197,6 +1669,12 @@
     else if (action === 'new-doc') createNew('doc');
     else if (action === 'new-sheet') createNew('sheet');
     else if (action === 'upload-file') $('file-upload-input').click();
+    else if (action === 'select-all') selectAllVisibleItems();
+    else if (action === 'save-to-pc') {
+      const selItems = getSelectedItems();
+      if (selItems.length === 0) showToast('저장할 항목을 먼저 선택해 주세요.');
+      else saveItemsToPC(selItems);
+    }
     else if (action === 'rename') startRenameItem(state.selectedItem);
     else if (action === 'open-local') {
       if (isSpreadsheetItem(state.selectedItem)) {
@@ -1218,8 +1696,9 @@
       }
     }
     else if (action === 'attach-ai') {
-      if (state.selectedItem) {
-        attachNodeToContext(state.selectedItem);
+      const selItems = getSelectedItems();
+      if (selItems.length > 0) {
+        selItems.forEach((it) => attachNodeToContext(it));
         switchRightTab('chat');
       } else {
         showToast('먼저 메모나 폴더를 선택해 주세요.');
@@ -1230,6 +1709,21 @@
     else if (action === 'paste') execPaste();
     else if (action === 'undo') execUndo();
     else if (action === 'delete') execDelete(true);
+  });
+
+  $('btn-save-item-pc')?.addEventListener('click', () => {
+    if (state.selectedItem) saveItemsToPC([state.selectedItem]);
+  });
+  $('btn-multi-copy')?.addEventListener('click', execCopy);
+  $('btn-multi-cut')?.addEventListener('click', execCut);
+  $('btn-multi-delete')?.addEventListener('click', () => execDelete(true));
+  $('btn-multi-save-pc')?.addEventListener('click', () => saveItemsToPC(getSelectedItems()));
+  $('btn-multi-attach-ai')?.addEventListener('click', () => {
+    const selItems = getSelectedItems();
+    if (selItems.length > 0) {
+      selItems.forEach((it) => attachNodeToContext(it));
+      switchRightTab('chat');
+    }
   });
 
   $('btn-new-folder').addEventListener('click', () => createNew('folder'));
@@ -1247,10 +1741,12 @@
 
   // ================= Keyboard Shortcuts =================
   document.addEventListener('keydown', (e) => {
-    const isInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName);
+    const isInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName) || e.target.isContentEditable;
+    const inFloatingWin = Boolean(e.target.closest && e.target.closest('.os-floating-win'));
+    const inModal = Boolean(e.target.closest && e.target.closest('.modal-overlay'));
 
-    // Ctrl+K: 검색 포커스
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    // Ctrl+K: 검색 포커스 (플로팅 창 내부가 아닐 때)
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && !inFloatingWin) {
       e.preventDefault();
       elGlobalSearch.focus();
       elGlobalSearch.select();
@@ -1258,13 +1754,13 @@
     }
 
     // Ctrl+S: 편집 중 저장
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's' && isEditing) {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's' && isEditing && !inFloatingWin) {
       e.preventDefault();
       saveEdits();
       return;
     }
 
-    if (isInput) return;
+    if (isInput || inFloatingWin || inModal) return;
 
     if (e.key === 'F2') {
       e.preventDefault();
@@ -1272,9 +1768,20 @@
       return;
     }
 
+    if (e.key === 'Escape') {
+      if (selectedItemIds.size > 0 || state.selectedItem) {
+        selectedItemIds.clear();
+        lastClickedItemId = null;
+        syncCardSelectionVisuals();
+        clearSelectionView();
+      }
+      return;
+    }
+
     if (e.ctrlKey || e.metaKey) {
       const k = e.key.toLowerCase();
-      if (k === 'c') { e.preventDefault(); execCopy(); }
+      if (k === 'a') { e.preventDefault(); selectAllVisibleItems(); }
+      else if (k === 'c') { e.preventDefault(); execCopy(); }
       else if (k === 'x') { e.preventDefault(); execCut(); }
       else if (k === 'v') { e.preventDefault(); execPaste(); }
       else if (k === 'z') { e.preventDefault(); execUndo(); }
@@ -1311,6 +1818,10 @@
   }
 
   function updateApiStatusSummary() {
+    if (isGuestMode) {
+      elApiStatusSummary.textContent = '📴 오프라인 게스트 모드 (로컬 저장)';
+      return;
+    }
     const configured = Object.keys(PROVIDERS).filter((id) => Boolean(state.settings.keys[id]?.trim()));
     if (configured.length === 0) {
       elApiStatusSummary.textContent = '⚠️ API 키 미설정 (상단 ⚙️ 클릭)';
@@ -1672,7 +2183,7 @@
     updateApiStatusSummary();
     refreshBridgeStatus(false);
     closeSettingsModal();
-    showToast('✅ API 설정이 브라우저에 저장되었습니다.');
+    showToast(isGuestMode ? '✅ 설정이 브라우저에 저장되었습니다.' : '✅ API 설정이 브라우저에 저장되었습니다.');
   });
 
   $('btn-export-json').addEventListener('click', () => {
@@ -1760,7 +2271,67 @@
     }
   }
 
+  function applyGuestModeUI(enabled) {
+    isGuestMode = Boolean(enabled);
+    document.body.classList.toggle('guest-mode', isGuestMode);
+    const badge = $('os-mode-badge');
+    if (badge) badge.textContent = isGuestMode ? 'Offline' : 'Multi-AI';
+    const settingsBtnTxt = $('settings-btn-text');
+    if (settingsBtnTxt) settingsBtnTxt.textContent = isGuestMode ? '백업 설정' : 'API 설정';
+    const settingsTitle = $('settings-modal-title');
+    if (settingsTitle) settingsTitle.textContent = isGuestMode ? '⚙️ 오프라인 데이터 백업 · 로컬 설정' : '⚙️ API 키 & 데이터 설정';
+    const rpBtnTxt = $('right-panel-btn-text');
+    if (rpBtnTxt) rpBtnTxt.textContent = isGuestMode ? '메모 상세' : '메모 / AI';
+    const driveBtn = $('btn-drive-sync');
+    if (driveBtn) driveBtn.style.display = isGuestMode ? 'none' : '';
+    if (isGuestMode) {
+      switchRightTab('preview');
+    }
+    updateApiStatusSummary();
+    updateAuthButtonUI();
+  }
+
+  function enterGuestWorkspace() {
+    closeAuthModal();
+    if (driveSyncTimer) {
+      clearTimeout(driveSyncTimer);
+      driveSyncTimer = null;
+    }
+    for (const t of mdDriveSyncTimers.values()) clearTimeout(t);
+    mdDriveSyncTimers.clear();
+    WinManager.closeAll();
+    openMdWindows.clear();
+    openSheetViews.clear();
+    BrainDrive.clearCache();
+    hasSyncedDriveThisSession = false;
+    driveSyncStatus = 'disconnected';
+
+    switchUser('guest@local.offline');
+    selectedItemIds.clear();
+    lastClickedItemId = null;
+    offlineBannerDismissed = false;
+    applyGuestModeUI(true);
+
+    if (elOsWindow) elOsWindow.classList.remove('os-locked');
+    if (elLoginScreen) elLoginScreen.classList.add('hidden');
+    if (elLoginStatusText) elLoginStatusText.textContent = '';
+    setLoginScreenError('');
+
+    renderTree(state.fileSystem, elTreeRoot, true);
+    openFolder(state.currentFolder);
+    clearSelectionView();
+    updateLocalLockBanner();
+    initLocalFolderSyncForWorkspace().then((st) => {
+      if (st?.connected) {
+        showToast(`👤 게스트 모드 입장 · 📂 로컬 폴더(${st.folderName}) 자동 저장 활성화됨`);
+      } else {
+        showToast('👤 게스트 모드(오프라인)로 입장했습니다. 상단 [📂 로컬 폴더]를 연결하면 파일이 PC에 자동 저장됩니다.');
+      }
+    });
+  }
+
   function showLoginScreen(statusText = '', errorMsg = '') {
+    applyGuestModeUI(false);
     if (driveSyncTimer) {
       clearTimeout(driveSyncTimer);
       driveSyncTimer = null;
@@ -1779,14 +2350,34 @@
     if (elTreeRoot) elTreeRoot.innerHTML = '';
     if (elContentArea) elContentArea.innerHTML = '';
     if (elChatMessages) elChatMessages.innerHTML = '';
+    selectedItemIds.clear();
+    lastClickedItemId = null;
     clearSelectionView();
 
     if (elOsWindow) elOsWindow.classList.add('os-locked');
     if (elLoginScreen) elLoginScreen.classList.remove('hidden');
 
     const isFile = BrainAuth.isFileProtocol();
-    if (elLoginFileWarning) elLoginFileWarning.style.display = isFile ? 'block' : 'none';
-    if (elBtnOsGoogleLogin) elBtnOsGoogleLogin.disabled = isFile;
+    const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+    const offlineFirst = isFile || isOffline;
+
+    const elOfflineBadge = $('login-offline-badge');
+    const elOnlineBlock = $('login-online-block');
+    const elOnlineTip = $('login-online-tip');
+    const elGuestBtn = $('btn-os-guest-login');
+    const elGuestText = $('btn-os-guest-text');
+
+    if (elOfflineBadge) elOfflineBadge.style.display = offlineFirst ? 'block' : 'none';
+    if (elOnlineBlock) elOnlineBlock.style.display = offlineFirst ? 'none' : 'block';
+    if (elOnlineTip) elOnlineTip.style.display = offlineFirst ? 'block' : 'none';
+    if (elLoginFileWarning) elLoginFileWarning.style.display = 'none';
+    if (elBtnOsGoogleLogin) elBtnOsGoogleLogin.disabled = offlineFirst;
+    if (elGuestBtn) elGuestBtn.classList.toggle('is-primary', offlineFirst);
+    if (elGuestText) {
+      elGuestText.textContent = offlineFirst
+        ? '게스트로 바로 시작 (.bat 없이 오프라인 실행)'
+        : '게스트로 시작 (오프라인 · AI 제외)';
+    }
     if (elLoginStatusText) elLoginStatusText.textContent = statusText || '';
     setLoginScreenError(errorMsg);
     updateLoginClock();
@@ -1801,6 +2392,7 @@
     }
 
     const email = String(user.email).trim().toLowerCase();
+    applyGuestModeUI(false);
     const isAccountChanged = getActiveUserEmail() !== email;
 
     if (isAccountChanged) {
@@ -1834,13 +2426,15 @@
 
     onAuthStateChanged();
     renderChatMessages();
+    initLocalFolderSyncForWorkspace().catch(() => {});
 
     if (!waitForSyncBeforeReveal && shouldSync) {
       syncWithDrive({ mode: 'initial', interactive: false, showSuccessToast: true });
     }
   }
 
-  async function logoutAndLockOS(reasonMsg = '로그아웃되었습니다. 다른 Google 계정으로 로그인할 수 있습니다.') {
+  async function logoutAndLockOS(reasonMsg = '로그아웃되었습니다. 다른 Google 계정으로 로그인하거나 게스트로 입장할 수 있습니다.') {
+    const wasGuest = isGuestMode;
     closeAuthModal();
     if (driveSyncTimer) {
       clearTimeout(driveSyncTimer);
@@ -1851,8 +2445,10 @@
     lastDriveErrorCode = '';
     driveSyncStatus = 'disconnected';
     BrainDrive.clearCache();
-    await BrainAuth.signOut();
-    showLoginScreen(reasonMsg);
+    if (!wasGuest) {
+      try { await BrainAuth.signOut(); } catch (_) {}
+    }
+    showLoginScreen(wasGuest ? '게스트 모드에서 나왔습니다. Google 로그인 또는 게스트로 다시 입장할 수 있습니다.' : reasonMsg);
     showToast('🔒 잠금 화면으로 이동했습니다.');
   }
 
@@ -1919,6 +2515,14 @@
     const user = BrainAuth.getUser();
     const unlocked = isOwnerAuthenticated();
 
+    if (isGuestMode) {
+      btn.classList.remove('active');
+      iconEl.textContent = '👤';
+      textEl.textContent = '게스트 (오프라인)';
+      btn.title = '오프라인 게스트 모드 — 클릭하여 Google 로그인 설정';
+      return;
+    }
+
     if (unlocked && user) {
       btn.classList.add('active');
       iconEl.innerHTML = user.picture
@@ -1976,6 +2580,16 @@
       }
     }
 
+    if (isGuestMode) {
+      titleEl.textContent = '👤 오프라인 게스트 모드 사용 중';
+      subEl.textContent = '현재 로컬 오프라인 모드로 실행 중이며 AI·API 및 Google Drive 동기화는 비활성화되어 있습니다. 온라인 상태에서 Google 로그인하면 클라우드 동기화와 AI 기능을 사용할 수 있습니다.';
+      btnSignIn.style.display = isFile ? 'none' : 'flex';
+      btnSignIn.disabled = !hasConfig;
+      if (driveActions) driveActions.style.display = 'none';
+      btnSignOut.style.display = 'none';
+      return;
+    }
+
     if (unlocked && user) {
       card.classList.add('unlocked');
       titleEl.textContent = `🔓 본인 인증 완료 (${user.email})`;
@@ -2015,7 +2629,7 @@
     const user = fbUser || BrainAuth.getUser();
     if (user && user.email) {
       enterWorkspaceForUser(user, { triggerInitialSync: false, waitForSyncBeforeReveal: false });
-    } else {
+    } else if (!isGuestMode) {
       showLoginScreen('');
     }
     if (elAuthModal.style.display === 'flex') {
@@ -2140,6 +2754,7 @@
   }
 
   $('btn-os-google-login').addEventListener('click', () => performGoogleLoginFlow(true));
+  $('btn-os-guest-login').addEventListener('click', () => enterGuestWorkspace());
   $('btn-login-firebase-config').addEventListener('click', openAuthModal);
   $('btn-lock-os').addEventListener('click', () => logoutAndLockOS());
 
@@ -2436,6 +3051,588 @@
     } else {
       showToast('⚪ 연결 실패: local-bridge/로컬연결_실행.bat 실행 여부를 확인해 주세요.');
     }
+  });
+
+  // ================= Offline Local Folder Auto-Save & Sync =================
+  function isLocalhostOrigin() {
+    try {
+      const h = String(window.location.hostname || '').toLowerCase();
+      return (window.location.protocol === 'http:' || window.location.protocol === 'https:') &&
+        (h === 'localhost' || h === '127.0.0.1');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function getActiveLocalBridgeUrl() {
+    if (isLocalhostOrigin()) return window.location.origin;
+    return getBridgeUrl();
+  }
+
+  function getLocalFileNameForItem(item) {
+    if (!item) return 'memo.md';
+    if (item.type === 'folder') return item.name || '새 폴더';
+    if (isSpreadsheetItem(item)) {
+      const n = String(item.name || 'sheet.xlsx').trim();
+      if (/\.(xlsx|csv)$/i.test(n)) return n;
+      return `${n.replace(/\.xls$/i, '')}.xlsx`;
+    }
+    return resolveVirtualFileName(item);
+  }
+
+  async function serializeItemForLocalFile(item) {
+    if (!item || item.type !== 'doc') return null;
+    if (isSpreadsheetItem(item) && item.sheetData) {
+      const lower = String(item.name || '').toLowerCase();
+      if (lower.endsWith('.csv')) {
+        return {
+          fileName: item.name,
+          type: 'text',
+          mimeType: 'text/csv;charset=utf-8',
+          text: BrainSheet.exportSheetToCsv(item.sheetData, item.sheetData.activeSheet || 0)
+        };
+      }
+      const xlsxName = getLocalFileNameForItem(item);
+      const blob = await BrainSheet.exportWorkbookToXlsxBlob(item.sheetData);
+      return {
+        fileName: xlsxName,
+        type: 'blob',
+        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        blob
+      };
+    }
+
+    if (!isBinaryFileName(item.name)) {
+      const fileName = getLocalFileNameForItem(item);
+      return {
+        fileName,
+        type: 'text',
+        mimeType: /\.html?$/i.test(fileName) ? 'text/html;charset=utf-8' : 'text/markdown;charset=utf-8',
+        text: String(item.summary || '')
+      };
+    }
+    return null;
+  }
+
+  function scheduleLocalWorkspaceMetaSave() {
+    if (!BrainLocalFolder || !BrainLocalFolder.isConnected()) return;
+    if (localMetaSaveTimer) clearTimeout(localMetaSaveTimer);
+    localMetaSaveTimer = setTimeout(() => {
+      localMetaSaveTimer = null;
+      BrainLocalFolder.saveWorkspaceMeta(state.fileSystem).catch(() => {});
+    }, 900);
+  }
+
+  async function syncItemToLocalFolderNow(item, opts = {}) {
+    if (!BrainLocalFolder || !item || item.id === 'root') return { ok: false };
+
+    if (item.type === 'folder') {
+      if (!BrainLocalFolder.isConnected()) return { ok: false };
+      const segs = getFolderPathSegments(item);
+      const ok = await BrainLocalFolder.ensureSubfolder(segs);
+      if (ok) scheduleLocalWorkspaceMetaSave();
+      return { ok };
+    }
+
+    if (BrainLocalFolder.isConnected()) {
+      const serialized = await serializeItemForLocalFile(item);
+      if (!serialized) return { ok: false };
+      const folderSegs = getRelativeFolderPathForItem(item.id);
+      const res = serialized.type === 'blob'
+        ? await BrainLocalFolder.writeBlobFile(folderSegs, serialized.fileName, serialized.blob, opts)
+        : await BrainLocalFolder.writeTextFile(folderSegs, serialized.fileName, serialized.text, opts);
+      if (res?.ok && !opts.skipMeta) scheduleLocalWorkspaceMetaSave();
+      return res;
+    }
+
+    // Fallback: auto-download when offline & user enabled autoDownload
+    const status = BrainLocalFolder.getStatus();
+    if (opts.allowAutoDownload && status.autoDownload && (isGuestMode || !isOwnerAuthenticated())) {
+      const serialized = await serializeItemForLocalFile(item);
+      if (!serialized) return { ok: false };
+      if (serialized.type === 'blob') BrainLocalFolder.downloadBlobToPC(serialized.blob, serialized.fileName);
+      else BrainLocalFolder.downloadTextToPC(serialized.text, serialized.fileName, serialized.mimeType);
+      return { ok: true, downloaded: true, fileName: serialized.fileName };
+    }
+
+    return { ok: false };
+  }
+
+  function scheduleItemSyncToLocalFolder(item, immediate = false, opts = {}) {
+    if (!BrainLocalFolder || !item) return;
+    if (!BrainLocalFolder.isConnected() && !(opts.allowAutoDownload && BrainLocalFolder.getStatus().autoDownload)) return;
+
+    const prev = localFolderTimers.get(item.id);
+    if (prev) {
+      clearTimeout(prev);
+      localFolderTimers.delete(item.id);
+    }
+    if (immediate) {
+      syncItemToLocalFolderNow(item, opts).catch(() => {});
+      return;
+    }
+    const t = setTimeout(() => {
+      localFolderTimers.delete(item.id);
+      syncItemToLocalFolderNow(item, opts).catch(() => {});
+    }, 650);
+    localFolderTimers.set(item.id, t);
+  }
+
+  async function syncSubtreeToLocalFolder(node, opts = {}) {
+    if (!BrainLocalFolder || !BrainLocalFolder.isConnected() || !node) return 0;
+    let savedCount = 0;
+
+    async function walk(curr) {
+      if (!curr || !isItemVisible(curr)) return;
+      if (curr.id !== 'root') {
+        if (curr.type === 'folder') {
+          await BrainLocalFolder.ensureSubfolder(getFolderPathSegments(curr));
+        } else {
+          const res = await syncItemToLocalFolderNow(curr, { ...opts, skipMeta: true, silent: true });
+          if (res?.ok && !res.skipped) savedCount++;
+        }
+      }
+      if (Array.isArray(curr.children)) {
+        for (const child of curr.children) {
+          await walk(child);
+        }
+      }
+    }
+
+    await walk(node);
+    await BrainLocalFolder.saveWorkspaceMeta(state.fileSystem);
+    return savedCount;
+  }
+
+  async function saveItemsToPC(items) {
+    const list = (items || []).filter((it) => it && it.id !== 'root');
+    if (list.length === 0) return;
+
+    const connected = Boolean(BrainLocalFolder && BrainLocalFolder.isConnected());
+    let savedCount = 0;
+    let lastFile = '';
+
+    for (const item of list) {
+      if (item.type === 'folder') {
+        if (connected) {
+          savedCount += await syncSubtreeToLocalFolder(item);
+          lastFile = item.name;
+        }
+        continue;
+      }
+      const serialized = await serializeItemForLocalFile(item);
+      if (!serialized) continue;
+      if (connected) {
+        const res = await syncItemToLocalFolderNow(item);
+        if (res?.ok) {
+          savedCount++;
+          lastFile = serialized.fileName;
+        }
+      } else {
+        if (serialized.type === 'blob') BrainLocalFolder.downloadBlobToPC(serialized.blob, serialized.fileName);
+        else BrainLocalFolder.downloadTextToPC(serialized.text, serialized.fileName, serialized.mimeType);
+        savedCount++;
+        lastFile = serialized.fileName;
+      }
+    }
+
+    if (savedCount === 0) {
+      showToast('⚠️ 저장할 수 있는 문서나 시트 파일이 없습니다.');
+      return;
+    }
+    const st = BrainLocalFolder.getStatus();
+    if (connected) {
+      showToast(
+        savedCount === 1
+          ? `📂 로컬 폴더(${st.folderName})에 "${lastFile}" 저장 완료`
+          : `📂 로컬 폴더(${st.folderName})에 파일 ${savedCount}개 저장 완료`
+      );
+    } else {
+      showToast(
+        savedCount === 1
+          ? `💾 "${lastFile}" PC 파일로 다운로드되었습니다.`
+          : `💾 파일 ${savedCount}개가 PC로 다운로드되었습니다.`
+      );
+    }
+  }
+
+  function base64ToArrayBuffer(b64) {
+    const bin = atob(b64);
+    const len = bin.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes.buffer;
+  }
+
+  async function importFromLocalFolder() {
+    if (!BrainLocalFolder || !BrainLocalFolder.isConnected()) {
+      showToast('먼저 로컬 폴더를 연결해 주세요.');
+      return 0;
+    }
+    const scan = await BrainLocalFolder.scanFolderFiles();
+    if (!scan.ok) {
+      showToast(`⚠️ 로컬 폴더 스캔 실패: ${scan.error || '권한을 확인해 주세요.'}`);
+      return 0;
+    }
+
+    let imported = 0;
+    let updated = 0;
+    saveStateForUndo();
+
+    for (const segs of scan.folders || []) {
+      const r = ensureLocalFolderByPath(segs);
+      if (r.createdAny) imported++;
+    }
+
+    for (const f of scan.files || []) {
+      const { ext, icon, tag } = getFileMetaByExt(f.name);
+      const { folder: targetFolder } = ensureLocalFolderByPath(f.folderPath || []);
+      if (!targetFolder.children) targetFolder.children = [];
+
+      const existing = targetFolder.children.find(
+        (c) => c.type === 'doc' && String(c.name || '').toLowerCase() === String(f.name || '').toLowerCase()
+      );
+
+      if (ext === 'xlsx' || ext === 'xls') {
+        try {
+          let buf = null;
+          if (f.file) buf = await f.file.arrayBuffer();
+          else if (f.base64Content) buf = base64ToArrayBuffer(f.base64Content);
+          if (!buf) continue;
+          const wb = await BrainSheet.parseArrayBufferToWorkbook(buf, f.name);
+          const mdSum = BrainSheet.workbookToMarkdownSummary(wb);
+          if (existing) {
+            existing.sheetData = wb;
+            existing.summary = mdSum;
+            updated++;
+          } else {
+            targetFolder.children.push({
+              id: genId(),
+              type: 'doc',
+              name: f.name,
+              icon: '📊',
+              tag: '#Excel #로컬폴더',
+              summary: mdSum,
+              link: '',
+              sheetData: wb
+            });
+            imported++;
+          }
+        } catch (_) {}
+      } else if (TEXT_EDITABLE_EXTS.has(ext) && (!f.size || f.size <= 512 * 1024)) {
+        let txt = '';
+        if (f.file) txt = await readFileAsTextAsync(f.file);
+        else if (typeof f.textContent === 'string') txt = f.textContent;
+        const csvWb = ext === 'csv'
+          ? BrainSheet.parseCsvToWorkbook(txt || '', f.name.replace(/\.csv$/i, '') || 'Sheet1')
+          : null;
+        if (existing) {
+          existing.summary = csvWb ? BrainSheet.workbookToMarkdownSummary(csvWb) : txt;
+          if (csvWb) existing.sheetData = csvWb;
+          syncOpenWindowsForItem(existing);
+          updated++;
+        } else {
+          targetFolder.children.push({
+            id: genId(),
+            type: 'doc',
+            name: f.name,
+            icon: ext === 'csv' ? '📊' : icon,
+            tag: ext === 'csv' ? '#CSV #로컬폴더' : `${tag} #로컬폴더`,
+            summary: csvWb ? BrainSheet.workbookToMarkdownSummary(csvWb) : txt,
+            link: '',
+            ...(csvWb ? { sheetData: csvWb } : {})
+          });
+          imported++;
+        }
+      }
+    }
+
+    if (imported > 0 || updated > 0) {
+      saveAndRender();
+      showToast(`📥 로컬 폴더에서 새 항목 ${imported}개 가져오기 · ${updated}개 갱신 완료`);
+    } else {
+      showToast('📂 로컬 폴더에 새로 불러올 파일이 없습니다.');
+    }
+    return imported + updated;
+  }
+
+  function updateLocalFolderUI(statusArg) {
+    if (!BrainLocalFolder) return;
+    const st = statusArg || BrainLocalFolder.getStatus();
+
+    const btn = $('btn-local-folder');
+    const dot = $('local-folder-dot');
+    const txt = $('local-folder-text');
+    if (btn && dot && txt) {
+      dot.classList.remove('connected', 'pending');
+      btn.classList.toggle('active', st.connected);
+      if (st.connected) {
+        dot.classList.add('connected');
+        const shortName = st.folderName.length > 14 ? st.folderName.slice(0, 14) + '…' : st.folderName;
+        txt.textContent = `📂 ${shortName}`;
+        btn.title = `로컬 폴더 자동 저장 연결됨: ${st.folderPath || st.folderName}`;
+      } else if (st.hasSavedHandle) {
+        dot.classList.add('pending');
+        txt.textContent = '로컬 폴더 재연결';
+        btn.title = `이전에 연결한 로컬 폴더("${st.savedFolderName}")에 다시 연결하려면 클릭하세요.`;
+      } else if (st.autoDownload) {
+        dot.classList.add('pending');
+        txt.textContent = '자동 다운로드 ON';
+        btn.title = '오프라인 파일 생성/저장 시 PC로 자동 다운로드됩니다.';
+      } else {
+        txt.textContent = '로컬 폴더';
+        btn.title = '클릭하여 오프라인 파일을 저장할 PC 로컬 폴더를 연결하세요.';
+      }
+    }
+
+    // Offline banner inside #main
+    const banner = $('offline-folder-banner');
+    const bannerText = $('offline-folder-banner-text');
+    const bannerPickBtn = $('btn-banner-pick-folder');
+    if (banner && bannerText && bannerPickBtn) {
+      const shouldShowBanner =
+        isGuestMode &&
+        !offlineBannerDismissed &&
+        !st.connected;
+      banner.style.display = shouldShowBanner ? 'flex' : 'none';
+      if (shouldShowBanner) {
+        if (st.hasSavedHandle) {
+          bannerText.textContent = `📂 이전에 연결한 로컬 폴더("${st.savedFolderName}")에 다시 연결하면 오프라인 파일이 자동 저장됩니다.`;
+          bannerPickBtn.textContent = `🔄 "${st.savedFolderName}" 다시 연결`;
+        } else if (st.autoDownload) {
+          bannerText.textContent = '⚡ 오프라인 자동 다운로드 백업 ON — 파일을 만들거나 저장(Ctrl+S)하면 PC로 자동 저장됩니다.';
+          bannerPickBtn.textContent = '📂 로컬 폴더 직접 연결';
+        } else {
+          bannerText.textContent = '📂 오프라인에서 생성한 메모·엑셀 파일을 PC 로컬 폴더에 자동 저장하려면 폴더를 연결하세요.';
+          bannerPickBtn.textContent = '📂 로컬 폴더 연결';
+        }
+      }
+    }
+
+    // Sidebar hint in guest mode
+    if (isGuestMode && elApiStatusSummary) {
+      if (st.connected) {
+        elApiStatusSummary.textContent = `📂 로컬 저장됨: ${st.folderName}`;
+      } else if (st.autoDownload) {
+        elApiStatusSummary.textContent = '📴 오프라인 · PC 자동 다운로드 ON';
+      } else {
+        elApiStatusSummary.textContent = '📴 오프라인 게스트 모드 (로컬 저장)';
+      }
+    }
+
+    if (elLocalFolderModal && elLocalFolderModal.style.display === 'flex') {
+      renderLocalFolderModal();
+    }
+  }
+
+  let bridgeOfflineFsAvailable = false;
+
+  async function renderLocalFolderModal() {
+    if (!BrainLocalFolder) return;
+    const st = BrainLocalFolder.getStatus();
+    const card = $('lf-status-card');
+    const titleEl = $('lf-status-title');
+    const subEl = $('lf-status-sub');
+    const noticeBox = $('lf-notice-box');
+    const btnPickFsa = $('btn-lf-pick-fsa');
+    const btnReconnect = $('btn-lf-reconnect');
+    const bridgeRow = $('lf-bridge-row');
+    const connectedRow = $('lf-connected-actions');
+    const chkAutoDl = $('chk-lf-auto-download');
+
+    if (card) card.classList.toggle('unlocked', st.connected);
+    if (chkAutoDl) chkAutoDl.checked = Boolean(st.autoDownload);
+
+    if (st.connected) {
+      const modeLabel = st.mode === 'bridge' ? '로컬 브릿지 폴더' : '브라우저 로컬 폴더(직접 연결)';
+      const timeStr = st.lastSavedAt
+        ? ` · 최근 저장: ${st.lastSavedFile || ''} (${new Date(st.lastSavedAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })})`
+        : '';
+      if (titleEl) titleEl.textContent = `🟢 연결됨: ${st.folderName}`;
+      if (subEl) subEl.textContent = `${modeLabel} (${st.folderPath || st.folderName})에 메모(.md)·엑셀(.xlsx)·폴더 변경사항이 실시간 자동 저장됩니다.${timeStr}`;
+    } else if (st.hasSavedHandle) {
+      if (titleEl) titleEl.textContent = `🟡 재연결 필요: ${st.savedFolderName}`;
+      if (subEl) subEl.textContent = '브라우저 보안 정책상 새 세션에서 1회 권한 확인이 필요합니다. 아래 [이전 폴더 다시 연결]을 눌러 주세요.';
+    } else {
+      if (titleEl) titleEl.textContent = '⚪ 로컬 폴더 미연결';
+      if (subEl) subEl.textContent = 'PC의 원하는 폴더를 연결하면 오프라인에서 생성·수정한 메모(.md), 엑셀(.xlsx), 폴더 구조가 실시간으로 자동 저장됩니다.';
+    }
+
+    if (btnReconnect) btnReconnect.style.display = (!st.connected && st.hasSavedHandle) ? 'inline-flex' : 'none';
+    if (connectedRow) connectedRow.style.display = st.connected ? 'flex' : 'none';
+    if (bridgeRow) bridgeRow.style.display = (bridgeOfflineFsAvailable || st.mode === 'bridge') ? 'flex' : 'none';
+
+    if (noticeBox) {
+      if (!st.supported && !bridgeOfflineFsAvailable) {
+        noticeBox.innerHTML = 'ℹ️ 현재 브라우저(또는 <code>file://</code> 보안 정책)에서는 직접 폴더 선택이 제한될 수 있습니다. 아래 <b>⚡ 자동 다운로드</b>를 켜거나 <code>local-bridge/로컬연결_실행.bat</code>으로 열면 PC 폴더 직접 저장이 가능합니다.';
+        noticeBox.style.display = 'block';
+      } else {
+        noticeBox.style.display = 'none';
+      }
+    }
+    if (btnPickFsa) {
+      btnPickFsa.textContent = st.connected ? '🔄 다른 PC 폴더 선택' : '📂 PC 로컬 폴더 선택';
+    }
+  }
+
+  async function openLocalFolderModal() {
+    if (!elLocalFolderModal) return;
+    if (isLocalhostOrigin() && BrainLocalFolder) {
+      const probe = await BrainLocalFolder.tryConnectBridgeFolder(getActiveLocalBridgeUrl(), { probeOnly: true });
+      bridgeOfflineFsAvailable = Boolean(probe.ok);
+    }
+    elLocalFolderModal.style.display = 'flex';
+    renderLocalFolderModal();
+  }
+
+  function closeLocalFolderModal() {
+    if (elLocalFolderModal) elLocalFolderModal.style.display = 'none';
+  }
+
+  async function connectLocalFolderQuick() {
+    if (!BrainLocalFolder) return;
+    const st = BrainLocalFolder.getStatus();
+
+    // 1. If there is a saved FSA handle waiting for 1-click reconnect, try that first
+    if (!st.connected && st.hasSavedHandle) {
+      const res = await BrainLocalFolder.reconnectSavedFolder();
+      if (res.ok) {
+        const count = await syncSubtreeToLocalFolder(state.fileSystem, { onlyIfMissing: true });
+        showToast(`📂 "${res.folderName}" 폴더에 다시 연결되었습니다${count > 0 ? ` (${count}개 파일 저장)` : ''}.`);
+        return;
+      }
+      if (res.cancelled) return;
+    }
+
+    // 2. Try Browser File System Access API (showDirectoryPicker)
+    if (BrainLocalFolder.isFsaSupported()) {
+      const res = await BrainLocalFolder.pickFolderFSA();
+      if (res.ok) {
+        const count = await syncSubtreeToLocalFolder(state.fileSystem, { onlyIfMissing: true });
+        showToast(`📂 "${res.folderName}" 로컬 폴더 연결 완료! (기존 미저장 파일 ${count}개 저장됨)`);
+        return;
+      }
+      if (res.cancelled) return;
+    }
+
+    // 3. Fallback: try Bridge local folder if running on localhost
+    if (isLocalhostOrigin()) {
+      const bRes = await BrainLocalFolder.tryConnectBridgeFolder(getActiveLocalBridgeUrl());
+      if (bRes.ok) {
+        bridgeOfflineFsAvailable = true;
+        const count = await syncSubtreeToLocalFolder(state.fileSystem, { onlyIfMissing: true });
+        showToast(`📂 로컬 브릿지 폴더(${bRes.folderName}) 연결 완료! (${count}개 파일 저장됨)`);
+        return;
+      }
+    }
+
+    // 4. Otherwise open modal explaining auto-download / options
+    openLocalFolderModal();
+  }
+
+  async function initLocalFolderSyncForWorkspace() {
+    if (!BrainLocalFolder) return { connected: false };
+    const canProbeBridge = isLocalhostOrigin();
+    const st = await BrainLocalFolder.init({
+      bridgeUrl: canProbeBridge ? getActiveLocalBridgeUrl() : '',
+      checkBridge: canProbeBridge
+    });
+    if (st.mode === 'bridge') bridgeOfflineFsAvailable = true;
+    updateLocalFolderUI(st);
+    return st;
+  }
+
+  if (BrainLocalFolder) {
+    BrainLocalFolder.onStatusChange(updateLocalFolderUI);
+  }
+
+  $('btn-local-folder')?.addEventListener('click', openLocalFolderModal);
+  $('btn-close-local-folder')?.addEventListener('click', closeLocalFolderModal);
+  $('btn-cancel-local-folder')?.addEventListener('click', closeLocalFolderModal);
+  elLocalFolderModal?.addEventListener('click', (e) => {
+    if (e.target === elLocalFolderModal) closeLocalFolderModal();
+  });
+
+  $('btn-banner-pick-folder')?.addEventListener('click', () => connectLocalFolderQuick());
+  $('btn-banner-folder-settings')?.addEventListener('click', openLocalFolderModal);
+  $('btn-banner-dismiss-folder')?.addEventListener('click', () => {
+    offlineBannerDismissed = true;
+    updateLocalFolderUI();
+  });
+
+  $('btn-lf-pick-fsa')?.addEventListener('click', async () => {
+    if (!BrainLocalFolder) return;
+    const res = await BrainLocalFolder.pickFolderFSA();
+    if (res.ok) {
+      const count = await syncSubtreeToLocalFolder(state.fileSystem, { onlyIfMissing: true });
+      renderLocalFolderModal();
+      showToast(`📂 "${res.folderName}" 연결 완료 (${count}개 파일 저장됨)`);
+    } else if (!res.cancelled) {
+      showToast(`⚠️ ${res.message || '브라우저 보안 정책으로 폴더 선택이 제한되었습니다. 아래 자동 다운로드를 이용해 보세요.'}`);
+    }
+  });
+
+  $('btn-lf-reconnect')?.addEventListener('click', async () => {
+    if (!BrainLocalFolder) return;
+    const res = await BrainLocalFolder.reconnectSavedFolder();
+    if (res.ok) {
+      const count = await syncSubtreeToLocalFolder(state.fileSystem, { onlyIfMissing: true });
+      renderLocalFolderModal();
+      showToast(`📂 "${res.folderName}" 다시 연결됨${count > 0 ? ` (${count}개 파일 저장)` : ''}`);
+    } else if (!res.cancelled && res.message) {
+      showToast(`⚠️ ${res.message}`);
+    }
+  });
+
+  $('btn-lf-use-bridge')?.addEventListener('click', async () => {
+    if (!BrainLocalFolder) return;
+    const res = await BrainLocalFolder.tryConnectBridgeFolder(getActiveLocalBridgeUrl());
+    if (res.ok) {
+      const count = await syncSubtreeToLocalFolder(state.fileSystem, { onlyIfMissing: true });
+      renderLocalFolderModal();
+      showToast(`📂 로컬 브릿지 폴더(${res.folderPath || res.folderName}) 연결 완료 (${count}개 파일 저장됨)`);
+    } else {
+      showToast('⚠️ 로컬 브릿지에 연결할 수 없습니다.');
+    }
+  });
+
+  $('btn-lf-pick-bridge')?.addEventListener('click', async () => {
+    if (!BrainLocalFolder) return;
+    const res = await BrainLocalFolder.pickFolderViaBridge(getActiveLocalBridgeUrl());
+    if (res.ok) {
+      const count = await syncSubtreeToLocalFolder(state.fileSystem, { onlyIfMissing: true });
+      renderLocalFolderModal();
+      showToast(`📂 저장 폴더 변경됨: ${res.folderPath} (${count}개 파일 저장)`);
+    } else if (!res.cancelled) {
+      showToast(`⚠️ ${res.message || '폴더 변경에 실패했습니다.'}`);
+    }
+  });
+
+  $('btn-lf-sync-export')?.addEventListener('click', async () => {
+    if (!BrainLocalFolder?.isConnected()) return;
+    const count = await syncSubtreeToLocalFolder(state.fileSystem, { onlyIfMissing: false });
+    renderLocalFolderModal();
+    showToast(`⬆️ 전체 파일 ${count}개를 로컬 폴더에 저장했습니다.`);
+  });
+
+  $('btn-lf-sync-import')?.addEventListener('click', async () => {
+    await importFromLocalFolder();
+    renderLocalFolderModal();
+  });
+
+  $('btn-lf-disconnect')?.addEventListener('click', async () => {
+    if (!BrainLocalFolder) return;
+    await BrainLocalFolder.disconnect();
+    renderLocalFolderModal();
+    showToast('🔌 로컬 폴더 연결이 해제되었습니다.');
+  });
+
+  $('chk-lf-auto-download')?.addEventListener('change', (e) => {
+    if (!BrainLocalFolder) return;
+    BrainLocalFolder.setAutoDownload(e.target.checked);
+    showToast(e.target.checked
+      ? '⚡ 오프라인 파일 생성·저장 시 PC 자동 다운로드가 켜졌습니다.'
+      : '자동 다운로드가 꺼졌습니다.');
   });
 
   // ================= Google Drive Sync & File Viewer =================
@@ -3042,10 +4239,16 @@
         item.summary = newVal;
         saveAndRender();
         scheduleDocFileSyncToDrive(item, true);
+        scheduleItemSyncToLocalFolder(item, !silent, { allowAutoDownload: !silent });
         if (state.selectedItem && state.selectedItem.id === item.id && !isEditing) {
           selectItem(item);
         }
-        if (!silent) showToast(`💾 "${item.name}" 저장 및 Google Drive 동기화됨`);
+        if (!silent) {
+          const lf = BrainLocalFolder?.getStatus();
+          if (lf?.connected) showToast(`📂 "${item.name}" 로컬 폴더(${lf.folderName})에 저장됨`);
+          else if (isGuestMode) showToast(`💾 "${item.name}" 저장되었습니다.`);
+          else showToast(`💾 "${item.name}" 저장 및 Google Drive 동기화됨`);
+        }
       }
     });
 
@@ -3823,6 +5026,7 @@
       workbook,
       fileName: item.name,
       initialAppMode: opts.initialAppMode || 'excel',
+      hideAI: isGuestMode,
       onToast: showToast,
       onDirtyChange(dirty) {
         win.setMeta(dirty ? '● 수정됨' : 'Excel · Origin 분석기');
@@ -3865,6 +5069,7 @@
         item.sheetData = updatedWb;
         item.summary = mdSummary;
         persistFS();
+        scheduleItemSyncToLocalFolder(item, false);
         if (state.selectedItem && state.selectedItem.id === item.id) {
           $('p-summary').innerHTML = renderMarkdown(item.summary);
         }
@@ -3888,7 +5093,19 @@
             handleDriveError(err);
           }
         }
-        showToast(syncedDrive ? `☁️ "${item.name}" 저장 및 Google Drive 동기화 완료` : `💾 "${item.name}" 저장되었습니다.`);
+        const lfRes = await syncItemToLocalFolderNow(item, { allowAutoDownload: true });
+        const lf = BrainLocalFolder?.getStatus();
+        if (syncedDrive && lf?.connected && lfRes?.ok) {
+          showToast(`☁️ "${item.name}" Google Drive 및 로컬 폴더(${lf.folderName}) 저장 완료`);
+        } else if (syncedDrive) {
+          showToast(`☁️ "${item.name}" 저장 및 Google Drive 동기화 완료`);
+        } else if (lf?.connected && lfRes?.ok) {
+          showToast(`📂 "${item.name}" 로컬 폴더(${lf.folderName})에 저장 완료`);
+        } else if (lfRes?.downloaded) {
+          showToast(`💾 "${item.name}" 저장 및 PC 다운로드 완료`);
+        } else {
+          showToast(`💾 "${item.name}" 저장되었습니다.`);
+        }
       },
       onAskAI(updatedWb, mdSummary) {
         item.sheetData = updatedWb;
@@ -4020,7 +5237,9 @@
   });
 
   window.addEventListener('focus', () => {
-    refreshBridgeStatus(false);
+    if (!isGuestMode && !BrainAuth.isFileProtocol() && navigator.onLine !== false) {
+      refreshBridgeStatus(false);
+    }
     updateDriveStatusUI();
   });
 
@@ -4032,25 +5251,35 @@
   updateLoginClock();
   setInterval(updateLoginClock, 15000);
 
-  // 시작 시 항상 Windows 스타일 로그인 잠금 화면으로 진입 (목록 비노출)
-  showLoginScreen(
-    BrainAuth.isConfigComplete(state.settings.firebaseConfig) && !BrainAuth.isFileProtocol()
-      ? '🔐 로그인 상태 확인 중...'
-      : ''
-  );
+  // 온라인(http/https) 환경일 때만 웹 폰트 비동기 로드 (오프라인/file:// 즉시 실행 보장)
+  if (!BrainAuth.isFileProtocol() && navigator.onLine !== false) {
+    const fontLink = document.createElement('link');
+    fontLink.rel = 'stylesheet';
+    fontLink.href = 'https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css';
+    document.head.appendChild(fontLink);
+  }
 
-  if (BrainAuth.isConfigComplete(state.settings.firebaseConfig) && !BrainAuth.isFileProtocol()) {
+  // 시작 시 항상 Windows 스타일 로그인 잠금 화면으로 진입 (목록 비노출)
+  const canTryOnlineAuth =
+    BrainAuth.isConfigComplete(state.settings.firebaseConfig) &&
+    !BrainAuth.isFileProtocol() &&
+    navigator.onLine !== false;
+
+  showLoginScreen(canTryOnlineAuth ? '🔐 로그인 상태 확인 중...' : '');
+
+  if (canTryOnlineAuth) {
     BrainAuth.init(state.settings.firebaseConfig, handleAuthUserChanged)
       .then(() => {
-        // 기존 세션이 없으면 안내 문구 정리
         if (!BrainAuth.getUser() && !isAuthBusy && elLoginStatusText) {
           elLoginStatusText.textContent = '';
         }
       })
       .catch((err) => {
-        setLoginScreenError(`Firebase 초기화 실패: ${err.message}`);
+        if (!isGuestMode) {
+          setLoginScreenError(`오프라인 상태이거나 Firebase에 연결할 수 없습니다 (${err.message}). 아래 [게스트로 시작]으로 오프라인 작업을 진행하세요.`);
+        }
         if (elLoginStatusText) elLoginStatusText.textContent = '';
       });
+    refreshBridgeStatus(false);
   }
-  refreshBridgeStatus(false);
 })();

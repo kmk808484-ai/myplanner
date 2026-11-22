@@ -137,7 +137,258 @@
       const cfg = global.BrainOriginPlot.createDefaultPlotConfig();
       cfg.title = '\\Delta P \\text{ & } \\eta \\text{ vs 유량 } Q';
       cfg.y2Axis.enabled = true;
-      cfg.seriesStyles[3] = { color: '#2563eb', symbol: 'square', yAxis: 'y2', visible: true, lineWidth: 1.8, symbolSize: 4.5, lineStyle: 'solid' };
+      cfg.seriesStyles[1] = { color: '#dc2626', symbol: 'open-circle', yAxis: 'y1', visible: true, lineWidth: 2, symbolSize: 5.5, lineStyle: 'solid' };
+      cfg.seriesStyles[3] = { color: '#2563eb', symbol: 'dot-square', yAxis: 'y2', visible: true, lineWidth: 2, symbolSize: 5.5, lineStyle: 'dashed' };
+      const pts = [
+        { x: 10, y: 12.4 }, { x: 20, y: 25.8 }, { x: 30, y: 41.2 },
+        { x: 40, y: 59.5 }, { x: 50, y: 80.3 }, { x: 60, y: 104.8 }
+      ];
+      try {
+        const { fitRes, curvePts } = global.BrainOriginPlot.computeFit(pts, 'poly2');
+        cfg.fitOverlays = [{
+          id: 'fit-demo-1', label: 'ΔP 2차 피팅', eqText: fitRes.eqText, r2: fitRes.r2,
+          points: curvePts, color: '#991b1b', yAxis: 'y1', showInLegend: false
+        }];
+        cfg.annotations = [{
+          id: 'txt-demo-1',
+          text: `\\Delta P 2차 회귀\n${fitRes.formulaOnly}\nR^2 = ${fitRes.r2.toFixed(4)}`,
+          x: 0.36, y: 0.58, fontSize: 10.5, color: '#991b1b', bold: false, hasBox: true
+        }];
+      } catch (_) {}
+      s.plotConfig = cfg;
+    }
+    return wb;
+  }
+
+  // ================= Publication-Grade Origin Graph Example Gallery =================
+  const EXAMPLE_CATALOG = [
+    {
+      id: 'double-y',
+      icon: '🌊',
+      name: '유체 압력강하 & 효율 (Double-Y)',
+      badge: '이중 Y축 · 오차막대 · 2차 피팅',
+      desc: '좌측 Y1(압력강하 ΔP + 오차막대 + 2차 다항식 피팅)과 우측 Y2(효율 η)를 동시에 표현한 대표 공학 그래프'
+    },
+    {
+      id: 'damped-osc',
+      icon: '🎛️',
+      name: '제어공학 감쇠 진동 응답 (다중 곡선)',
+      badge: '다중 계열 · 선 스타일 · 오버슈트 주석',
+      desc: '감쇠비 ζ = 0.15(과소감쇠), 0.35(적정), 1.0(임계감쇠)의 2차 시스템 계단 응답을 깔끔하게 비교'
+    },
+    {
+      id: 'bode-log',
+      icon: '⚡',
+      name: 'RC 필터 보드 선도 (Log10 X축)',
+      badge: '로그 스케일 · Double-Y · 차단주파수',
+      desc: '주파수 10 Hz ~ 100 kHz 로그 X축 위에 이득(dB)과 위상(°)을 이중축으로 그린 회로이론 보드 선도'
+    },
+    {
+      id: 'exp-fit',
+      icon: '🔥',
+      name: '반응속도 실험 산점도 & 지수 피팅',
+      badge: '산점도 · 지수 피팅 · 개별점 강조',
+      desc: '온도별 반응속도 실험 데이터에 오차막대, 지수 회귀선(y = a·e^{bx}), 특이점(✕) 개별 심볼을 적용'
+    },
+    {
+      id: 'bar-compare',
+      icon: '📊',
+      name: '소재 강도 벤치마크 (그룹 막대 + 수식)',
+      badge: '막대 그래프 · 엑셀 집계 수식',
+      desc: '기존 합금 vs 신규 복합재 vs 열처리 시편의 인장강도(MPa)를 그룹 막대 그래프와 자동 개선율(%) 수식으로 비교'
+    }
+  ];
+
+  function createExampleWorkbook(exampleId) {
+    if (exampleId === 'double-y') {
+      return createStarterWorkbook();
+    }
+
+    if (exampleId === 'damped-osc') {
+      const wb = createEmptyWorkbook('감쇠 진동 응답');
+      const s = wb.sheets[0];
+      s.rows = 52;
+      s.colMeta = {
+        0: { longName: '시간 t', units: 's', comments: '0~10초 샘플링', role: 'X' },
+        1: { longName: '\\zeta = 0.15', units: '', comments: '과소감쇠 (Underdamped)', role: 'Y' },
+        2: { longName: '\\zeta = 0.35', units: '', comments: '적정감쇠', role: 'Y' },
+        3: { longName: '\\zeta = 1.00', units: '', comments: '임계감쇠 (Critically damped)', role: 'Y' }
+      };
+      const wn = 2.0;
+      const stepResp = (t, zeta) => {
+        if (zeta < 1) {
+          const wd = wn * Math.sqrt(1 - zeta * zeta);
+          const phi = Math.atan2(Math.sqrt(1 - zeta * zeta), zeta);
+          return 1 - (Math.exp(-zeta * wn * t) / Math.sqrt(1 - zeta * zeta)) * Math.sin(wd * t + phi);
+        }
+        return 1 - (1 + wn * t) * Math.exp(-wn * t);
+      };
+      for (let i = 0; i <= 40; i++) {
+        const t = Math.round(i * 0.25 * 100) / 100;
+        s.cells[cellKey(i, 0)] = { raw: String(t), style: { align: 'right' } };
+        s.cells[cellKey(i, 1)] = { raw: stepResp(t, 0.15).toFixed(4), style: { align: 'right' } };
+        s.cells[cellKey(i, 2)] = { raw: stepResp(t, 0.35).toFixed(4), style: { align: 'right' } };
+        s.cells[cellKey(i, 3)] = { raw: stepResp(t, 1.0).toFixed(4), style: { align: 'right' } };
+      }
+      s.colWidths = { 0: 84, 1: 102, 2: 102, 3: 102 };
+      if (global.BrainOriginPlot) {
+        const cfg = global.BrainOriginPlot.createDefaultPlotConfig();
+        cfg.title = '2차 시스템 계단 응답 (\\omega_n = 2 rad/s)';
+        cfg.plotType = 'line-symbol';
+        cfg.showGrid = true;
+        cfg.legendPos = { x: 0.62, y: 0.56 };
+        cfg.yAxis.title = '정규화 출력 y(t)';
+        cfg.yAxis.min = '0';
+        cfg.yAxis.max = '1.8';
+        cfg.seriesStyles[1] = { color: '#dc2626', symbol: 'open-circle', symbolSize: 3.5, lineWidth: 2, lineStyle: 'solid', yAxis: 'y1', visible: true };
+        cfg.seriesStyles[2] = { color: '#2563eb', symbol: 'triangle', symbolSize: 3.5, lineWidth: 2, lineStyle: 'dashed', yAxis: 'y1', visible: true };
+        cfg.seriesStyles[3] = { color: '#059669', symbol: 'dot-circle', symbolSize: 3.5, lineWidth: 2, lineStyle: 'dashdot', yAxis: 'y1', visible: true };
+        cfg.annotations = [{
+          id: 'txt-damp-1',
+          text: '최대 오버슈트 M_p \\approx 62%\n(\\zeta = 0.15, t_p = 1.59 s)',
+          x: 0.30, y: 0.15, fontSize: 10.5, color: '#dc2626', bold: true, hasBox: true
+        }];
+        s.plotConfig = cfg;
+      }
+      return wb;
+    }
+
+    if (exampleId === 'bode-log') {
+      const wb = createEmptyWorkbook('RC 필터 보드 선도');
+      const s = wb.sheets[0];
+      const fc = 1000; // 1 kHz cutoff
+      s.colMeta = {
+        0: { longName: '주파수 f', units: 'Hz', comments: 'Log10 스윕 (10~100kHz)', role: 'X' },
+        1: { longName: '이득 Gain', units: 'dB', comments: '20·log10(|H(jω)|)', role: 'Y' },
+        2: { longName: '위상 Phase', units: '°', comments: '-atan(f / f_c)', role: 'Y' }
+      };
+      const freqs = [10, 20, 40, 70, 100, 160, 250, 400, 630, 800, 1000, 1300, 1600, 2500, 4000, 6300, 10000, 20000, 40000, 70000, 100000];
+      freqs.forEach((f, idx) => {
+        const ratio = f / fc;
+        const mag = 1 / Math.sqrt(1 + ratio * ratio);
+        const gainDb = 20 * Math.log10(mag);
+        const phaseDeg = -Math.atan(ratio) * (180 / Math.PI);
+        s.cells[cellKey(idx, 0)] = { raw: String(f), style: { align: 'right', numFmt: 'number' } };
+        s.cells[cellKey(idx, 1)] = { raw: gainDb.toFixed(2), style: { align: 'right' } };
+        s.cells[cellKey(idx, 2)] = { raw: phaseDeg.toFixed(2), style: { align: 'right' } };
+      });
+      s.colWidths = { 0: 96, 1: 102, 2: 102 };
+      if (global.BrainOriginPlot) {
+        const cfg = global.BrainOriginPlot.createDefaultPlotConfig();
+        cfg.title = '1차 RC 저역통과 필터 보드 선도 (f_c = 1 kHz)';
+        cfg.plotType = 'line-symbol';
+        cfg.showGrid = true;
+        cfg.xAxis.scale = 'log';
+        cfg.yAxis.min = '-45';
+        cfg.yAxis.max = '5';
+        cfg.y2Axis.enabled = true;
+        cfg.y2Axis.min = '-95';
+        cfg.y2Axis.max = '5';
+        cfg.legendPos = { x: 0.05, y: 0.68 };
+        cfg.seriesStyles[1] = { color: '#1f2937', symbol: 'circle', symbolSize: 4.5, lineWidth: 2.2, lineStyle: 'solid', yAxis: 'y1', visible: true };
+        cfg.seriesStyles[2] = { color: '#7c3aed', symbol: 'dot-circle', symbolSize: 4.8, lineWidth: 2, lineStyle: 'dashed', yAxis: 'y2', visible: true };
+        cfg.pointOverrides = { '1:10': { symbol: 'cross', symbolSize: 8.5, color: '#dc2626' } };
+        cfg.annotations = [{
+          id: 'txt-bode-1',
+          text: '차단 주파수 f_c = 10^3 Hz\nGain = -3.01 dB, Phase = -45°',
+          x: 0.44, y: 0.16, fontSize: 10.5, color: '#1f2937', bold: true, hasBox: true
+        }];
+        s.plotConfig = cfg;
+      }
+      return wb;
+    }
+
+    if (exampleId === 'exp-fit') {
+      const wb = createEmptyWorkbook('반응속도 지수 피팅');
+      const s = wb.sheets[0];
+      s.colMeta = {
+        0: { longName: '온도 T', units: '°C', comments: '반응기 온도', role: 'X' },
+        1: { longName: '반응속도 k', units: 'mol/s', comments: '측정 평균값', role: 'Y' },
+        2: { longName: '표준편차', units: 'mol/s', comments: '3회 반복 측정 오차', role: 'yErr' }
+      };
+      const rows = [
+        [20, 0.42, 0.06], [30, 0.68, 0.08], [40, 1.09, 0.11], [50, 1.72, 0.15],
+        [60, 2.84, 0.22], [70, 4.45, 0.31], [80, 7.12, 0.48], [90, 11.40, 0.72], [100, 18.25, 1.05]
+      ];
+      rows.forEach((r, idx) => {
+        s.cells[cellKey(idx, 0)] = { raw: String(r[0]), style: { align: 'right' } };
+        s.cells[cellKey(idx, 1)] = { raw: String(r[1]), style: { align: 'right' } };
+        s.cells[cellKey(idx, 2)] = { raw: String(r[2]), style: { align: 'right' } };
+      });
+      s.colWidths = { 0: 92, 1: 108, 2: 96 };
+      if (global.BrainOriginPlot) {
+        const cfg = global.BrainOriginPlot.createDefaultPlotConfig();
+        cfg.title = '온도에 따른 반응속도 지수 모델링';
+        cfg.plotType = 'scatter';
+        cfg.showGrid = true;
+        cfg.legendPos = { x: 0.05, y: 0.07 };
+        cfg.seriesStyles[1] = { color: '#dc2626', symbol: 'open-diamond', symbolSize: 6, lineWidth: 1.8, lineStyle: 'solid', yAxis: 'y1', visible: true };
+        cfg.pointOverrides = { '1:6': { symbol: 'cross', symbolSize: 9, color: '#059669' } };
+        const pts = rows.map((r) => ({ x: r[0], y: r[1] }));
+        try {
+          const { fitRes, curvePts } = global.BrainOriginPlot.computeFit(pts, 'exp');
+          cfg.fitOverlays = [{
+            id: 'fit-exp-1', label: '지수 회귀 (Exp Fit)', eqText: fitRes.eqText, r2: fitRes.r2,
+            points: curvePts, color: '#1d4ed8', yAxis: 'y1', showInLegend: true
+          }];
+          cfg.annotations = [{
+            id: 'txt-exp-1',
+            text: `지수 피팅 모델\n${fitRes.formulaOnly}\nR^2 = ${fitRes.r2.toFixed(4)}`,
+            x: 0.16, y: 0.34, fontSize: 11, color: '#1d4ed8', bold: true, hasBox: true
+          }];
+        } catch (_) {}
+        s.plotConfig = cfg;
+      }
+      return wb;
+    }
+
+    // Default / 'bar-compare'
+    const wb = createEmptyWorkbook('소재 강도 벤치마크');
+    const s = wb.sheets[0];
+    s.colMeta = {
+      0: { longName: '시편 번호', units: '', comments: '샘플 인덱스', role: 'X' },
+      1: { longName: '기존 합금', units: 'MPa', comments: '기준 인장강도', role: 'Y' },
+      2: { longName: '신규 복합재', units: 'MPa', comments: '복합소재 적용', role: 'Y' },
+      3: { longName: '열처리 개선', units: 'MPa', comments: '후열처리 강화', role: 'Y' },
+      4: { longName: '향상률', units: '%', comments: '기존 대비 개선율', role: '' }
+    };
+    const data = [
+      [1, 310, 385, 442],
+      [2, 295, 372, 428],
+      [3, 328, 410, 476],
+      [4, 305, 392, 455],
+      [5, 318, 404, 468]
+    ];
+    data.forEach((row, idx) => {
+      const rNum = idx + 1;
+      s.cells[cellKey(idx, 0)] = { raw: String(row[0]), style: { align: 'center' } };
+      s.cells[cellKey(idx, 1)] = { raw: String(row[1]), style: { align: 'right' } };
+      s.cells[cellKey(idx, 2)] = { raw: String(row[2]), style: { align: 'right' } };
+      s.cells[cellKey(idx, 3)] = { raw: String(row[3]), style: { align: 'right' } };
+      s.cells[cellKey(idx, 4)] = { raw: `=(D${rNum}-B${rNum})/B${rNum}`, style: { align: 'right', numFmt: 'percent', decimals: 1, bold: true, color: '#059669' } };
+    });
+    s.cells.A7 = { raw: '평균', style: { bold: true, bg: '#f1f5f9' } };
+    s.cells.B7 = { raw: '=ROUND(AVERAGE(B1:B5),1)', style: { bold: true, align: 'right', bg: '#f1f5f9' } };
+    s.cells.C7 = { raw: '=ROUND(AVERAGE(C1:C5),1)', style: { bold: true, align: 'right', bg: '#f1f5f9' } };
+    s.cells.D7 = { raw: '=ROUND(AVERAGE(D1:D5),1)', style: { bold: true, align: 'right', bg: '#f1f5f9' } };
+    s.cells.E7 = { raw: '=AVERAGE(E1:E5)', style: { bold: true, align: 'right', numFmt: 'percent', decimals: 1, bg: '#dcfce7', color: '#166534' } };
+    s.colWidths = { 0: 76, 1: 96, 2: 102, 3: 102, 4: 88 };
+    if (global.BrainOriginPlot) {
+      const cfg = global.BrainOriginPlot.createDefaultPlotConfig();
+      cfg.title = '시편별 인장강도 비교 (MPa)';
+      cfg.plotType = 'bar';
+      cfg.showGrid = true;
+      cfg.yAxis.min = '0';
+      cfg.yAxis.max = '550';
+      cfg.legendPos = { x: 0.04, y: 0.04 };
+      cfg.seriesStyles[1] = { color: '#64748b', symbol: 'square', symbolSize: 4.5, lineWidth: 1.5, lineStyle: 'solid', yAxis: 'y1', visible: true };
+      cfg.seriesStyles[2] = { color: '#2563eb', symbol: 'square', symbolSize: 4.5, lineWidth: 1.5, lineStyle: 'solid', yAxis: 'y1', visible: true };
+      cfg.seriesStyles[3] = { color: '#059669', symbol: 'square', symbolSize: 4.5, lineWidth: 1.5, lineStyle: 'solid', yAxis: 'y1', visible: true };
+      cfg.annotations = [{
+        id: 'txt-bar-1',
+        text: '열처리 개선 시편:\n평균 인장강도 +46.0% 향상',
+        x: 0.48, y: 0.13, fontSize: 10.5, color: '#059669', bold: true, hasBox: true
+      }];
       s.plotConfig = cfg;
     }
     return wb;
@@ -2041,6 +2292,8 @@
     ensureSheetJS,
     createEmptyWorkbook,
     createStarterWorkbook,
+    EXAMPLE_CATALOG,
+    createExampleWorkbook,
     normalizeWorkbook,
     parseCsvToWorkbook,
     parseArrayBufferToWorkbook,

@@ -18,6 +18,7 @@ function Load-BridgeConfig {
         firebaseAuthDomain = ""
         firebaseProjectId = ""
         allowedEmail = ""
+        offlineFolderPath = ""
     }
     if (Test-Path -LiteralPath $configPath) {
         try {
@@ -27,6 +28,7 @@ function Load-BridgeConfig {
             if ($raw.firebaseAuthDomain) { $cfg.firebaseAuthDomain = ([string]$raw.firebaseAuthDomain).Trim() }
             if ($raw.firebaseProjectId) { $cfg.firebaseProjectId = ([string]$raw.firebaseProjectId).Trim() }
             if ($raw.allowedEmail) { $cfg.allowedEmail = ([string]$raw.allowedEmail).Trim().ToLowerInvariant() }
+            if ($raw.offlineFolderPath) { $cfg.offlineFolderPath = ([string]$raw.offlineFolderPath).Trim() }
         } catch {
             Write-Host "[경고] bridge-config.json 읽기 실패: $($_.Exception.Message)" -ForegroundColor Yellow
         }
@@ -124,8 +126,8 @@ function Serve-StaticFile {
     $rel = $RequestPath.TrimStart('/')
     if ([string]::IsNullOrWhiteSpace($rel)) { $rel = "index.html" }
 
-    # local-bridge 설정 파일 등은 외부 정적 서빙 차단
-    if ($rel -match '(^|/|\\)local-bridge($|/|\\)' -or $rel -match '\.\.') {
+    # local-bridge 설정 파일 및 offline-files 사용자 데이터는 정적 서빙 차단
+    if ($rel -match '(^|/|\\)(local-bridge|offline-files)($|/|\\)' -or $rel -match '\.\.') {
         $Response.StatusCode = 403
         $Response.OutputStream.Close()
         return
@@ -181,6 +183,7 @@ function Save-BridgeConfig {
             firebaseAuthDomain = [string]$Cfg.firebaseAuthDomain
             firebaseProjectId  = [string]$Cfg.firebaseProjectId
             allowedEmail       = [string]$Cfg.allowedEmail
+            offlineFolderPath  = [string]$Cfg.offlineFolderPath
         }
         $json = $ordered | ConvertTo-Json -Depth 3
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -188,6 +191,58 @@ function Save-BridgeConfig {
     } catch {
         Write-Host "[경고] bridge-config.json 저장 실패: $($_.Exception.Message)" -ForegroundColor Yellow
     }
+}
+
+function Sanitize-OfflineSegment {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return "" }
+    $clean = $Name.Trim() -replace '[<>:"/\\|?*\x00-\x1f]', '_'
+    $clean = $clean.TrimEnd('.', ' ')
+    if ($clean -eq "." -or $clean -eq "..") { return "" }
+    return $clean
+}
+
+function Get-OfflineRootPath {
+    $cfg = Load-BridgeConfig
+    $root = if (-not [string]::IsNullOrWhiteSpace($cfg.offlineFolderPath)) {
+        $cfg.offlineFolderPath
+    } else {
+        Join-Path $webRoot "offline-files"
+    }
+    $rootFull = [System.IO.Path]::GetFullPath($root)
+    if (-not (Test-Path -LiteralPath $rootFull)) {
+        New-Item -ItemType Directory -Path $rootFull -Force | Out-Null
+    }
+    return $rootFull
+}
+
+function Resolve-OfflinePath {
+    param(
+        [string]$RootFull,
+        [object[]]$FolderSegments,
+        [string]$FileName = ""
+    )
+    $curr = $RootFull
+    if ($FolderSegments) {
+        foreach ($seg in $FolderSegments) {
+            $safe = Sanitize-OfflineSegment -Name ([string]$seg)
+            if (-not [string]::IsNullOrWhiteSpace($safe)) {
+                $curr = Join-Path $curr $safe
+            }
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($FileName)) {
+        $safeFile = Sanitize-OfflineSegment -Name $FileName
+        if ([string]::IsNullOrWhiteSpace($safeFile)) { return $null }
+        $curr = Join-Path $curr $safeFile
+    }
+    $resolved = [System.IO.Path]::GetFullPath($curr)
+    $rootPrefix = $RootFull.TrimEnd('\') + '\'
+    if ($resolved.Equals($RootFull.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase) -or
+        $resolved.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $resolved
+    }
+    return $null
 }
 
 function Verify-FirebaseRequest {
@@ -606,6 +661,220 @@ try {
                     ok = $false
                     error = $_.Exception.Message
                 }
+            }
+            continue
+        }
+
+        # ================= Offline Local Folder Sync Routes (Loopback Only) =================
+        if ($method -eq "GET" -and $trimmedPath -eq "/offline-fs/status") {
+            try {
+                $offlineRoot = Get-OfflineRootPath
+                Send-JsonResponse -Response $response -StatusCode 200 -Body @{
+                    ok = $true
+                    folderPath = $offlineRoot
+                    folderName = [System.IO.Path]::GetFileName($offlineRoot.TrimEnd('\'))
+                }
+            } catch {
+                Send-JsonResponse -Response $response -StatusCode 500 -Body @{
+                    ok = $false
+                    error = $_.Exception.Message
+                }
+            }
+            continue
+        }
+
+        if ($method -eq "POST" -and $trimmedPath -eq "/offline-fs/pick-folder") {
+            try {
+                $form = New-Object System.Windows.Forms.Form
+                $form.TopMost = $true
+                $form.StartPosition = "CenterScreen"
+
+                $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+                $dlg.Description = "오프라인 파일을 자동 저장할 로컬 폴더를 선택하세요"
+                $dlg.SelectedPath = Get-OfflineRootPath
+                $dlg.ShowNewFolderButton = $true
+
+                $resDlg = $dlg.ShowDialog($form)
+                $form.Dispose()
+
+                if ($resDlg -eq [System.Windows.Forms.DialogResult]::OK -and $dlg.SelectedPath) {
+                    $picked = [System.IO.Path]::GetFullPath($dlg.SelectedPath)
+                    $cfg = Load-BridgeConfig
+                    $cfg.offlineFolderPath = $picked
+                    Save-BridgeConfig -Cfg $cfg
+                    Write-Host "[오프라인 저장 폴더 변경] $picked" -ForegroundColor Cyan
+                    Send-JsonResponse -Response $response -StatusCode 200 -Body @{
+                        ok = $true
+                        folderPath = $picked
+                        folderName = [System.IO.Path]::GetFileName($picked.TrimEnd('\'))
+                    }
+                } else {
+                    Send-JsonResponse -Response $response -StatusCode 200 -Body @{
+                        ok = $false
+                        cancelled = $true
+                    }
+                }
+            } catch {
+                Send-JsonResponse -Response $response -StatusCode 500 -Body @{
+                    ok = $false
+                    error = $_.Exception.Message
+                }
+            }
+            continue
+        }
+
+        if ($method -eq "POST" -and $trimmedPath -eq "/offline-fs/mkdir") {
+            $reader = New-Object System.IO.StreamReader($request.InputStream, [System.Text.Encoding]::UTF8)
+            $rawBody = $reader.ReadToEnd()
+            $reader.Close()
+            try {
+                $payload = $rawBody | ConvertFrom-Json
+                $offlineRoot = Get-OfflineRootPath
+                $targetDir = Resolve-OfflinePath -RootFull $offlineRoot -FolderSegments $payload.folderPath
+                if (-not $targetDir) {
+                    Send-JsonResponse -Response $response -StatusCode 400 -Body @{ ok = $false; error = "허용되지 않은 폴더 경로입니다." }
+                    continue
+                }
+                if (-not (Test-Path -LiteralPath $targetDir)) {
+                    New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+                }
+                Send-JsonResponse -Response $response -StatusCode 200 -Body @{ ok = $true; path = $targetDir }
+            } catch {
+                Send-JsonResponse -Response $response -StatusCode 500 -Body @{ ok = $false; error = $_.Exception.Message }
+            }
+            continue
+        }
+
+        if ($method -eq "POST" -and $trimmedPath -eq "/offline-fs/write") {
+            $reader = New-Object System.IO.StreamReader($request.InputStream, [System.Text.Encoding]::UTF8)
+            $rawBody = $reader.ReadToEnd()
+            $reader.Close()
+            try {
+                $payload = $rawBody | ConvertFrom-Json
+                $offlineRoot = Get-OfflineRootPath
+                $targetFile = Resolve-OfflinePath -RootFull $offlineRoot -FolderSegments $payload.folderPath -FileName ([string]$payload.fileName)
+                if (-not $targetFile) {
+                    Send-JsonResponse -Response $response -StatusCode 400 -Body @{ ok = $false; error = "허용되지 않은 파일 경로입니다." }
+                    continue
+                }
+                if ([bool]$payload.onlyIfMissing -and (Test-Path -LiteralPath $targetFile)) {
+                    Send-JsonResponse -Response $response -StatusCode 200 -Body @{ ok = $true; skipped = $true; path = $targetFile }
+                    continue
+                }
+                $parentDir = Split-Path -Parent $targetFile
+                if (-not (Test-Path -LiteralPath $parentDir)) {
+                    New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
+                }
+                $contentStr = if ($null -ne $payload.content) { [string]$payload.content } else { "" }
+                if ([bool]$payload.isBase64) {
+                    $rawBytes = [Convert]::FromBase64String($contentStr)
+                    [System.IO.File]::WriteAllBytes($targetFile, $rawBytes)
+                } else {
+                    $extLower = [System.IO.Path]::GetExtension($targetFile).ToLowerInvariant()
+                    $useBom = ($extLower -eq ".csv")
+                    $enc = New-Object System.Text.UTF8Encoding($useBom)
+                    [System.IO.File]::WriteAllText($targetFile, $contentStr, $enc)
+                }
+                Send-JsonResponse -Response $response -StatusCode 200 -Body @{ ok = $true; path = $targetFile }
+            } catch {
+                Send-JsonResponse -Response $response -StatusCode 500 -Body @{ ok = $false; error = $_.Exception.Message }
+            }
+            continue
+        }
+
+        if ($method -eq "POST" -and $trimmedPath -eq "/offline-fs/delete") {
+            $reader = New-Object System.IO.StreamReader($request.InputStream, [System.Text.Encoding]::UTF8)
+            $rawBody = $reader.ReadToEnd()
+            $reader.Close()
+            try {
+                $payload = $rawBody | ConvertFrom-Json
+                $offlineRoot = Get-OfflineRootPath
+                $targetPath = Resolve-OfflinePath -RootFull $offlineRoot -FolderSegments $payload.folderPath -FileName ([string]$payload.name)
+                if (-not $targetPath -or $targetPath.Equals($offlineRoot.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) {
+                    Send-JsonResponse -Response $response -StatusCode 400 -Body @{ ok = $false; error = "허용되지 않은 삭제 경로입니다." }
+                    continue
+                }
+                if (Test-Path -LiteralPath $targetPath) {
+                    Remove-Item -LiteralPath $targetPath -Recurse -Force
+                }
+                Send-JsonResponse -Response $response -StatusCode 200 -Body @{ ok = $true }
+            } catch {
+                Send-JsonResponse -Response $response -StatusCode 500 -Body @{ ok = $false; error = $_.Exception.Message }
+            }
+            continue
+        }
+
+        if ($method -eq "POST" -and $trimmedPath -eq "/offline-fs/rename") {
+            $reader = New-Object System.IO.StreamReader($request.InputStream, [System.Text.Encoding]::UTF8)
+            $rawBody = $reader.ReadToEnd()
+            $reader.Close()
+            try {
+                $payload = $rawBody | ConvertFrom-Json
+                $offlineRoot = Get-OfflineRootPath
+                $oldPath = Resolve-OfflinePath -RootFull $offlineRoot -FolderSegments $payload.oldFolderPath -FileName ([string]$payload.oldName)
+                $newPath = Resolve-OfflinePath -RootFull $offlineRoot -FolderSegments $payload.newFolderPath -FileName ([string]$payload.newName)
+                if (-not $oldPath -or -not $newPath) {
+                    Send-JsonResponse -Response $response -StatusCode 400 -Body @{ ok = $false; error = "허용되지 않은 경로입니다." }
+                    continue
+                }
+                if (Test-Path -LiteralPath $oldPath) {
+                    $newParent = Split-Path -Parent $newPath
+                    if (-not (Test-Path -LiteralPath $newParent)) {
+                        New-Item -ItemType Directory -Path $newParent -Force | Out-Null
+                    }
+                    if ($oldPath -ne $newPath) {
+                        Move-Item -LiteralPath $oldPath -Destination $newPath -Force
+                    }
+                }
+                Send-JsonResponse -Response $response -StatusCode 200 -Body @{ ok = $true; path = $newPath }
+            } catch {
+                Send-JsonResponse -Response $response -StatusCode 500 -Body @{ ok = $false; error = $_.Exception.Message }
+            }
+            continue
+        }
+
+        if ($method -eq "GET" -and $trimmedPath -eq "/offline-fs/list") {
+            try {
+                $offlineRoot = Get-OfflineRootPath
+                $rootLen = $offlineRoot.TrimEnd('\').Length
+                $foldersOut = @()
+                $filesOut = @()
+                $textExts = @(".md",".txt",".html",".htm",".css",".js",".ts",".json",".csv",".xml",".yml",".yaml",".py",".c",".cpp",".java")
+
+                $items = Get-ChildItem -LiteralPath $offlineRoot -Recurse -Force -ErrorAction SilentlyContinue
+                foreach ($it in $items) {
+                    if ($it.Name.StartsWith('.')) { continue }
+                    $rel = $it.FullName.Substring($rootLen).TrimStart('\')
+                    if ([string]::IsNullOrWhiteSpace($rel)) { continue }
+                    $parts = $rel.Split('\')
+                    if ($parts | Where-Object { $_.StartsWith('.') }) { continue }
+                    if ($it.PSIsContainer) {
+                        $foldersOut += ,$parts
+                    } else {
+                        $fPath = if ($parts.Length -gt 1) { $parts[0..($parts.Length - 2)] } else { @() }
+                        $extL = [System.IO.Path]::GetExtension($it.Name).ToLowerInvariant()
+                        $entryObj = @{
+                            name = $it.Name
+                            folderPath = $fPath
+                            size = $it.Length
+                            lastModified = [DateTimeOffset]::new($it.LastWriteTimeUtc).ToUnixTimeMilliseconds()
+                        }
+                        if (($textExts -contains $extL) -and $it.Length -le 512000) {
+                            $entryObj.textContent = [System.IO.File]::ReadAllText($it.FullName, [System.Text.Encoding]::UTF8)
+                        } elseif (($extL -eq ".xlsx" -or $extL -eq ".xls") -and $it.Length -le 10485760) {
+                            $entryObj.base64Content = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($it.FullName))
+                        }
+                        $filesOut += $entryObj
+                    }
+                }
+                Send-JsonResponse -Response $response -StatusCode 200 -Body @{
+                    ok = $true
+                    folderPath = $offlineRoot
+                    folders = $foldersOut
+                    files = $filesOut
+                }
+            } catch {
+                Send-JsonResponse -Response $response -StatusCode 500 -Body @{ ok = $false; error = $_.Exception.Message }
             }
             continue
         }

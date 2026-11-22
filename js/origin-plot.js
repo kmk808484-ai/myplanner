@@ -37,9 +37,10 @@
   const LATEX_SYMBOLS = {
     '\\Delta': 'Δ', '\\delta': 'δ', '\\alpha': 'α', '\\beta': 'β', '\\gamma': 'γ',
     '\\Gamma': 'Γ', '\\theta': 'θ', '\\Theta': 'Θ', '\\lambda': 'λ', '\\Lambda': 'Λ',
-    '\\mu': 'μ', '\\nu': 'ν', '\\pi': 'π', '\\Pi': 'Π', '\\rho': 'ρ', '\\sigma': 'σ',
-    '\\Sigma': 'Σ', '\\tau': 'τ', '\\phi': 'φ', '\\Phi': 'Φ', '\\psi': 'ψ', '\\omega': 'ω',
-    '\\Omega': 'Ω', '\\eta': 'η', '\\epsilon': 'ε', '\\varepsilon': 'ε', '\\kappa': 'κ',
+    '\\mu': 'μ', '\\nu': 'ν', '\\xi': 'ξ', '\\Xi': 'Ξ', '\\pi': 'π', '\\Pi': 'Π',
+    '\\rho': 'ρ', '\\sigma': 'σ', '\\Sigma': 'Σ', '\\tau': 'τ', '\\phi': 'φ', '\\Phi': 'Φ',
+    '\\chi': 'χ', '\\psi': 'ψ', '\\Psi': 'Ψ', '\\omega': 'ω', '\\Omega': 'Ω',
+    '\\eta': 'η', '\\zeta': 'ζ', '\\epsilon': 'ε', '\\varepsilon': 'ε', '\\kappa': 'κ',
     '\\pm': '±', '\\times': '×', '\\cdot': '·', '\\div': '÷', '\\approx': '≈',
     '\\neq': '≠', '\\leq': '≤', '\\geq': '≥', '\\infty': '∞', '\\degree': '°',
     '\\circ': '°', '\\rightarrow': '→', '\\leftarrow': '←', '\\partial': '∂', '\\nabla': '∇'
@@ -59,6 +60,21 @@
     ).join('');
   }
 
+  const CANVAS_PRESETS = {
+    '4:3':  { width: 800, height: 600, aspectW: 4, aspectH: 3, label: '4:3 논문 표준 (800×600)' },
+    '16:9': { width: 960, height: 540, aspectW: 16, aspectH: 9, label: '16:9 발표/PPT (960×540)' },
+    '3:2':  { width: 900, height: 600, aspectW: 3, aspectH: 2, label: '3:2 저널 표준 (900×600)' },
+    '1:1':  { width: 680, height: 680, aspectW: 1, aspectH: 1, label: '1:1 정사각형 (680×680)' },
+    '5:4':  { width: 800, height: 640, aspectW: 5, aspectH: 4, label: '5:4 보고서 (800×640)' }
+  };
+
+  function getDpiScale(dpi) {
+    const d = Number(dpi) || 300;
+    if (d <= 150) return 2;
+    if (d >= 600) return 6;
+    return 4;
+  }
+
   function createDefaultPlotConfig() {
     return {
       title: '',
@@ -68,6 +84,15 @@
       inwardTicks: true,
       showGrid: false,
       showLegend: true,
+      canvasSize: {
+        lockAspect: true,
+        preset: '4:3',
+        width: 800,
+        height: 600,
+        aspectW: 4,
+        aspectH: 3,
+        dpi: 300
+      },
       legendPos: { x: 0.04, y: 0.05 },
       legendStyle: {
         fontSize: 11,
@@ -76,7 +101,7 @@
       },
       legendOrder: [], // array of keys: 's:<colIdx>' or 'fit:<id>'
       legendOverrides: {}, // key -> { label?: string, displayMode?: string, hidden?: boolean }
-      inspectorWidth: 232,
+      inspectorWidth: 238,
       xAxis: { title: '', min: '', max: '', increment: '', minorCount: 4, scale: 'linear' },
       yAxis: { title: '', min: '', max: '', increment: '', minorCount: 4, scale: 'linear' },
       y2Axis: { enabled: false, title: '', min: '', max: '', increment: '', minorCount: 4, scale: 'linear' },
@@ -97,9 +122,17 @@
           ...ov
         }))
       : [];
+    const cs = { ...def.canvasSize, ...(saved.canvasSize || {}) };
+    cs.width = Math.max(300, Math.min(2400, Math.round(Number(cs.width) || 800)));
+    cs.height = Math.max(240, Math.min(2000, Math.round(Number(cs.height) || 600)));
+    cs.aspectW = Math.max(0.2, Math.min(50, Number(cs.aspectW) || 4));
+    cs.aspectH = Math.max(0.2, Math.min(50, Number(cs.aspectH) || 3));
+    cs.lockAspect = cs.lockAspect !== false;
+    cs.dpi = [150, 300, 600].includes(Number(cs.dpi)) ? Number(cs.dpi) : 300;
     return {
       ...def,
       ...saved,
+      canvasSize: cs,
       legendPos: { ...def.legendPos, ...(saved.legendPos || {}) },
       legendStyle: { ...def.legendStyle, ...(saved.legendStyle || {}) },
       legendOrder: Array.isArray(saved.legendOrder) ? [...saved.legendOrder] : [],
@@ -635,6 +668,7 @@
         <button type="button" class="sb-tb-btn" data-tool="fit-modal" title="커브 피팅 (미리보기 & 수식 박스)">📐 피팅</button>
         <button type="button" class="sb-tb-btn" data-tool="legend-props" title="범례 이름·표현방식·순서·크기 설정">🏷️ 범례</button>
         <button type="button" class="sb-tb-btn" data-tool="reset-zoom" title="축 범위 원래대로">↺</button>
+        <button type="button" class="sb-tb-btn origin-size-pill" data-tool="size-popover" title="그래프 출력 비율·크기 설정 (창 크기와 무관하게 일정 비율/크기 저장)">📐 4:3</button>
         <button type="button" class="sb-tb-btn" data-tool="export-svg" title="논문·보고서용 벡터 SVG 저장">SVG</button>
         <button type="button" class="sb-tb-btn" data-tool="export-png" title="300 DPI 고해상도 PNG 저장">PNG</button>
         <button type="button" class="sb-tb-btn" data-tool="toggle-inspector" title="그래프 속성 인스펙터 열기/닫기">🎛️ 속성</button>
@@ -1405,15 +1439,205 @@
       });
     }
 
+    // ================= Canvas Size & Aspect Ratio Helpers =================
+    function getCanvasSizeCfg() {
+      if (!plotConfig.canvasSize) {
+        plotConfig.canvasSize = createDefaultPlotConfig().canvasSize;
+      }
+      return plotConfig.canvasSize;
+    }
+
+    function formatRatioLabel(cs) {
+      if (cs.preset === 'fit' && !cs.lockAspect) return '창 맞춤';
+      if (CANVAS_PRESETS[cs.preset]) return cs.preset;
+      const ratio = cs.width / Math.max(1, cs.height);
+      const aw = Number(cs.aspectW) || Number(ratio.toFixed(2));
+      const ah = Number(cs.aspectH) || 1;
+      if (Number.isInteger(aw) && Number.isInteger(ah) && aw <= 30 && ah <= 30) {
+        return `${aw}:${ah}`;
+      }
+      return `${ratio.toFixed(2)}:1`;
+    }
+
+    function updateSizePill() {
+      const pill = plotBar.querySelector('.origin-size-pill');
+      if (!pill) return;
+      const cs = getCanvasSizeCfg();
+      const lockIcon = cs.lockAspect ? '🔒' : '📐';
+      pill.textContent = `${lockIcon} ${formatRatioLabel(cs)}`;
+      pill.title = `출력 크기: ${cs.width}×${cs.height} (${formatRatioLabel(cs)}, ${cs.dpi}DPI) — 클릭하여 비율·크기 조절`;
+    }
+
+    function applyCanvasSizeChange(field, rawVal, rerenderInsp = true) {
+      const cs = getCanvasSizeCfg();
+      if (field === 'lockAspect') {
+        cs.lockAspect = Boolean(rawVal);
+        if (cs.lockAspect) {
+          if (cs.preset === 'fit') cs.preset = 'custom';
+          const ratio = cs.width / Math.max(1, cs.height);
+          cs.aspectW = Number(ratio.toFixed(2));
+          cs.aspectH = 1;
+        }
+      } else if (field === 'preset') {
+        cs.preset = String(rawVal);
+        if (CANVAS_PRESETS[cs.preset]) {
+          const p = CANVAS_PRESETS[cs.preset];
+          cs.width = p.width;
+          cs.height = p.height;
+          cs.aspectW = p.aspectW;
+          cs.aspectH = p.aspectH;
+          cs.lockAspect = true;
+        } else if (cs.preset === 'fit') {
+          cs.lockAspect = false;
+        }
+      } else if (field === 'ratioSlider') {
+        const ratio = Math.max(0.45, Math.min(2.6, Number(rawVal) || 1.333));
+        cs.preset = 'custom';
+        cs.aspectW = Number(ratio.toFixed(2));
+        cs.aspectH = 1;
+        cs.height = Math.max(240, Math.min(2000, Math.round(cs.width / ratio)));
+      } else if (field === 'aspectW') {
+        const aw = Math.max(0.2, Math.min(50, Number(rawVal) || 4));
+        cs.preset = 'custom';
+        cs.aspectW = aw;
+        cs.height = Math.max(240, Math.min(2000, Math.round(cs.width * (cs.aspectH / aw))));
+      } else if (field === 'aspectH') {
+        const ah = Math.max(0.2, Math.min(50, Number(rawVal) || 3));
+        cs.preset = 'custom';
+        cs.aspectH = ah;
+        cs.height = Math.max(240, Math.min(2000, Math.round(cs.width * (ah / cs.aspectW))));
+      } else if (field === 'width') {
+        const w = Math.max(300, Math.min(2400, Math.round(Number(rawVal) || 800)));
+        cs.preset = 'custom';
+        cs.width = w;
+        if (cs.lockAspect) {
+          cs.height = Math.max(240, Math.min(2000, Math.round(w * (cs.aspectH / Math.max(0.1, cs.aspectW)))));
+        } else {
+          cs.aspectW = Number((cs.width / Math.max(1, cs.height)).toFixed(2));
+          cs.aspectH = 1;
+        }
+      } else if (field === 'height') {
+        const h = Math.max(240, Math.min(2000, Math.round(Number(rawVal) || 600)));
+        cs.preset = 'custom';
+        cs.height = h;
+        if (cs.lockAspect) {
+          cs.width = Math.max(300, Math.min(2400, Math.round(h * (cs.aspectW / Math.max(0.1, cs.aspectH)))));
+        } else {
+          cs.aspectW = Number((cs.width / Math.max(1, cs.height)).toFixed(2));
+          cs.aspectH = 1;
+        }
+      } else if (field === 'dpi') {
+        cs.dpi = [150, 300, 600].includes(Number(rawVal)) ? Number(rawVal) : 300;
+      }
+
+      notifyConfigChange();
+      updateSizePill();
+      renderPlot();
+      if (rerenderInsp) renderInspector();
+    }
+
+    function openSizePopover(anchorEl) {
+      closePopups();
+      const cs = getCanvasSizeCfg();
+      const ratioVal = Number((cs.width / Math.max(1, cs.height)).toFixed(2));
+      const scale = getDpiScale(cs.dpi);
+      const shellRect = plotShell.getBoundingClientRect();
+      const btnRect = anchorEl.getBoundingClientRect();
+      const left = Math.max(8, Math.min(shellRect.width - 282, btnRect.left - shellRect.left - 110));
+      const top = Math.max(36, btnRect.bottom - shellRect.top + 4);
+
+      floatPopover.innerHTML = `
+        <div class="origin-pop-head">
+          <span>📐 그래프 비율 · 저장 크기</span>
+          <button type="button" class="origin-pop-close" data-pclose="1">✕</button>
+        </div>
+        <label class="insp-check" style="font-weight:600;">
+          <input type="checkbox" data-sp="lockAspect" ${cs.lockAspect ? 'checked' : ''}> 🔒 비율 유지 (창 크기와 무관하게 고정)
+        </label>
+        <div class="origin-ratio-chips">
+          <button type="button" class="sb-tb-btn ${cs.preset === '4:3' ? 'active' : ''}" data-sppreset="4:3">4:3</button>
+          <button type="button" class="sb-tb-btn ${cs.preset === '16:9' ? 'active' : ''}" data-sppreset="16:9">16:9</button>
+          <button type="button" class="sb-tb-btn ${cs.preset === '3:2' ? 'active' : ''}" data-sppreset="3:2">3:2</button>
+          <button type="button" class="sb-tb-btn ${cs.preset === '1:1' ? 'active' : ''}" data-sppreset="1:1">1:1</button>
+          <button type="button" class="sb-tb-btn ${cs.preset === '5:4' ? 'active' : ''}" data-sppreset="5:4">5:4</button>
+        </div>
+        <label class="insp-field">
+          <span>가로/세로 비율 조정 (<b data-sp="ratio-lbl">${ratioVal} : 1</b>)</span>
+          <input type="range" data-sp="ratioSlider" min="0.5" max="2.4" step="0.05" value="${Math.max(0.5, Math.min(2.4, ratioVal))}">
+        </label>
+        <div class="insp-grid-2">
+          <label class="insp-field"><span>비율 가로</span><input type="number" data-sp="aspectW" value="${cs.aspectW}" min="0.5" max="50" step="0.1"></label>
+          <label class="insp-field"><span>비율 세로</span><input type="number" data-sp="aspectH" value="${cs.aspectH}" min="0.5" max="50" step="0.1"></label>
+          <label class="insp-field"><span>저장 너비 (px)</span><input type="number" data-sp="width" value="${cs.width}" min="300" max="2400" step="20"></label>
+          <label class="insp-field"><span>저장 높이 (px)</span><input type="number" data-sp="height" value="${cs.height}" min="240" max="2000" step="20"></label>
+        </div>
+        <div class="origin-pop-sub" data-sp="summary">SVG: ${cs.width}×${cs.height} · PNG(${cs.dpi}DPI): ${cs.width * scale}×${cs.height * scale}px</div>
+      `;
+      floatPopover.style.left = `${left}px`;
+      floatPopover.style.top = `${top}px`;
+      floatPopover.style.display = 'flex';
+
+      const refreshPopoverFields = () => {
+        const cur = getCanvasSizeCfg();
+        const r = Number((cur.width / Math.max(1, cur.height)).toFixed(2));
+        const sc = getDpiScale(cur.dpi);
+        const inpW = floatPopover.querySelector('[data-sp="width"]');
+        const inpH = floatPopover.querySelector('[data-sp="height"]');
+        const inpAW = floatPopover.querySelector('[data-sp="aspectW"]');
+        const inpAH = floatPopover.querySelector('[data-sp="aspectH"]');
+        const sl = floatPopover.querySelector('[data-sp="ratioSlider"]');
+        const lbl = floatPopover.querySelector('[data-sp="ratio-lbl"]');
+        const sum = floatPopover.querySelector('[data-sp="summary"]');
+        const chk = floatPopover.querySelector('[data-sp="lockAspect"]');
+        if (chk) chk.checked = cur.lockAspect;
+        if (inpW && document.activeElement !== inpW) inpW.value = cur.width;
+        if (inpH && document.activeElement !== inpH) inpH.value = cur.height;
+        if (inpAW && document.activeElement !== inpAW) inpAW.value = cur.aspectW;
+        if (inpAH && document.activeElement !== inpAH) inpAH.value = cur.aspectH;
+        if (sl && document.activeElement !== sl) sl.value = Math.max(0.5, Math.min(2.4, r));
+        if (lbl) lbl.textContent = `${r} : 1`;
+        if (sum) sum.textContent = `SVG: ${cur.width}×${cur.height} · PNG(${cur.dpi}DPI): ${cur.width * sc}×${cur.height * sc}px`;
+        floatPopover.querySelectorAll('[data-sppreset]').forEach((b) => b.classList.toggle('active', b.dataset.sppreset === cur.preset));
+      };
+
+      floatPopover.querySelector('[data-pclose]').addEventListener('click', () => { floatPopover.style.display = 'none'; });
+      floatPopover.querySelectorAll('[data-sppreset]').forEach((b) => {
+        b.addEventListener('click', () => {
+          applyCanvasSizeChange('preset', b.dataset.sppreset, true);
+          refreshPopoverFields();
+        });
+      });
+      floatPopover.querySelectorAll('[data-sp]').forEach((el) => {
+        const key = el.dataset.sp;
+        if (key === 'ratio-lbl' || key === 'summary') return;
+        const evName = el.type === 'range' ? 'input' : 'change';
+        el.addEventListener(evName, () => {
+          applyCanvasSizeChange(key, el.type === 'checkbox' ? el.checked : el.value, true);
+          refreshPopoverFields();
+        });
+      });
+    }
+
     // ================= Main SVG Renderer =================
     function renderPlot() {
       if (typeof callbacks.extractDataset === 'function') {
         currentDataset = callbacks.extractDataset(plotConfig);
       }
 
-      const rect = svgStage.getBoundingClientRect();
-      const W = Math.max(280, Math.round(rect.width || 480));
-      const H = Math.max(260, Math.round(rect.height || 380));
+      const cs = getCanvasSizeCfg();
+      const stageRect = svgStage.getBoundingClientRect();
+      const stageW = Math.max(240, Math.round(stageRect.width || 480));
+      const stageH = Math.max(200, Math.round(stageRect.height || 380));
+      const isFitMode = cs.preset === 'fit' && !cs.lockAspect;
+
+      const W = isFitMode
+        ? Math.max(280, stageW)
+        : Math.max(300, Math.min(2400, Math.round(Number(cs.width) || 800)));
+      const H = isFitMode
+        ? Math.max(240, stageH)
+        : Math.max(240, Math.min(2000, Math.round(Number(cs.height) || 600)));
+
+      updateSizePill();
 
       const visibleSeries = currentDataset.series
         .map((s, idx) => ({ ...s, style: getSeriesStyle(s.colIdx, idx) }))
@@ -1481,8 +1705,35 @@
         width: W,
         height: H,
         viewBox: `0 0 ${W} ${H}`,
-        class: 'origin-plot-svg'
+        preserveAspectRatio: 'xMidYMid meet',
+        class: `origin-plot-svg${isFitMode ? '' : ' fixed-ratio'}`
       });
+
+      if (!isFitMode) {
+        const availW = Math.max(160, stageW - 16);
+        const availH = Math.max(140, stageH - 16);
+        const fitScale = Math.min(availW / W, availH / H);
+        svg.style.width = `${Math.max(140, Math.round(W * fitScale))}px`;
+        svg.style.height = `${Math.max(120, Math.round(H * fitScale))}px`;
+      } else {
+        svg.style.width = '100%';
+        svg.style.height = '100%';
+      }
+
+      const clientToSvg = (clientX, clientY) => {
+        const r = svg.getBoundingClientRect();
+        return {
+          x: ((clientX - r.left) / Math.max(1, r.width)) * W,
+          y: ((clientY - r.top) / Math.max(1, r.height)) * H
+        };
+      };
+      const getSvgScale = () => {
+        const r = svg.getBoundingClientRect();
+        return {
+          sx: W / Math.max(1, r.width),
+          sy: H / Math.max(1, r.height)
+        };
+      };
 
       svg.appendChild(createSvgEl('rect', { x: 0, y: 0, width: W, height: H, fill: '#ffffff' }));
 
@@ -1930,8 +2181,9 @@
           const startX = e.clientX;
           const startY = e.clientY;
           const startFs = legFs;
+          const { sx: scX, sy: scY } = getSvgScale();
           const onMove = (ev) => {
-            const delta = ((ev.clientX - startX) + (ev.clientY - startY)) * 0.08;
+            const delta = ((ev.clientX - startX) * scX + (ev.clientY - startY) * scY) * 0.06;
             plotConfig.legendStyle.fontSize = Math.max(8, Math.min(24, Math.round((startFs + delta) * 2) / 2));
             renderPlot();
           };
@@ -1954,9 +2206,10 @@
           const startX = e.clientX, startY = e.clientY;
           const origPx = plotConfig.legendPos.x * pw;
           const origPy = plotConfig.legendPos.y * ph;
+          const { sx: scX, sy: scY } = getSvgScale();
           const onMove = (ev) => {
-            plotConfig.legendPos.x = Math.max(0.01, Math.min(0.95, (origPx + (ev.clientX - startX)) / pw));
-            plotConfig.legendPos.y = Math.max(0.01, Math.min(0.92, (origPy + (ev.clientY - startY)) / ph));
+            plotConfig.legendPos.x = Math.max(0.01, Math.min(0.95, (origPx + (ev.clientX - startX) * scX) / pw));
+            plotConfig.legendPos.y = Math.max(0.01, Math.min(0.92, (origPy + (ev.clientY - startY) * scY) / ph));
             renderPlot();
           };
           const onUp = () => {
@@ -2042,11 +2295,12 @@
           const startX = e.clientX, startY = e.clientY;
           const origX = (annot.x ?? 0.5) * W;
           const origY = (annot.y ?? 0.2) * H;
+          const { sx: scX, sy: scY } = getSvgScale();
           let moved = false;
           const onMove = (ev) => {
             if (Math.abs(ev.clientX - startX) > 2 || Math.abs(ev.clientY - startY) > 2) moved = true;
-            annot.x = Math.max(0.01, Math.min(0.95, (origX + (ev.clientX - startX)) / W));
-            annot.y = Math.max(0.01, Math.min(0.92, (origY + (ev.clientY - startY)) / H));
+            annot.x = Math.max(0.01, Math.min(0.95, (origX + (ev.clientX - startX) * scX) / W));
+            annot.y = Math.max(0.01, Math.min(0.92, (origY + (ev.clientY - startY) * scY) / H));
             renderPlot();
           };
           const onUp = () => {
@@ -2104,9 +2358,9 @@
           renderPlot();
         }
 
-        const svgRect = svg.getBoundingClientRect();
-        const sx = e.clientX - svgRect.left;
-        const sy = e.clientY - svgRect.top;
+        const startPt = clientToSvg(e.clientX, e.clientY);
+        const sx = startPt.x;
+        const sy = startPt.y;
         if (sx < margin.left || sx > margin.left + pw || sy < margin.top || sy > margin.top + ph) return;
 
         if (interactionMode === 'zoom') {
@@ -2119,8 +2373,9 @@
           overlayG.appendChild(zoomBox);
 
           const onMove = (ev) => {
-            const cx = Math.max(margin.left, Math.min(margin.left + pw, ev.clientX - svgRect.left));
-            const cy = Math.max(margin.top, Math.min(margin.top + ph, ev.clientY - svgRect.top));
+            const curPt = clientToSvg(ev.clientX, ev.clientY);
+            const cx = Math.max(margin.left, Math.min(margin.left + pw, curPt.x));
+            const cy = Math.max(margin.top, Math.min(margin.top + ph, curPt.y));
             zoomBox.setAttribute('x', String(Math.min(sx, cx)));
             zoomBox.setAttribute('y', String(Math.min(sy, cy)));
             zoomBox.setAttribute('width', String(Math.abs(cx - sx)));
@@ -2129,8 +2384,9 @@
           const onUp = (ev) => {
             document.removeEventListener('mousemove', onMove);
             document.removeEventListener('mouseup', onUp);
-            const cx = Math.max(margin.left, Math.min(margin.left + pw, ev.clientX - svgRect.left));
-            const cy = Math.max(margin.top, Math.min(margin.top + ph, ev.clientY - svgRect.top));
+            const curPt = clientToSvg(ev.clientX, ev.clientY);
+            const cx = Math.max(margin.left, Math.min(margin.left + pw, curPt.x));
+            const cy = Math.max(margin.top, Math.min(margin.top + ph, curPt.y));
             overlayG.innerHTML = '';
             if (Math.abs(cx - sx) > 14 && Math.abs(cy - sy) > 14) {
               zoomState = {
@@ -2151,9 +2407,9 @@
         e.preventDefault();
         openPlotContextMenu(e.clientX, e.clientY, [
           { label: 'T 여기에 텍스트 삽입...', action: () => {
-            const svgRect = svg.getBoundingClientRect();
-            const nx = Math.max(0.05, Math.min(0.82, (e.clientX - svgRect.left) / W));
-            const ny = Math.max(0.05, Math.min(0.85, (e.clientY - svgRect.top) / H));
+            const pt = clientToSvg(e.clientX, e.clientY);
+            const nx = Math.max(0.05, Math.min(0.82, pt.x / W));
+            const ny = Math.max(0.05, Math.min(0.85, pt.y / H));
             openTextAnnotationEditor({
               id: `txt-${Date.now()}`,
               text: '메모 텍스트',
@@ -2169,9 +2425,9 @@
 
       svg.addEventListener('mousemove', (e) => {
         if (interactionMode !== 'reader' || allScreenPoints.length === 0) return;
-        const svgRect = svg.getBoundingClientRect();
-        const mx = e.clientX - svgRect.left;
-        const my = e.clientY - svgRect.top;
+        const pt = clientToSvg(e.clientX, e.clientY);
+        const mx = pt.x;
+        const my = pt.y;
         if (mx < margin.left || mx > margin.left + pw || my < margin.top || my > margin.top + ph) {
           overlayG.innerHTML = '';
           readerHud.style.display = 'none';
@@ -2207,15 +2463,21 @@
       updateSelectionHud();
     }
 
-    // ---- Export SVG & 300 DPI PNG (Clean publication output without UI handles) ----
+    // ---- Export SVG & High-DPI PNG (Fixed configured size & ratio, independent of window size) ----
     function buildCleanExportSvg() {
       const clone = currentSvgEl.cloneNode(true);
       clone.querySelectorAll('.origin-ui-only').forEach((el) => el.remove());
+      clone.removeAttribute('style');
+      if (lastRenderGeometry) {
+        clone.setAttribute('width', String(lastRenderGeometry.W));
+        clone.setAttribute('height', String(lastRenderGeometry.H));
+        clone.setAttribute('viewBox', `0 0 ${lastRenderGeometry.W} ${lastRenderGeometry.H}`);
+      }
       return clone;
     }
 
     function exportSvg(baseName = 'origin-plot') {
-      if (!currentSvgEl) return;
+      if (!currentSvgEl || !lastRenderGeometry) return;
       const clone = buildCleanExportSvg();
       const svgStr = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(clone);
       const blob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
@@ -2225,42 +2487,48 @@
       a.download = `${baseName}.svg`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
-      toast(`⬇️ 벡터 그래프(${baseName}.svg) 저장됨`);
+      toast(`⬇️ 벡터 SVG 저장됨 (${lastRenderGeometry.W}×${lastRenderGeometry.H}, ${baseName}.svg)`);
     }
 
     function exportPng300Dpi(baseName = 'origin-plot') {
       if (!currentSvgEl || !lastRenderGeometry) return;
+      const cs = getCanvasSizeCfg();
+      const dpi = cs.dpi || 300;
+      const scale = getDpiScale(dpi);
+      const outW = lastRenderGeometry.W * scale;
+      const outH = lastRenderGeometry.H * scale;
       const clone = buildCleanExportSvg();
       const svgStr = new XMLSerializer().serializeToString(clone);
-      const url = URL.createObjectURL(new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' }));
+      const dataUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgStr);
       const img = new Image();
       img.onload = () => {
-        const scale = 4;
         const canvas = document.createElement('canvas');
-        canvas.width = lastRenderGeometry.W * scale;
-        canvas.height = lastRenderGeometry.H * scale;
+        canvas.width = outW;
+        canvas.height = outH;
         const ctx = canvas.getContext('2d');
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         ctx.scale(scale, scale);
         ctx.drawImage(img, 0, 0, lastRenderGeometry.W, lastRenderGeometry.H);
-        URL.revokeObjectURL(url);
-        canvas.toBlob((pngBlob) => {
-          if (!pngBlob) return;
-          const pngUrl = URL.createObjectURL(pngBlob);
-          const a = document.createElement('a');
-          a.href = pngUrl;
-          a.download = `${baseName}_300dpi.png`;
-          a.click();
-          setTimeout(() => URL.revokeObjectURL(pngUrl), 10000);
-          toast(`🖼️ 고해상도 300DPI PNG(${baseName}_300dpi.png) 저장됨`);
-        }, 'image/png');
+        try {
+          canvas.toBlob((pngBlob) => {
+            if (!pngBlob) return;
+            const pngUrl = URL.createObjectURL(pngBlob);
+            const a = document.createElement('a');
+            a.href = pngUrl;
+            a.download = `${baseName}_${dpi}dpi.png`;
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(pngUrl), 10000);
+            toast(`🖼️ ${dpi}DPI PNG 저장됨 (${outW}×${outH}px)`);
+          }, 'image/png');
+        } catch (_) {
+          toast('⚠️ PNG 변환에 실패했습니다. SVG 내보내기를 이용해 주세요.');
+        }
       };
       img.onerror = () => {
-        URL.revokeObjectURL(url);
         toast('⚠️ PNG 변환에 실패했습니다.');
       };
-      img.src = url;
+      img.src = dataUrl;
     }
 
     // ---- Right Plot Inspector Sidebar ----
@@ -2310,6 +2578,9 @@
 
       const fitCount = (plotConfig.fitOverlays || []).length;
       const ptOverrideCount = Object.keys(plotConfig.pointOverrides || {}).length;
+      const cs = getCanvasSizeCfg();
+      const curRatio = Number((cs.width / Math.max(1, cs.height)).toFixed(2));
+      const pngScale = getDpiScale(cs.dpi);
 
       inspectorContainer.innerHTML = `
         <div class="insp-head">
@@ -2319,6 +2590,42 @@
           </div>
         </div>
         <div class="insp-body">
+          <div class="insp-sec">
+            <div class="insp-sec-title">📐 그래프 크기 · 비율 · 저장</div>
+            <label class="insp-check" style="font-weight:600;">
+              <input type="checkbox" data-cprop="lockAspect" ${cs.lockAspect ? 'checked' : ''}> 🔒 비율 유지 (창 크기와 무관하게 고정)
+            </label>
+            <label class="insp-field"><span>비율 프리셋</span>
+              <select data-cprop="preset">
+                <option value="4:3" ${cs.preset === '4:3' ? 'selected' : ''}>4:3 논문 표준 (800×600)</option>
+                <option value="16:9" ${cs.preset === '16:9' ? 'selected' : ''}>16:9 발표/PPT (960×540)</option>
+                <option value="3:2" ${cs.preset === '3:2' ? 'selected' : ''}>3:2 저널 표준 (900×600)</option>
+                <option value="1:1" ${cs.preset === '1:1' ? 'selected' : ''}>1:1 정사각형 (680×680)</option>
+                <option value="5:4" ${cs.preset === '5:4' ? 'selected' : ''}>5:4 보고서 (800×640)</option>
+                <option value="custom" ${cs.preset === 'custom' ? 'selected' : ''}>사용자 지정 (직접 조절)</option>
+                <option value="fit" ${cs.preset === 'fit' ? 'selected' : ''}>창 크기에 맞춤 (비율 해제)</option>
+              </select>
+            </label>
+            <label class="insp-field">
+              <span>비율 슬라이더 (<b data-role="insp-ratio-val">${curRatio} : 1</b>)</span>
+              <input type="range" data-cprop="ratioSlider" min="0.5" max="2.4" step="0.05" value="${Math.max(0.5, Math.min(2.4, curRatio))}">
+            </label>
+            <div class="insp-grid-2">
+              <label class="insp-field"><span>비율 가로</span><input type="number" data-cprop="aspectW" value="${cs.aspectW}" min="0.5" max="50" step="0.1"></label>
+              <label class="insp-field"><span>비율 세로</span><input type="number" data-cprop="aspectH" value="${cs.aspectH}" min="0.5" max="50" step="0.1"></label>
+              <label class="insp-field"><span>저장 너비 (px)</span><input type="number" data-cprop="width" value="${cs.width}" min="300" max="2400" step="20"></label>
+              <label class="insp-field"><span>저장 높이 (px)</span><input type="number" data-cprop="height" value="${cs.height}" min="240" max="2000" step="20"></label>
+            </div>
+            <label class="insp-field"><span>PNG 저장 해상도</span>
+              <select data-cprop="dpi">
+                <option value="150" ${cs.dpi === 150 ? 'selected' : ''}>150 DPI (${cs.width * 2}×${cs.height * 2}px)</option>
+                <option value="300" ${cs.dpi === 300 ? 'selected' : ''}>300 DPI 논문급 (${cs.width * 4}×${cs.height * 4}px)</option>
+                <option value="600" ${cs.dpi === 600 ? 'selected' : ''}>600 DPI 초고화질 (${cs.width * 6}×${cs.height * 6}px)</option>
+              </select>
+            </label>
+            <div class="origin-export-meta" data-role="insp-export-meta">저장 출력: SVG ${cs.width}×${cs.height} · PNG ${cs.width * pngScale}×${cs.height * pngScale}px</div>
+          </div>
+
           <div class="insp-sec">
             <div class="insp-sec-title">기본 스타일 · 범례 · 텍스트</div>
             <label class="insp-field"><span>그래프 제목 (LaTeX)</span><input type="text" data-prop="title" value="${escHtml(plotConfig.title)}" placeholder="예: \\Delta P vs Q"></label>
@@ -2410,6 +2717,32 @@
     if (inspectorContainer) {
       inspectorContainer.addEventListener('input', (e) => {
         const el = e.target;
+        if (el.dataset.cprop) {
+          const key = el.dataset.cprop;
+          if (key === 'ratioSlider') {
+            applyCanvasSizeChange('ratioSlider', el.value, false);
+            const cs = getCanvasSizeCfg();
+            const r = Number((cs.width / Math.max(1, cs.height)).toFixed(2));
+            const sc = getDpiScale(cs.dpi);
+            const rLbl = inspectorContainer.querySelector('[data-role="insp-ratio-val"]');
+            if (rLbl) rLbl.textContent = `${r} : 1`;
+            const wInp = inspectorContainer.querySelector('[data-cprop="width"]');
+            const hInp = inspectorContainer.querySelector('[data-cprop="height"]');
+            const awInp = inspectorContainer.querySelector('[data-cprop="aspectW"]');
+            const ahInp = inspectorContainer.querySelector('[data-cprop="aspectH"]');
+            const preSel = inspectorContainer.querySelector('[data-cprop="preset"]');
+            const meta = inspectorContainer.querySelector('[data-role="insp-export-meta"]');
+            if (wInp) wInp.value = cs.width;
+            if (hInp) hInp.value = cs.height;
+            if (awInp) awInp.value = cs.aspectW;
+            if (ahInp) ahInp.value = cs.aspectH;
+            if (preSel) preSel.value = cs.preset;
+            if (meta) meta.textContent = `저장 출력: SVG ${cs.width}×${cs.height} · PNG ${cs.width * sc}×${cs.height * sc}px`;
+          } else if (el.type === 'checkbox' || el.tagName === 'SELECT') {
+            applyCanvasSizeChange(key, el.type === 'checkbox' ? el.checked : el.value, true);
+          }
+          return;
+        }
         if (el.dataset.prop) {
           plotConfig[el.dataset.prop] = el.type === 'checkbox' ? el.checked : el.value;
           notifyConfigChange();
@@ -2428,6 +2761,13 @@
           const val = el.type === 'checkbox' ? el.checked : (el.type === 'number' ? Number(el.value) : el.value);
           updateSeriesStyle(colIdx, { [el.dataset.sprop]: val });
           if (el.dataset.sprop === 'yAxis') renderInspector();
+        }
+      });
+
+      inspectorContainer.addEventListener('change', (e) => {
+        const el = e.target;
+        if (el.dataset.cprop && el.type === 'number') {
+          applyCanvasSizeChange(el.dataset.cprop, el.value, true);
         }
       });
 
@@ -2506,6 +2846,8 @@
       } else if (tool === 'reset-zoom') {
         zoomState = null;
         renderPlot();
+      } else if (tool === 'size-popover') {
+        openSizePopover(btn);
       } else if (tool === 'export-svg') {
         exportSvg(callbacks.getFileName ? callbacks.getFileName() : 'origin-plot');
       } else if (tool === 'export-png') {

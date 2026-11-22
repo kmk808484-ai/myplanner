@@ -25,6 +25,8 @@
 
   const {
     createEmptyWorkbook,
+    EXAMPLE_CATALOG,
+    createExampleWorkbook,
     normalizeWorkbook,
     parseArrayBufferToWorkbook,
     exportWorkbookToXlsxBlob,
@@ -253,6 +255,8 @@
     let selAnchor = { r: 0, c: 0 };
     let selFocus = { r: 0, c: 0 };
     let isSelecting = false;
+    let isSelectingCols = false;
+    let isSelectingRows = false;
     let isFillDragging = false;
     let fillTarget = null;
     let editingCell = null; // { r, c, source: 'cell'|'formula' }
@@ -639,7 +643,7 @@
             <button type="button" class="xl-big-btn" data-cmd="export-json"><span class="xl-big-ico">💾</span><span>프로젝트</span></button>
             <button type="button" class="xl-big-btn" data-cmd="ask-ai"><span class="xl-big-ico">🤖</span><span>AI 분석</span></button>
           </div>
-          <div class="xl-rgroup-lbl">파일 · AI</div>
+          <div class="xl-rgroup-lbl">파일 입출력</div>
         </div>
       </div>
 
@@ -794,6 +798,11 @@
     inlineEditor.autocomplete = 'off';
     inlineEditor.spellcheck = false;
     gridWrap.appendChild(inlineEditor);
+
+    const selOverlay = document.createElement('div');
+    selOverlay.className = 'sb-sel-overlay';
+    selOverlay.style.display = 'none';
+    gridWrap.appendChild(selOverlay);
 
     const fillHandle = document.createElement('div');
     fillHandle.className = 'sb-fill-handle';
@@ -996,16 +1005,37 @@
     }
 
     function positionFillHandle() {
-      const { r2, c2 } = getNormRange();
-      const td = tdMatrix[r2]?.[c2];
-      if (!td || editingCell || td.style.display === 'none') {
+      const { r1, r2, c1, c2 } = getNormRange();
+      const td1 = tdMatrix[r1]?.[c1];
+      const td2 = tdMatrix[r2]?.[c2];
+      const scale = zoomLevel / 100;
+
+      if (td1 && td2 && (r1 !== r2 || c1 !== c2) && td1.style.display !== 'none' && td2.style.display !== 'none') {
+        selOverlay.style.display = 'block';
+        selOverlay.style.left = `${td1.offsetLeft * scale}px`;
+        selOverlay.style.top = `${td1.offsetTop * scale}px`;
+        selOverlay.style.width = `${Math.max(0, (td2.offsetLeft + td2.offsetWidth - td1.offsetLeft) * scale)}px`;
+        selOverlay.style.height = `${Math.max(0, (td2.offsetTop + td2.offsetHeight - td1.offsetTop) * scale)}px`;
+      } else {
+        selOverlay.style.display = 'none';
+      }
+
+      if (!td2 || editingCell || td2.style.display === 'none') {
         fillHandle.style.display = 'none';
         return;
       }
-      const scale = zoomLevel / 100;
       fillHandle.style.display = 'block';
-      fillHandle.style.left = `${(td.offsetLeft + td.offsetWidth) * scale - 5}px`;
-      fillHandle.style.top = `${(td.offsetTop + td.offsetHeight) * scale - 5}px`;
+      fillHandle.style.left = `${(td2.offsetLeft + td2.offsetWidth) * scale - 5}px`;
+      fillHandle.style.top = `${(td2.offsetTop + td2.offsetHeight) * scale - 5}px`;
+    }
+
+    function selectAllCells() {
+      const sheet = getSheet();
+      commitEdit();
+      selAnchor = { r: 0, c: 0 };
+      selFocus = { r: Math.max(0, sheet.rows - 1), c: Math.max(0, sheet.cols - 1) };
+      updateSelectionVisuals();
+      root.focus({ preventScroll: true });
     }
 
     function recordRecentFn(fnName) {
@@ -1371,12 +1401,11 @@
       const headTr = document.createElement('tr');
       const cornerTh = document.createElement('th');
       cornerTh.className = 'sb-corner-th';
-      cornerTh.title = '전체 선택';
-      cornerTh.addEventListener('click', () => {
-        commitEdit();
-        selAnchor = { r: 0, c: 0 };
-        selFocus = { r: sheet.rows - 1, c: sheet.cols - 1 };
-        updateSelectionVisuals();
+      cornerTh.title = '전체 선택 (Ctrl+A)';
+      cornerTh.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        selectAllCells();
       });
       headTr.appendChild(cornerTh);
 
@@ -1407,8 +1436,21 @@
 
         th.addEventListener('mousedown', (e) => {
           if (e.button !== 0 || e.target.classList.contains('sb-col-resizer') || e.target.classList.contains('origin-role-badge')) return;
+          e.preventDefault();
           commitEdit();
-          selAnchor = { r: 0, c };
+          if (e.shiftKey) {
+            selAnchor = { r: 0, c: selAnchor.c };
+            selFocus = { r: sheet.rows - 1, c };
+          } else {
+            selAnchor = { r: 0, c };
+            selFocus = { r: sheet.rows - 1, c };
+          }
+          isSelectingCols = true;
+          updateSelectionVisuals();
+          root.focus({ preventScroll: true });
+        });
+        th.addEventListener('mouseover', () => {
+          if (!isSelectingCols) return;
           selFocus = { r: sheet.rows - 1, c };
           updateSelectionVisuals();
         });
@@ -1494,8 +1536,21 @@
         rowTh.textContent = String(r + 1);
         rowTh.addEventListener('mousedown', (e) => {
           if (e.button !== 0) return;
+          e.preventDefault();
           commitEdit();
-          selAnchor = { r, c: 0 };
+          if (e.shiftKey) {
+            selAnchor = { r: selAnchor.r, c: 0 };
+            selFocus = { r, c: sheet.cols - 1 };
+          } else {
+            selAnchor = { r, c: 0 };
+            selFocus = { r, c: sheet.cols - 1 };
+          }
+          isSelectingRows = true;
+          updateSelectionVisuals();
+          root.focus({ preventScroll: true });
+        });
+        rowTh.addEventListener('mouseover', () => {
+          if (!isSelectingRows) return;
           selFocus = { r, c: sheet.cols - 1 };
           updateSelectionVisuals();
         });
@@ -1634,6 +1689,12 @@
         if (colTh) colTh.classList.add('hdr-active');
       }
 
+      const cornerEl = thead.querySelector('.sb-corner-th');
+      if (cornerEl) {
+        const isAllSelected = r1 === 0 && c1 === 0 && r2 === sheet.rows - 1 && c2 === sheet.cols - 1;
+        cornerEl.classList.toggle('all-selected', isAllSelected);
+      }
+
       const activeTd = tdMatrix[selAnchor.r]?.[selAnchor.c];
       if (activeTd) activeTd.classList.add('active-cell');
 
@@ -1692,12 +1753,23 @@
       const freezeInfo = (sheet.freeze?.rows || sheet.freeze?.cols)
         ? ` · ❄️틀고정(${sheet.freeze.rows}행/${sheet.freeze.cols}열)` : '';
 
+      const rowSpan = r2 - r1 + 1;
+      const colSpan = c2 - c1 + 1;
+      const totalSelected = rowSpan * colSpan;
+      const isMulti = totalSelected > 1;
+
       if (nonEmpty <= 1 && nums.length === 0) {
-        elStats.textContent = `준비  |  ${cellKey(selAnchor.r, selAnchor.c)}${freezeInfo}`;
+        if (isMulti) {
+          elStats.textContent = `선택: ${rowSpan}행 × ${colSpan}열 (${totalSelected.toLocaleString()}셀)  |  ${cellKey(r1, c1)}:${cellKey(r2, c2)}${freezeInfo}`;
+        } else {
+          elStats.textContent = `준비  |  ${cellKey(selAnchor.r, selAnchor.c)}${freezeInfo}`;
+        }
         return;
       }
 
-      const parts = [`개수: ${nonEmpty}`];
+      const parts = [];
+      if (isMulti) parts.push(`${rowSpan}행×${colSpan}열`);
+      parts.push(`개수: ${nonEmpty}`);
       if (nums.length > 0) {
         const sum = nums.reduce((a, b) => a + b, 0);
         const avg = sum / nums.length;
@@ -1766,6 +1838,9 @@
       const prevRaw = sheet.cells[cellKey(r, c)]?.raw || '';
 
       editingCell = null;
+      formulaDragStartCell = null;
+      formulaRefInsertStart = null;
+      formulaRefInsertEnd = null;
       inlineEditor.style.display = 'none';
 
       if (newVal !== prevRaw) {
@@ -1783,12 +1858,25 @@
     function cancelEdit() {
       if (!editingCell) return;
       editingCell = null;
+      formulaDragStartCell = null;
+      formulaRefInsertStart = null;
+      formulaRefInsertEnd = null;
       inlineEditor.style.display = 'none';
       updateSelectionVisuals();
       root.focus({ preventScroll: true });
     }
 
-    inlineEditor.addEventListener('input', () => { elFormulaInput.value = inlineEditor.value; });
+    inlineEditor.addEventListener('input', () => {
+      elFormulaInput.value = inlineEditor.value;
+      formulaDragStartCell = null;
+      formulaRefInsertStart = null;
+      formulaRefInsertEnd = null;
+    });
+    elFormulaInput.addEventListener('input', () => {
+      formulaDragStartCell = null;
+      formulaRefInsertStart = null;
+      formulaRefInsertEnd = null;
+    });
     elFormulaInput.addEventListener('focus', () => {
       if (!editingCell) {
         editingCell = { r: selAnchor.r, c: selAnchor.c, source: 'formula' };
@@ -1857,6 +1945,13 @@
 
       if (editingCell && isEditingFormula()) {
         e.preventDefault();
+        if (e.shiftKey && formulaDragStartCell) {
+          const refText = (r === formulaDragStartCell.r && c === formulaDragStartCell.c)
+            ? cellKey(r, c)
+            : `${cellKey(Math.min(formulaDragStartCell.r, r), Math.min(formulaDragStartCell.c, c))}:${cellKey(Math.max(formulaDragStartCell.r, r), Math.max(formulaDragStartCell.c, c))}`;
+          insertRefIntoFormula(refText, true);
+          return;
+        }
         formulaDragStartCell = { r, c };
         insertRefIntoFormula(cellKey(r, c), false);
         const onFormulaMove = (ev) => {
@@ -1871,15 +1966,13 @@
         const onFormulaUp = () => {
           document.removeEventListener('mousemove', onFormulaMove);
           document.removeEventListener('mouseup', onFormulaUp);
-          formulaDragStartCell = null;
-          formulaRefInsertStart = null;
-          formulaRefInsertEnd = null;
         };
         document.addEventListener('mousemove', onFormulaMove);
         document.addEventListener('mouseup', onFormulaUp);
         return;
       }
 
+      e.preventDefault();
       commitEdit();
       if (e.shiftKey) selFocus = { r, c };
       else { selAnchor = { r, c }; selFocus = { r, c }; }
@@ -1975,6 +2068,8 @@
     }
 
     const onGlobalMouseUp = () => {
+      isSelectingCols = false;
+      isSelectingRows = false;
       if (isSelecting) {
         isSelecting = false;
         if (formatPainterStyle) {
@@ -2458,6 +2553,46 @@
       tdMatrix[nr]?.[nc]?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     }
 
+    function jumpToDataEdge(dr, dc, extend = false) {
+      const sheet = getSheet();
+      const start = extend ? selFocus : selAnchor;
+      const hasVal = (r, c) => {
+        const raw = sheet.cells[cellKey(r, c)]?.raw;
+        return raw !== undefined && raw !== null && String(raw).trim() !== '';
+      };
+      const inBounds = (r, c) => r >= 0 && r < sheet.rows && c >= 0 && c < sheet.cols;
+
+      let r = start.r;
+      let c = start.c;
+      const nr1 = r + dr;
+      const nc1 = c + dc;
+      if (!inBounds(nr1, nc1)) return;
+
+      const curFilled = hasVal(r, c);
+      const nextFilled = hasVal(nr1, nc1);
+
+      if (curFilled && nextFilled) {
+        // Move to last contiguous filled cell
+        while (inBounds(r + dr, c + dc) && hasVal(r + dr, c + dc)) {
+          r += dr;
+          c += dc;
+        }
+      } else {
+        // Skip blanks to first filled cell (or sheet boundary)
+        r = nr1;
+        c = nc1;
+        while (inBounds(r + dr, c + dc) && !hasVal(r, c)) {
+          r += dr;
+          c += dc;
+        }
+      }
+
+      if (extend) selFocus = { r, c };
+      else { selAnchor = { r, c }; selFocus = { r, c }; }
+      updateSelectionVisuals();
+      tdMatrix[r]?.[c]?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+
     function applyStyleToSelection(patchFn) {
       const sheet = getSheet();
       const { r1, r2, c1, c2 } = getNormRange();
@@ -2632,26 +2767,115 @@
       updateSelectionVisuals();
     }
 
+    function loadExampleIntoWorkbook(exampleId, asNewSheet = false) {
+      if (typeof createExampleWorkbook !== 'function') return;
+      commitEdit();
+      const exWb = createExampleWorkbook(exampleId);
+      const exSheet = exWb.sheets[0];
+      if (!exSheet) return;
+      pushUndo();
+
+      if (asNewSheet) {
+        let base = exSheet.name;
+        let candidate = base;
+        let n = 2;
+        while (workbook.sheets.some((s) => s.name === candidate)) candidate = `${base} ${n++}`;
+        exSheet.name = candidate;
+        workbook.sheets.push(exSheet);
+        workbook.activeSheet = workbook.sheets.length - 1;
+      } else {
+        workbook.sheets[workbook.activeSheet] = exSheet;
+      }
+
+      evaluator = createEvaluator(workbook);
+      selAnchor = { r: 0, c: 0 };
+      selFocus = { r: 0, c: 0 };
+      markDirty();
+      setAppMode('origin');
+      setViewMode('split');
+      if (plotController) {
+        plotController.setConfig(getSheet().plotConfig);
+        setTimeout(() => plotController.refresh(), 50);
+      }
+      renderGridStructure();
+      const info = (EXAMPLE_CATALOG || []).find((x) => x.id === exampleId);
+      toast(`🎨 예제 불러옴: ${info ? info.name : exSheet.name} (Ctrl+Z로 되돌리기 가능)`);
+    }
+
+    function openExamplesGalleryModal() {
+      const catalog = Array.isArray(EXAMPLE_CATALOG) ? EXAMPLE_CATALOG : [];
+      const cardsHtml = catalog.map((ex) => `
+        <div class="xl-ex-card">
+          <div class="xl-ex-top">
+            <span class="xl-ex-icon">${ex.icon}</span>
+            <div class="xl-ex-meta">
+              <div class="xl-ex-name">${escHtml(ex.name)}</div>
+              <div class="xl-ex-badge">${escHtml(ex.badge)}</div>
+            </div>
+          </div>
+          <div class="xl-ex-desc">${escHtml(ex.desc)}</div>
+          <div class="xl-ex-actions">
+            <button type="button" class="sb-tb-btn primary" data-ex-load="${escHtml(ex.id)}" data-ex-mode="replace">✨ 현재 시트에 열기</button>
+            <button type="button" class="sb-tb-btn" data-ex-load="${escHtml(ex.id)}" data-ex-mode="new">➕ 새 시트로 추가</button>
+          </div>
+        </div>
+      `).join('');
+
+      subModal.innerHTML = `
+        <div class="xl-submodal-card" style="max-width:560px;">
+          <div class="xl-submodal-head">
+            <span>🎨 Origin 그래프 예제 갤러리 (${catalog.length}종)</span>
+            <button type="button" class="sb-tb-btn" data-smclose="1">✕</button>
+          </div>
+          <div class="xl-submodal-body" style="max-height:68vh;overflow-y:auto;">
+            <div class="insp-empty">원하는 공학·과학 그래프 예제를 선택하면 데이터와 Origin 그래프 스타일·피팅·주석이 함께 열립니다.</div>
+            <div class="xl-ex-grid">${cardsHtml}</div>
+          </div>
+          <div class="xl-submodal-foot">
+            <button type="button" class="sb-tb-btn" data-smclose="1">닫기</button>
+          </div>
+        </div>
+      `;
+      subModal.style.display = 'flex';
+      subModal.querySelectorAll('[data-ex-load]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const exId = btn.dataset.exLoad;
+          const asNew = btn.dataset.exMode === 'new';
+          subModal.style.display = 'none';
+          loadExampleIntoWorkbook(exId, asNew);
+        });
+      });
+    }
+
     // ---- Floating Ribbon Dropdown Builder ----
     function openRibbonDropdown(kind, anchorEl) {
       const rootRect = root.getBoundingClientRect();
       const btnRect = anchorEl.getBoundingClientRect();
-      const left = Math.max(6, Math.min(rootRect.width - 250, btnRect.left - rootRect.left));
+      const left = Math.max(6, Math.min(rootRect.width - 270, btnRect.left - rootRect.left));
       const top = btnRect.bottom - rootRect.top + 2;
 
       let html = '';
       if (kind === 'file-menu') {
+        const exList = Array.isArray(EXAMPLE_CATALOG) ? EXAMPLE_CATALOG : [];
+        const exQuickHtml = exList.map((ex) =>
+          `<button type="button" data-ddex="${escHtml(ex.id)}">${ex.icon} ${escHtml(ex.name)}</button>`
+        ).join('');
+        const aiBtnHtml = options.hideAI ? '' : '<hr><button type="button" data-ddcmd="ask-ai">🤖 현재 시트로 AI 분석 질문</button>';
         html = `
           <div class="xl-dd-title">파일 작업</div>
           <button type="button" data-ddcmd="save">💾 저장 (Ctrl+S)</button>
           <button type="button" data-ddcmd="import-file">📂 CSV / Excel(.xlsx) 불러오기</button>
           <hr>
+          <div class="xl-dd-title">예제 (Origin 그래프 샘플)</div>
+          <button type="button" data-ddcmd="open-examples" style="font-weight:700;color:#1d4ed8;">🎨 그래프 예제 갤러리 보기 (${exList.length}종)...</button>
+          ${exQuickHtml}
+          <hr>
+          <div class="xl-dd-title">내보내기 · 프로젝트</div>
           <button type="button" data-ddcmd="export-xlsx">⬇️ Excel (.xlsx) 내보내기</button>
           <button type="button" data-ddcmd="export-csv">📄 CSV 내보내기</button>
           <button type="button" data-ddcmd="export-json">💾 Origin 프로젝트(.json) 저장</button>
           <button type="button" data-ddcmd="import-json">📥 Origin 프로젝트 열기</button>
-          <hr>
-          <button type="button" data-ddcmd="ask-ai">🤖 현재 시트로 AI 분석 질문</button>
+          ${aiBtnHtml}
         `;
       } else if (kind === 'borders') {
         html = `
@@ -2765,6 +2989,7 @@
       ribbonDropdown.style.display = 'none';
 
       if (btn.dataset.ddcmd) { handleCommand(btn.dataset.ddcmd); return; }
+      if (btn.dataset.ddex) { loadExampleIntoWorkbook(btn.dataset.ddex, false); return; }
       if (btn.dataset.ddzoom) { setZoom(Number(btn.dataset.ddzoom)); return; }
       if (btn.dataset.ddsym) { insertTextIntoCellOrEditor(btn.dataset.ddsym); return; }
       if (btn.dataset.ddeq !== undefined) {
@@ -2891,30 +3116,65 @@
 
       if (e.ctrlKey || e.metaKey) {
         const k = e.key.toLowerCase();
-        if (k === 's') { e.preventDefault(); triggerSave(); return; }
-        if (k === 'z') { e.preventDefault(); doUndo(); return; }
-        if (k === 'y') { e.preventDefault(); doRedo(); return; }
-        if (k === 'c') { e.preventDefault(); copySelection(false); return; }
-        if (k === 'x') { e.preventDefault(); copySelection(true); return; }
-        if (k === 'v') { e.preventDefault(); pasteAtSelection(null); return; }
-        if (k === 'f') { e.preventDefault(); handleCommand('open-find'); return; }
-        if (k === 'l' && e.shiftKey) { e.preventDefault(); handleCommand('toggle-filter'); return; }
-        if (k === 'b') { e.preventDefault(); handleCommand('bold'); return; }
-        if (k === 'i') { e.preventDefault(); handleCommand('italic'); return; }
-        if (k === 'u') { e.preventDefault(); handleCommand('underline'); return; }
-        if (e.key === '+' || (e.shiftKey && e.key === '=')) { e.preventDefault(); insertRowAt(selAnchor.r); return; }
-        if (e.key === '-') { e.preventDefault(); deleteRowAt(selAnchor.r); return; }
+        if (k === 'a') { e.preventDefault(); e.stopPropagation(); selectAllCells(); return; }
+        if (k === 's') { e.preventDefault(); e.stopPropagation(); triggerSave(); return; }
+        if (k === 'z') { e.preventDefault(); e.stopPropagation(); doUndo(); return; }
+        if (k === 'y') { e.preventDefault(); e.stopPropagation(); doRedo(); return; }
+        if (k === 'c') { e.preventDefault(); e.stopPropagation(); copySelection(false); return; }
+        if (k === 'x') { e.preventDefault(); e.stopPropagation(); copySelection(true); return; }
+        if (k === 'v') { e.preventDefault(); e.stopPropagation(); pasteAtSelection(null); return; }
+        if (k === 'f') { e.preventDefault(); e.stopPropagation(); handleCommand('open-find'); return; }
+        if (k === 'l' && e.shiftKey) { e.preventDefault(); e.stopPropagation(); handleCommand('toggle-filter'); return; }
+        if (k === 'b') { e.preventDefault(); e.stopPropagation(); handleCommand('bold'); return; }
+        if (k === 'i') { e.preventDefault(); e.stopPropagation(); handleCommand('italic'); return; }
+        if (k === 'u') { e.preventDefault(); e.stopPropagation(); handleCommand('underline'); return; }
+        if (e.key === '+' || (e.shiftKey && e.key === '=')) { e.preventDefault(); e.stopPropagation(); insertRowAt(selAnchor.r); return; }
+        if (e.key === '-') { e.preventDefault(); e.stopPropagation(); deleteRowAt(selAnchor.r); return; }
+        if (e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); jumpToDataEdge(-1, 0, e.shiftKey); return; }
+        if (e.key === 'ArrowDown') { e.preventDefault(); e.stopPropagation(); jumpToDataEdge(1, 0, e.shiftKey); return; }
+        if (e.key === 'ArrowLeft') { e.preventDefault(); e.stopPropagation(); jumpToDataEdge(0, -1, e.shiftKey); return; }
+        if (e.key === 'ArrowRight') { e.preventDefault(); e.stopPropagation(); jumpToDataEdge(0, 1, e.shiftKey); return; }
+        if (e.key === 'Home') {
+          e.preventDefault(); e.stopPropagation();
+          if (e.shiftKey) selFocus = { r: 0, c: 0 };
+          else { selAnchor = { r: 0, c: 0 }; selFocus = { r: 0, c: 0 }; }
+          updateSelectionVisuals();
+          tdMatrix[0]?.[0]?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+          return;
+        }
+        if (e.key === 'End') {
+          e.preventDefault(); e.stopPropagation();
+          const b = getUsedBounds(getSheet());
+          const er = Math.max(0, b.maxR), ec = Math.max(0, b.maxC);
+          if (e.shiftKey) selFocus = { r: er, c: ec };
+          else { selAnchor = { r: er, c: ec }; selFocus = { r: er, c: ec }; }
+          updateSelectionVisuals();
+          tdMatrix[er]?.[ec]?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+          return;
+        }
       }
 
-      if (e.key === 'ArrowUp') { e.preventDefault(); moveSelection(-1, 0, e.shiftKey); return; }
-      if (e.key === 'ArrowDown') { e.preventDefault(); moveSelection(1, 0, e.shiftKey); return; }
-      if (e.key === 'ArrowLeft') { e.preventDefault(); moveSelection(0, -1, e.shiftKey); return; }
-      if (e.key === 'ArrowRight') { e.preventDefault(); moveSelection(0, 1, e.shiftKey); return; }
-      if (e.key === 'Tab') { e.preventDefault(); moveSelection(0, e.shiftKey ? -1 : 1, false); return; }
-      if (e.key === 'Enter' || e.key === 'F2') { e.preventDefault(); startEdit(selAnchor.r, selAnchor.c, null, 'cell'); return; }
-      if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); clearSelectionCells('contents'); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); moveSelection(-1, 0, e.shiftKey); return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); e.stopPropagation(); moveSelection(1, 0, e.shiftKey); return; }
+      if (e.key === 'ArrowLeft') { e.preventDefault(); e.stopPropagation(); moveSelection(0, -1, e.shiftKey); return; }
+      if (e.key === 'ArrowRight') { e.preventDefault(); e.stopPropagation(); moveSelection(0, 1, e.shiftKey); return; }
+      if (e.key === 'PageUp') { e.preventDefault(); e.stopPropagation(); moveSelection(-15, 0, e.shiftKey); return; }
+      if (e.key === 'PageDown') { e.preventDefault(); e.stopPropagation(); moveSelection(15, 0, e.shiftKey); return; }
+      if (e.key === 'Home') {
+        e.preventDefault(); e.stopPropagation();
+        const tr = e.shiftKey ? selFocus.r : selAnchor.r;
+        if (e.shiftKey) selFocus = { r: tr, c: 0 };
+        else { selAnchor = { r: tr, c: 0 }; selFocus = { r: tr, c: 0 }; }
+        updateSelectionVisuals();
+        tdMatrix[tr]?.[0]?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        return;
+      }
+      if (e.key === 'Tab') { e.preventDefault(); e.stopPropagation(); moveSelection(0, e.shiftKey ? -1 : 1, false); return; }
+      if (e.key === 'Enter' || e.key === 'F2') { e.preventDefault(); e.stopPropagation(); startEdit(selAnchor.r, selAnchor.c, null, 'cell'); return; }
+      if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); e.stopPropagation(); clearSelectionCells('contents'); return; }
       if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
+        e.stopPropagation();
         startEdit(selAnchor.r, selAnchor.c, e.key, 'cell');
       }
     });
@@ -3187,7 +3447,9 @@
       if (cmd === 'export-csv') { triggerExportCsv(); return; }
       if (cmd === 'export-json') { triggerExportJsonProject(); return; }
       if (cmd === 'import-json') { importJsonInput.click(); return; }
+      if (cmd === 'open-examples') { openExamplesGalleryModal(); return; }
       if (cmd === 'ask-ai') {
+        if (options.hideAI) return;
         commitEdit();
         if (typeof options.onAskAI === 'function') options.onAskAI(cloneWorkbook(workbook), workbookToMarkdownSummary(workbook));
         return;
@@ -3323,6 +3585,7 @@
     });
 
     // Initial render
+    if (options.hideAI) root.classList.add('hide-ai');
     renderGridStructure();
     if (appMode === 'origin' && viewMode !== 'sheet') setViewMode(viewMode);
 
@@ -3334,6 +3597,8 @@
       setAppMode,
       setViewMode,
       setZoom,
+      loadExample: loadExampleIntoWorkbook,
+      openExamplesGallery: openExamplesGalleryModal,
       getPlotController() { return plotController; },
       // Live sync from another open window ("새 창") viewing the SAME file
       syncWorkbook(externalWb) {
