@@ -1,7 +1,7 @@
 (function () {
   'use strict';
 
-  const { DEFAULT_FIREBASE_CONFIG, state, getActiveUserEmail, switchUser, clearActiveWorkspace, genId, regenerateIds, persistFS, persistSettings, persistChat, getSyncMeta, setSyncMeta, saveStateForUndo, findNodeAndParent, isDescendant, getPathToNode, searchNodes, collectDocsInFolder, getTheme, setTheme } = window.BrainStore;
+  const { DEFAULT_FIREBASE_CONFIG, state, getActiveUserEmail, switchUser, clearActiveWorkspace, normalizeParaWorkspace, findParaEntity, resolveAnyNode, persistParaEntities, archiveParaEntity, removeParaEntity, renameParaEntity, declareParaEntity, getParaEntities, getUnassignedNodes, genId, regenerateIds, persistFS, persistSettings, persistChat, persistRelations, persistPinnedApps, addRelation, removeRelation, getRelationsForNode, collectAllNodes, getSortMode, setSortMode, getSyncMeta, setSyncMeta, saveStateForUndo, findNodeAndParent, isDescendant, getPathToNode, searchNodes, collectDocsInFolder, getTheme, setTheme } = window.BrainStore;
   const { PROVIDERS, sendChat } = window.BrainAI;
   const { render: renderMarkdown, escapeHtml } = window.BrainMarkdown;
   const BrainAuth = window.BrainAuth;
@@ -17,6 +17,8 @@
   let isGuestMode = false;
   let searchQuery = '';
   let offlineBannerDismissed = false;
+  let currentSortMode = getSortMode();
+  let isHomeMode = false;
 
   // Desktop multi-selection & marquee state
   let selectedItemIds = new Set();
@@ -41,6 +43,9 @@
   const $ = (id) => document.getElementById(id);
 
   const elTreeRoot = $('tree-root');
+  const elParaTreeRoot = $('para-tree-root');
+  let activeParaView = null; // null | { mode: 'entity', entityId } | { mode: 'unassigned' }
+  const paraCollapsedCats = new Set();
   const elBreadcrumb = $('breadcrumb');
   const elContentArea = $('content-area');
   const elContextMenu = $('context-menu');
@@ -153,34 +158,366 @@
       t.classList.toggle('active', t.dataset.tab === tabName);
     });
     $('panel-preview').classList.toggle('active', tabName === 'preview');
+    $('panel-relations')?.classList.toggle('active', tabName === 'relations');
     $('panel-chat').classList.toggle('active', tabName === 'chat');
-    if (tabName === 'chat') {
+    if (tabName === 'relations') {
+      if (typeof renderRelationsDbPanel === 'function') renderRelationsDbPanel();
+    } else if (tabName === 'chat') {
       elChatMessages.scrollTop = elChatMessages.scrollHeight;
       elChatInput.focus();
     }
   }
 
   $('tab-preview').addEventListener('click', () => switchRightTab('preview'));
+  $('tab-relations')?.addEventListener('click', () => switchRightTab('relations'));
   $('tab-chat').addEventListener('click', () => switchRightTab('chat'));
 
-  // ================= File System Rendering =================
+  // ================= File System & Dual Tree (PARA Virtual Tree + Physical Storage Tree) =================
+  const PARA_TREE_CATS = [
+    { type: 'project', num: 1, label: '1. 프로젝트', icon: '🚀' },
+    { type: 'area', num: 2, label: '2. 영역', icon: '🧭' },
+    { type: 'resource', num: 3, label: '3. 리소스', icon: '📚' },
+    { type: 'archive', num: 4, label: '4. 아카이브', icon: '📦' }
+  ];
+
+  function getVirtualFilesForParaEntity(entity) {
+    if (!entity) return [];
+    const map = new Map();
+    (state.relations || []).forEach((r) => {
+      if (r.sourceId === entity.id || r.targetId === entity.id) {
+        const otherId = r.sourceId === entity.id ? r.targetId : r.sourceId;
+        const found = findNodeAndParent(otherId)?.node;
+        if (found && isItemVisible(found)) {
+          map.set(found.id, { node: found, rel: r });
+        }
+      }
+    });
+    return Array.from(map.values());
+  }
+
+  function createParaEntityRowEl(ent, fallbackIcon, numLabel) {
+    const linkedList = getVirtualFilesForParaEntity(ent);
+    const isActive = activeParaView && activeParaView.mode === 'entity' && activeParaView.entityId === ent.id && !searchQuery;
+    const isArchived = Boolean(ent.archived);
+    const row = document.createElement('li');
+    row.className = 'para-entity-row' + (isActive ? ' active' : '');
+    row.title = `${numLabel} ${ent.name} — 물리 파일을 드래그해 놓으면 연결됩니다`;
+    row.innerHTML =
+      `<span class="tree-num-prefix">${escapeHtml(numLabel)}</span>` +
+      `<span>${ent.icon || fallbackIcon}</span>` +
+      `<span class="para-entity-name">${escapeHtml(ent.name)}</span>` +
+      `<span class="para-entity-meta">` +
+      `  <span class="para-entity-badge">${linkedList.length}</span>` +
+      `  <button type="button" class="para-entity-act-btn" title="${isArchived ? '활성 목록으로 복원' : '4. 아카이브로 보내기 (소속 유지)'}">${isArchived ? '↩️' : '📦'}</button>` +
+      `  <button type="button" class="para-entity-del" title="선언 삭제 (물리 파일은 유지됨)">✕</button>` +
+      `</span>`;
+
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('.para-entity-del') || e.target.closest('.para-entity-act-btn')) return;
+      clearSearch(false);
+      openParaVirtualView({ mode: 'entity', entityId: ent.id });
+    });
+
+    row.querySelector('.para-entity-act-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (archiveParaEntity(ent.id, !isArchived)) {
+        saveAndRender();
+        if (typeof refreshHomeDashboard === 'function') refreshHomeDashboard();
+        showToast(
+          !isArchived
+            ? `📦 "${ent.name}"이(가) 4. 아카이브(${ent.tag || ent.paraType})로 이동했습니다. (기존 연결·소속 그대로 유지)`
+            : `↩️ "${ent.name}"이(가) 활성 목록으로 복원되었습니다.`
+        );
+      }
+    });
+
+    row.querySelector('.para-entity-del').addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (removeParaEntity(ent.id)) {
+        if (activeParaView?.entityId === ent.id) {
+          openFolder(state.currentFolder || state.fileSystem);
+        }
+        saveAndRender();
+        if (typeof refreshHomeDashboard === 'function') refreshHomeDashboard();
+        showToast(`"${ent.name}" 항목이 제거되었습니다. (물리 파일은 그대로 보존됨)`);
+      }
+    });
+
+    // 물리 파일을 PARA 엔티티 위로 드래그 앤 드롭하면 즉시 관계 연결
+    row.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      row.classList.add('folder-drag-hover');
+    });
+    row.addEventListener('dragleave', () => row.classList.remove('folder-drag-hover'));
+    row.addEventListener('drop', (e) => {
+      e.preventDefault();
+      row.classList.remove('folder-drag-hover');
+      let dragIds = [];
+      try {
+        const raw = e.dataTransfer.getData('application/x-brain-ids');
+        if (raw) dragIds = JSON.parse(raw);
+      } catch (_) {}
+      if (dragIds.length === 0) {
+        const single = e.dataTransfer.getData('text/plain');
+        if (single) dragIds = [single];
+      }
+      let linkedCnt = 0;
+      dragIds.forEach((fid) => {
+        const found = findNodeAndParent(fid)?.node;
+        if (found && found.id !== 'root') {
+          if (addRelation({ sourceId: found.id, targetId: ent.id, type: ent.paraType })) {
+            linkedCnt++;
+          }
+        }
+      });
+      if (linkedCnt > 0) {
+        scheduleDriveSync();
+        renderParaTree();
+        if (activeParaView?.entityId === ent.id) openParaVirtualView(activeParaView);
+        if (state.selectedItem) renderDetailRelations(state.selectedItem);
+        if (typeof renderRelationsDbPanel === 'function') renderRelationsDbPanel();
+        if (typeof refreshHomeDashboard === 'function') refreshHomeDashboard();
+        showToast(`🔗 ${linkedCnt}개 파일이 "${ent.name}"에 연결되었습니다.`);
+      }
+    });
+
+    return row;
+  }
+
+  function renderParaTree() {
+    if (!elParaTreeRoot) return;
+    elParaTreeRoot.innerHTML = '';
+
+    // 1~3: 활성 프로젝트 · 영역 · 리소스 (하위 자동 넘버링 1.1, 1.2...)
+    PARA_TREE_CATS.filter((c) => c.type !== 'archive').forEach((cat) => {
+      const entities = getParaEntities(cat.type, { onlyActive: true });
+      const isCollapsed = paraCollapsedCats.has(cat.type);
+      const li = document.createElement('li');
+      li.className = 'para-cat-item';
+
+      const head = document.createElement('div');
+      head.className = 'para-cat-head';
+      head.innerHTML =
+        `<div class="para-cat-left">` +
+        `  <span style="font-size:0.65rem; width:10px;">${isCollapsed ? '▶' : '▼'}</span>` +
+        `  <span>${cat.icon}</span>` +
+        `  <span>${escapeHtml(cat.label)}</span>` +
+        `  <span class="para-cat-count">(${entities.length})</span>` +
+        `</div>` +
+        `<button type="button" class="para-cat-add" title="${escapeHtml(cat.label)} 선언 추가">＋</button>`;
+
+      head.addEventListener('click', (e) => {
+        if (e.target.closest('.para-cat-add')) return;
+        if (isCollapsed) paraCollapsedCats.delete(cat.type);
+        else paraCollapsedCats.add(cat.type);
+        renderParaTree();
+      });
+
+      head.querySelector('.para-cat-add').addEventListener('click', (e) => {
+        e.stopPropagation();
+        switchRightTab('relations');
+        if (typeof openDeclareForm === 'function') {
+          openDeclareForm(cat.type);
+        }
+      });
+
+      li.appendChild(head);
+
+      if (!isCollapsed) {
+        const ul = document.createElement('ul');
+        ul.className = 'para-entity-list';
+
+        if (entities.length === 0) {
+          const emptyRow = document.createElement('li');
+          emptyRow.style.cssText = 'font-size:0.71rem; color:var(--text-muted); padding:3px 10px 5px;';
+          emptyRow.textContent = '선언된 항목 없음 (＋로 선언)';
+          ul.appendChild(emptyRow);
+        } else {
+          entities.forEach((ent, idx) => {
+            const numLabel = `${cat.num}.${idx + 1}`;
+            ul.appendChild(createParaEntityRowEl(ent, cat.icon, numLabel));
+          });
+        }
+        li.appendChild(ul);
+      }
+      elParaTreeRoot.appendChild(li);
+    });
+
+    // 4. 아카이브: 내부에도 프로젝트(4.1) · 영역(4.2) · 리소스(4.3)로 따로 분류하여 큰 틀의 소속 유지
+    const archivedAll = getParaEntities('archive');
+    const isArchCollapsed = paraCollapsedCats.has('archive');
+    const archLi = document.createElement('li');
+    archLi.className = 'para-cat-item';
+
+    const archHead = document.createElement('div');
+    archHead.className = 'para-cat-head';
+    archHead.innerHTML =
+      `<div class="para-cat-left">` +
+      `  <span style="font-size:0.65rem; width:10px;">${isArchCollapsed ? '▶' : '▼'}</span>` +
+      `  <span>📦</span>` +
+      `  <span>4. 아카이브</span>` +
+      `  <span class="para-cat-count">(${archivedAll.length})</span>` +
+      `</div>`;
+    archHead.addEventListener('click', () => {
+      if (isArchCollapsed) paraCollapsedCats.delete('archive');
+      else paraCollapsedCats.add('archive');
+      renderParaTree();
+    });
+    archLi.appendChild(archHead);
+
+    if (!isArchCollapsed) {
+      const archUl = document.createElement('ul');
+      archUl.className = 'para-entity-list';
+      const subDefs = [
+        { subType: 'project', subNum: '4.1', label: '프로젝트', icon: '🚀' },
+        { subType: 'area', subNum: '4.2', label: '영역', icon: '🧭' },
+        { subType: 'resource', subNum: '4.3', label: '리소스', icon: '📚' }
+      ];
+
+      subDefs.forEach((sd) => {
+        const subItems = getParaEntities(sd.subType, { onlyArchived: true });
+        const subKey = `arch:${sd.subType}`;
+        const subCollapsed = paraCollapsedCats.has(subKey);
+        const subLi = document.createElement('li');
+        subLi.className = 'para-archive-subcat';
+
+        const subHead = document.createElement('div');
+        subHead.className = 'para-archive-subhead';
+        subHead.innerHTML =
+          `<div class="para-cat-left">` +
+          `  <span style="font-size:0.6rem; width:9px;">${subCollapsed ? '▶' : '▼'}</span>` +
+          `  <span class="tree-num-prefix">${sd.subNum}</span>` +
+          `  <span>${sd.icon} ${sd.label}</span>` +
+          `  <span class="para-cat-count">(${subItems.length})</span>` +
+          `</div>`;
+        subHead.addEventListener('click', () => {
+          if (subCollapsed) paraCollapsedCats.delete(subKey);
+          else paraCollapsedCats.add(subKey);
+          renderParaTree();
+        });
+        subLi.appendChild(subHead);
+
+        if (!subCollapsed) {
+          const subUl = document.createElement('ul');
+          subUl.className = 'para-archive-sublist';
+          if (subItems.length === 0) {
+            const emptySub = document.createElement('li');
+            emptySub.style.cssText = 'font-size:0.68rem; color:var(--text-muted); padding:2px 8px 4px;';
+            emptySub.textContent = '아카이브된 항목 없음';
+            subUl.appendChild(emptySub);
+          } else {
+            subItems.forEach((ent, idx) => {
+              const numLabel = `${sd.subNum}.${idx + 1}`;
+              subUl.appendChild(createParaEntityRowEl(ent, sd.icon, numLabel));
+            });
+          }
+          subLi.appendChild(subUl);
+        }
+        archUl.appendChild(subLi);
+      });
+
+      archLi.appendChild(archUl);
+    }
+    elParaTreeRoot.appendChild(archLi);
+
+    // 미분류(지정필요) 바로가기 — 3개 영역(프로젝트·영역·리소스) 중 하나만 충족해도 즉시 해제됨
+    const unassigned = getUnassignedNodes(isItemVisible);
+    const unRow = document.createElement('li');
+    const isUnActive = activeParaView && activeParaView.mode === 'unassigned' && !searchQuery;
+    unRow.className = 'para-entity-row' + (isUnActive ? ' active' : '');
+    unRow.style.marginTop = '4px';
+    unRow.innerHTML =
+      `<span>⚠️</span>` +
+      `<span class="para-entity-name">미지정 (지정필요)</span>` +
+      `<span class="para-entity-meta"><span class="para-entity-badge">${unassigned.length}</span></span>`;
+    unRow.addEventListener('click', () => {
+      clearSearch(false);
+      openParaVirtualView({ mode: 'unassigned' });
+    });
+    elParaTreeRoot.appendChild(unRow);
+  }
+
+  function openParaVirtualView(viewSpec) {
+    activeParaView = viewSpec;
+    selectedItemIds.clear();
+    lastClickedItemId = null;
+    renderParaTree();
+    renderTree(state.fileSystem, elTreeRoot, true);
+
+    if (viewSpec?.mode === 'unassigned') {
+      const items = getUnassignedNodes(isItemVisible);
+      renderBreadcrumb(null);
+      renderItemsGrid(items, '미지정 파일이 없습니다.', {
+        isVirtual: true,
+        bannerTitle: '⚠️ 미지정 파일'
+      });
+      return;
+    }
+
+    const ent = findParaEntity(viewSpec?.entityId);
+    if (!ent) {
+      openFolder(state.currentFolder || state.fileSystem);
+      return;
+    }
+    const pairs = getVirtualFilesForParaEntity(ent);
+    const items = pairs.map((p) => p.node);
+    const relByNodeId = new Map(pairs.map((p) => [p.node.id, p.rel]));
+    renderBreadcrumb(null);
+    renderItemsGrid(
+      items,
+      '연결된 파일이 없습니다.',
+      {
+        isVirtual: true,
+        paraEntity: ent,
+        relByNodeId,
+        bannerTitle: `${ent.icon} ${ent.name}`
+      }
+    );
+  }
+
   function saveAndRender(options = {}) {
     persistFS(options);
+    renderParaTree();
     renderTree(state.fileSystem, elTreeRoot, true);
     if (searchQuery) renderSearchResults(searchQuery);
+    else if (activeParaView) openParaVirtualView(activeParaView);
     else openFolder(state.currentFolder);
     renderContextChips();
+    if (typeof renderRelationsDbPanel === 'function') renderRelationsDbPanel();
     if (!options.skipDriveSync) {
       scheduleDriveSync();
     }
   }
 
-  function renderTree(node, container, isRoot = false) {
+  function sortNodesList(items) {
+    const mode = currentSortMode || 'default';
+    const collator = new Intl.Collator('ko', { numeric: true, sensitivity: 'base' });
+    return [...(items || [])].sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
+      if (mode === 'name-asc') {
+        return collator.compare(String(a.name || ''), String(b.name || ''));
+      }
+      if (mode === 'name-desc') {
+        return collator.compare(String(b.name || ''), String(a.name || ''));
+      }
+      if (mode === 'type-asc') {
+        const extA = String(a.name || '').includes('.') ? String(a.name).split('.').pop().toLowerCase() : '';
+        const extB = String(b.name || '').includes('.') ? String(b.name).split('.').pop().toLowerCase() : '';
+        const extCmp = collator.compare(extA, extB);
+        if (extCmp !== 0) return extCmp;
+        return collator.compare(String(a.name || ''), String(b.name || ''));
+      }
+      return 0;
+    });
+  }
+
+  function renderTree(node, container, isRoot = false, numPrefix = '') {
     if (isRoot) container.innerHTML = '';
     const li = document.createElement('li');
     const div = document.createElement('div');
-    div.className = 'tree-node' + (state.currentFolder && state.currentFolder.id === node.id && !searchQuery ? ' active' : '');
-    div.innerHTML = `<span>${node.icon || '📁'}</span> <span>${escapeHtml(node.name)}</span>`;
+    div.className = 'tree-node' + (!activeParaView && state.currentFolder && state.currentFolder.id === node.id && !searchQuery ? ' active' : '');
+    const prefixHtml = numPrefix ? `<span class="tree-num-prefix">${escapeHtml(numPrefix)}</span> ` : '';
+    div.innerHTML = `${prefixHtml}<span>${node.icon || '📁'}</span> <span>${escapeHtml(node.name)}</span>`;
 
     if (node.type === 'folder') {
       div.addEventListener('dragover', (e) => {
@@ -202,12 +539,36 @@
       renderTree(state.fileSystem, elTreeRoot, true);
     });
 
+    // 좌측 폴더 트리 우클릭 컨텍스트 메뉴 지원
+    div.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      clearSearch(false);
+      openFolder(node);
+      renderTree(state.fileSystem, elTreeRoot, true);
+      if (node.id !== 'root') {
+        selectedItemIds = new Set([node.id]);
+        lastClickedItemId = node.id;
+        selectItem(node);
+      } else {
+        selectedItemIds.clear();
+        state.selectedItem = null;
+      }
+      showContextMenu(e);
+    });
+
     li.appendChild(div);
     if (node.children) {
-      const subFolders = node.children.filter((c) => c.type === 'folder' && isItemVisible(c));
+      let subFolders = node.children.filter((c) => c.type === 'folder' && isItemVisible(c));
+      if (currentSortMode === 'name-asc' || currentSortMode === 'name-desc') {
+        subFolders = sortNodesList(subFolders);
+      }
       if (subFolders.length > 0) {
         const ul = document.createElement('ul');
-        subFolders.forEach((child) => renderTree(child, ul));
+        subFolders.forEach((child, idx) => {
+          const childNum = numPrefix ? `${numPrefix}.${idx + 1}` : `${idx + 1}.`;
+          renderTree(child, ul, false, childNum);
+        });
         li.appendChild(ul);
       }
     }
@@ -221,6 +582,34 @@
       span.className = 'crumb current';
       span.textContent = `🔍 "${searchQuery}" 검색 결과`;
       elBreadcrumb.appendChild(span);
+      return;
+    }
+
+    if (activeParaView) {
+      const rootCrumb = document.createElement('span');
+      rootCrumb.className = 'crumb';
+      rootCrumb.textContent = '🧭 PARA 트리';
+      rootCrumb.addEventListener('click', () => {
+        openFolder(state.currentFolder || state.fileSystem);
+        renderTree(state.fileSystem, elTreeRoot, true);
+      });
+      elBreadcrumb.appendChild(rootCrumb);
+
+      const sep1 = document.createElement('span');
+      sep1.className = 'crumb-sep';
+      sep1.textContent = '›';
+      elBreadcrumb.appendChild(sep1);
+
+      const curCrumb = document.createElement('span');
+      curCrumb.className = 'crumb current';
+      if (activeParaView.mode === 'unassigned') {
+        curCrumb.textContent = '⚠️ 미분류 (지정필요 가상 뷰)';
+      } else {
+        const ent = findParaEntity(activeParaView.entityId);
+        const catMeta = PARA_TREE_CATS.find((c) => c.type === ent?.paraType);
+        curCrumb.textContent = ent ? `${catMeta ? catMeta.label + ' › ' : ''}${ent.icon} ${ent.name} (관계 가상 뷰)` : '가상 뷰';
+      }
+      elBreadcrumb.appendChild(curCrumb);
       return;
     }
 
@@ -334,9 +723,25 @@
     setSelectedItemIds(ids, ids[ids.length - 1]);
   }
 
-  function renderItemsGrid(items, emptyMessage) {
+  function renderItemsGrid(items, emptyMessage, virtualOpts = null) {
     elContentArea.innerHTML = '';
     updateLocalLockBanner();
+
+    if (virtualOpts?.isVirtual) {
+      const banner = document.createElement('div');
+      banner.className = 'para-virtual-banner';
+      banner.innerHTML =
+        `<div>` +
+        `  <div style="font-weight:750; margin-bottom:2px;">${escapeHtml(virtualOpts.bannerTitle || '🔗 관계 가상 뷰')}</div>` +
+        `  <div style="font-size:0.72rem; color:var(--text-sub);">${escapeHtml(virtualOpts.bannerSub || '')}</div>` +
+        `</div>` +
+        `<button type="button" class="btn-xs-inline" id="btn-exit-para-virtual">💾 물리 보관소로 돌아가기</button>`;
+      banner.querySelector('#btn-exit-para-virtual')?.addEventListener('click', () => {
+        openFolder(state.currentFolder || state.fileSystem);
+        renderTree(state.fileSystem, elTreeRoot, true);
+      });
+      elContentArea.appendChild(banner);
+    }
 
     const visibleItems = (items || []).filter((item) => isItemVisible(item));
     if (visibleItems.length === 0) {
@@ -348,24 +753,37 @@
       return;
     }
 
-    // 폴더 먼저, 그 다음 문서
-    const sorted = [...visibleItems].sort((a, b) => {
-      if (a.type === b.type) return 0;
-      return a.type === 'folder' ? -1 : 1;
-    });
+    // 폴더 먼저, 그 다음 선택된 정렬 기준 적용
+    const sorted = sortNodesList(visibleItems);
     currentRenderedItems = sorted;
 
     sorted.forEach((item) => {
       const isSelected = selectedItemIds.has(item.id) || (selectedItemIds.size === 0 && state.selectedItem && state.selectedItem.id === item.id);
+      const isGhost = Boolean(virtualOpts?.isVirtual && virtualOpts?.paraEntity);
+      const linkedRel = isGhost ? virtualOpts.relByNodeId?.get(item.id) : null;
       const card = document.createElement('div');
-      card.className = 'item-card' + (isSelected ? ' selected' : '');
+      card.className = 'item-card' + (isSelected ? ' selected' : '') + (isGhost ? ' is-virtual-ghost' : '');
       card.dataset.itemId = item.id;
       card.draggable = true;
       card.innerHTML =
+        (isGhost ? `<span class="item-virtual-badge" title="관계에 의해 보이는 가상 항목 (원본은 물리 보관소에 위치)">🔗 가상</span>` : '') +
         (item.driveFile ? `<span class="item-cloud-badge" title="Google Drive 동기화 파일">☁️</span>` : '') +
         `<div class="item-icon">${escapeHtml(item.icon || (item.type === 'folder' ? '📁' : '📄'))}</div>` +
         `<div class="item-name">${escapeHtml(item.name)}</div>` +
-        (item.tag ? `<div class="item-tag-mini">${escapeHtml(item.tag)}</div>` : '');
+        (item.tag ? `<div class="item-tag-mini">${escapeHtml(item.tag)}</div>` : '') +
+        (linkedRel ? `<button type="button" class="item-virtual-unlink" title="이 PARA 항목과의 연결만 해제 (물리 파일 본체는 유지)">연결 해제</button>` : '');
+
+      card.querySelector('.item-virtual-unlink')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (linkedRel && removeRelation(linkedRel.id)) {
+          scheduleDriveSync();
+          renderParaTree();
+          openParaVirtualView(activeParaView);
+          if (state.selectedItem) renderDetailRelations(state.selectedItem);
+          if (typeof renderRelationsDbPanel === 'function') renderRelationsDbPanel();
+          showToast('가상 연결이 해제되었습니다. (물리 파일 본체는 그대로 유지됨)');
+        }
+      });
 
       card.addEventListener('dragstart', (e) => {
         const dragIds = (selectedItemIds.has(item.id) && selectedItemIds.size > 1)
@@ -568,12 +986,15 @@
   });
 
   function openFolder(folder) {
-    const folderChanged = state.currentFolder && folder && state.currentFolder.id !== folder.id;
+    const wasVirtual = Boolean(activeParaView);
+    activeParaView = null;
+    const folderChanged = wasVirtual || (state.currentFolder && folder && state.currentFolder.id !== folder.id);
     state.currentFolder = folder;
     if (folderChanged) {
       selectedItemIds.clear();
       lastClickedItemId = null;
     }
+    renderParaTree();
     renderBreadcrumb(folder);
     renderItemsGrid(folder.children || []);
   }
@@ -757,6 +1178,13 @@
 
   function createNew(type) {
     saveStateForUndo();
+    if (type === 'folder' && activeParaView) {
+      activeParaView = null;
+    }
+    const activeVirtualEnt = (activeParaView && activeParaView.mode === 'entity')
+      ? findParaEntity(activeParaView.entityId)
+      : null;
+
     if (type === 'sheet') {
       const newName = getUniqueNameInFolder(state.currentFolder, '새 스프레드시트', '.xlsx');
       const emptyWb = BrainSheet.createEmptyWorkbook('Sheet1');
@@ -772,6 +1200,9 @@
       };
       if (!state.currentFolder.children) state.currentFolder.children = [];
       state.currentFolder.children.push(newItem);
+      if (activeVirtualEnt) {
+        addRelation({ sourceId: newItem.id, targetId: activeVirtualEnt.id, type: activeVirtualEnt.paraType });
+      }
       selectedItemIds = new Set([newItem.id]);
       lastClickedItemId = newItem.id;
       saveAndRender();
@@ -783,7 +1214,7 @@
       showToast(
         lfStatus?.connected
           ? `📊 "${newName}" 생성 및 로컬 폴더(${lfStatus.folderName})에 저장됨`
-          : `📊 새 빈 엑셀 시트(${newName})를 만들었습니다. [파일 → 예제]에서 그래프 샘플을 불러올 수 있습니다.`
+          : `📊 새 빈 엑셀 시트(${newName})를 물리 보관소에 만들고 연결했습니다.`
       );
       return;
     }
@@ -803,6 +1234,9 @@
     };
     if (!state.currentFolder.children) state.currentFolder.children = [];
     state.currentFolder.children.push(newItem);
+    if (type !== 'folder' && activeVirtualEnt) {
+      addRelation({ sourceId: newItem.id, targetId: activeVirtualEnt.id, type: activeVirtualEnt.paraType });
+    }
     selectedItemIds = new Set([newItem.id]);
     lastClickedItemId = newItem.id;
     saveAndRender();
@@ -1199,7 +1633,11 @@
         };
         if (!state.currentFolder.children) state.currentFolder.children = [];
         state.currentFolder.children.push(newItem);
-        scheduleDocFileSyncToDrive(newItem, true);
+        if (parsedCsvWb) {
+          syncSpreadsheetToDriveNow(newItem).catch(() => {});
+        } else {
+          scheduleDocFileSyncToDrive(newItem, true);
+        }
         syncItemToLocalFolderNow(newItem).catch(() => {});
         lastAdded = newItem;
         addedCount++;
@@ -1277,6 +1715,7 @@
     elDetailState.style.display = 'none';
     if (elMultiSelectState) elMultiSelectState.style.display = 'none';
     elEmptyState.style.display = 'flex';
+    if (typeof renderRelationsDbPanel === 'function') renderRelationsDbPanel();
   }
 
   function getDriveOpenButtonLabel(driveFile) {
@@ -1501,6 +1940,8 @@
 
     $('p-summary').innerHTML = renderMarkdown(item.summary);
     window.BrainMarkdown.renderMermaidBlocks($('p-summary')).catch(() => {});
+    renderDetailRelations(item);
+    if (typeof renderRelationsDbPanel === 'function') renderRelationsDbPanel();
     renderContextChips();
   }
 
@@ -1641,12 +2082,13 @@
     if (copyLbl) copyLbl.textContent = selCount > 1 ? `📄 ${selCount}개 항목 복사` : '📄 복사';
     if (delLbl) delLbl.textContent = selCount > 1 ? `🗑️ ${selCount}개 항목 삭제` : '🗑️ 삭제';
 
-    const rect = $('main').getBoundingClientRect();
-    let x = e.clientX - rect.left;
-    let y = e.clientY - rect.top;
+    let x = e.clientX;
+    let y = e.clientY;
     elContextMenu.style.display = 'block';
-    if (x + elContextMenu.offsetWidth > rect.width) x = rect.width - elContextMenu.offsetWidth - 8;
-    if (y + elContextMenu.offsetHeight > rect.height) y = rect.height - elContextMenu.offsetHeight - 8;
+    const menuW = elContextMenu.offsetWidth || 200;
+    const menuH = elContextMenu.offsetHeight || 260;
+    if (x + menuW > window.innerWidth - 8) x = window.innerWidth - menuW - 8;
+    if (y + menuH > window.innerHeight - 8) y = window.innerHeight - menuH - 8;
     elContextMenu.style.left = `${Math.max(4, x)}px`;
     elContextMenu.style.top = `${Math.max(4, y)}px`;
   }
@@ -1676,6 +2118,14 @@
       else saveItemsToPC(selItems);
     }
     else if (action === 'rename') startRenameItem(state.selectedItem);
+    else if (action === 'add-relation') {
+      if (state.selectedItem && state.selectedItem.id !== 'root') openRelationModal(state.selectedItem);
+      else showToast('관계를 연결할 항목을 먼저 선택해 주세요.');
+    }
+    else if (action === 'pin-home') {
+      if (state.selectedItem && state.selectedItem.id !== 'root') togglePinAppToHome(state.selectedItem);
+      else showToast('홈 화면에 고정할 항목을 먼저 선택해 주세요.');
+    }
     else if (action === 'open-local') {
       if (isSpreadsheetItem(state.selectedItem)) {
         openSpreadsheetWindow(state.selectedItem);
@@ -2321,6 +2771,7 @@
     openFolder(state.currentFolder);
     clearSelectionView();
     updateLocalLockBanner();
+    setHomeMode(true);
     initLocalFolderSyncForWorkspace().then((st) => {
       if (st?.connected) {
         showToast(`👤 게스트 모드 입장 · 📂 로컬 폴더(${st.folderName}) 자동 저장 활성화됨`);
@@ -2426,6 +2877,7 @@
 
     onAuthStateChanged();
     renderChatMessages();
+    setHomeMode(true);
     initLocalFolderSyncForWorkspace().catch(() => {});
 
     if (!waitForSyncBeforeReveal && shouldSync) {
@@ -3733,10 +4185,13 @@
   function buildCloudPayload() {
     const meta = getSyncMeta();
     return {
-      version: '7.0',
+      version: '9.0',
       updatedAt: meta.updatedAt || Date.now(),
       fileSystem: state.fileSystem,
-      chatHistory: state.chatHistory
+      chatHistory: state.chatHistory,
+      relations: state.relations || [],
+      paraEntities: state.paraEntities || [],
+      pinnedAppIds: state.pinnedAppIds || []
     };
   }
 
@@ -3746,6 +4201,16 @@
     const prevSelectedId = state.selectedItem?.id;
 
     state.fileSystem = data.fileSystem;
+    if (Array.isArray(data.paraEntities)) {
+      state.paraEntities = data.paraEntities;
+    }
+    if (Array.isArray(data.relations)) {
+      state.relations = data.relations;
+    }
+    normalizeParaWorkspace();
+    persistParaEntities({ silent: true });
+    persistRelations({ silent: true });
+
     const foundFolder = prevFolderId ? findNodeAndParent(prevFolderId) : null;
     state.currentFolder = foundFolder && foundFolder.node.type === 'folder' ? foundFolder.node : state.fileSystem;
 
@@ -3757,6 +4222,11 @@
       persistChat({ silent: true });
       renderChatMessages();
     }
+    if (typeof renderRelationsDbPanel === 'function') renderRelationsDbPanel();
+    if (Array.isArray(data.pinnedAppIds)) {
+      state.pinnedAppIds = data.pinnedAppIds;
+      persistPinnedApps({ silent: true });
+    }
 
     persistFS({ silent: true });
     setSyncMeta({
@@ -3766,6 +4236,7 @@
       hasUserEdits: true
     });
 
+    renderParaTree();
     renderTree(state.fileSystem, elTreeRoot, true);
     if (searchQuery) renderSearchResults(searchQuery);
     else openFolder(state.currentFolder);
@@ -5243,13 +5714,2903 @@
     updateDriveStatusUI();
   });
 
+  // ================= Sort Control =================
+  const elSortSelect = $('sort-select');
+  if (elSortSelect) {
+    elSortSelect.value = currentSortMode || 'default';
+    elSortSelect.addEventListener('change', (e) => {
+      currentSortMode = e.target.value || 'default';
+      setSortMode(currentSortMode);
+      renderTree(state.fileSystem, elTreeRoot, true);
+      if (searchQuery) renderSearchResults(searchQuery);
+      else openFolder(state.currentFolder);
+    });
+  }
+
+  // ================= File Relations & Hierarchy Graph (DB-Style) =================
+  const elRelationModal = $('relation-modal');
+  let relationSourceItem = null;
+
+  function navigateToNode(node) {
+    if (!node || !isItemVisible(node)) return;
+    if (isHomeMode) setHomeMode(false);
+    const paraEnt = (node.isVirtual || node.type === 'para-entity') ? node : findParaEntity(node.id);
+    if (paraEnt) {
+      clearSearch(false);
+      openParaVirtualView({ mode: 'entity', entityId: paraEnt.id });
+      return;
+    }
+    const found = findNodeAndParent(node.id);
+    if (!found) return;
+    clearSearch(false);
+    if (found.node.type === 'folder') {
+      openFolder(found.node);
+    } else if (found.parent) {
+      openFolder(found.parent);
+    }
+    renderTree(state.fileSystem, elTreeRoot, true);
+    selectedItemIds = new Set([found.node.id]);
+    lastClickedItemId = found.node.id;
+    selectItem(found.node);
+    updateCardSelectionClasses();
+  }
+
+  function launchItemDirectly(item) {
+    if (!item || !isItemVisible(item)) return;
+    const paraEnt = (item.isVirtual || item.type === 'para-entity') ? item : findParaEntity(item.id);
+    if (paraEnt) {
+      if (isHomeMode) setHomeMode(false);
+      clearSearch(false);
+      openParaVirtualView({ mode: 'entity', entityId: paraEnt.id });
+      return;
+    }
+    if (item.type === 'folder') {
+      if (isHomeMode) setHomeMode(false);
+      clearSearch(false);
+      openFolder(item);
+      renderTree(state.fileSystem, elTreeRoot, true);
+    } else if (isSpreadsheetItem(item)) {
+      openSpreadsheetWindow(item);
+    } else if (item.driveFile && item.driveFile.id) {
+      openDriveFileViewer(item);
+    } else if (item.link && LocalBridge.isWebUrl(item.link)) {
+      window.open(item.link, '_blank', 'noopener,noreferrer');
+    } else if (item.link && LocalBridge.isLocalPath(item.link)) {
+      launchLocalItem(item.link, 'open');
+    } else if (isHtmlContentItem(item)) {
+      openHtmlWindow(item);
+    } else if (isMarkdownDocItem(item)) {
+      openMarkdownWindow(item, 'view');
+    } else {
+      navigateToNode(item);
+    }
+  }
+
+  function renderDetailRelations(item) {
+    const listEl = $('detail-relations-list');
+    const badgeEl = $('relations-count-badge');
+    if (!listEl || !item) return;
+
+    const rels = getRelationsForNode(item.id);
+    const allGroups = [
+      ...(rels.projects || []).map((x) => ({ ...x, badge: '🚀 프로젝트', cls: 'rel-project' })),
+      ...(rels.areas || []).map((x) => ({ ...x, badge: '🧭 영역', cls: 'rel-area' })),
+      ...(rels.resources || []).map((x) => ({ ...x, badge: '📚 리소스', cls: 'rel-resource' })),
+      ...rels.parents.map((x) => ({ ...x, badge: '⬆️ 상위', cls: 'rel-parent' })),
+      ...rels.children.map((x) => ({ ...x, badge: '⬇️ 하위', cls: 'rel-child' })),
+      ...rels.related.map((x) => ({ ...x, badge: '🔗 연관', cls: 'rel-related' })),
+      ...rels.references.map((x) => ({ ...x, badge: '📎 참조', cls: 'rel-ref' })),
+      ...rels.referencedBy.map((x) => ({ ...x, badge: '↩️ 피참조', cls: 'rel-ref' }))
+    ];
+
+    if (badgeEl) badgeEl.textContent = allGroups.length > 0 ? `(${allGroups.length})` : '';
+    listEl.innerHTML = '';
+
+    if (allGroups.length === 0) {
+      listEl.innerHTML = `<span class="relation-empty-hint">연결된 파일이 없습니다. [＋ 연결]로 상하/연관 관계를 지정하세요.</span>`;
+      return;
+    }
+
+    allGroups.forEach(({ rel, node, badge, cls }) => {
+      const chip = document.createElement('span');
+      chip.className = `relation-chip ${cls}`;
+      chip.title = `${badge}: ${node.name}${rel.label ? ` (${rel.label})` : ''} — 클릭하여 이동 · 더블클릭하여 열기`;
+      chip.innerHTML =
+        `<span>${badge}</span>` +
+        `<span>${escapeHtml(node.icon || (node.type === 'folder' ? '📁' : '📄'))} ${escapeHtml(node.name)}</span>` +
+        (rel.label ? `<span class="relation-chip-label">· ${escapeHtml(rel.label)}</span>` : '') +
+        `<button type="button" class="relation-chip-del" title="연결 해제">✕</button>`;
+
+      chip.addEventListener('click', () => navigateToNode(node));
+      chip.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        launchItemDirectly(node);
+      });
+      chip.querySelector('.relation-chip-del').addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (removeRelation(rel.id)) {
+          scheduleDriveSync();
+          renderDetailRelations(item);
+          renderRelationsDbPanel();
+          showToast('연결 관계가 해제되었습니다.');
+        }
+      });
+      listEl.appendChild(chip);
+    });
+  }
+
+  function renderRelationTargetPicker(query = '') {
+    const listEl = $('relation-target-list');
+    if (!listEl || !relationSourceItem) return;
+    const q = String(query || '').trim().toLowerCase();
+    const mode = $('relation-type-select')?.value || 'project';
+    const isParaMode = mode === 'project' || mode === 'area' || mode === 'resource';
+    const basePool = isParaMode ? getParaEntities(mode) : collectAllNodes(state.fileSystem);
+    const candidates = basePool.filter((n) => {
+      if (n.id === relationSourceItem.id || !isItemVisible(n)) return false;
+      if (!q) return true;
+      return `${n.name || ''} ${n.tag || ''}`.toLowerCase().includes(q);
+    });
+
+    listEl.innerHTML = '';
+    if (candidates.length === 0) {
+      const msg = isParaMode
+        ? '선언된 항목이 없습니다. 우측 [🗃️ 연결 DB] 상단에서 프로젝트·영역·리소스를 먼저 선언해 주세요.'
+        : '연결할 수 있는 항목이 없습니다.';
+      listEl.innerHTML = `<div style="padding:14px; text-align:center; font-size:0.78rem; color:var(--text-muted);">${msg}</div>`;
+      return;
+    }
+
+    candidates.slice(0, 80).forEach((node) => {
+      const pathNodes = getPathToNode(node.id) || [];
+      const folderText = pathNodes.length > 2 ? pathNodes.slice(1, -1).map((p) => p.name).join(' / ') : '루트';
+      const row = document.createElement('div');
+      row.className = 'picker-item';
+      row.innerHTML =
+        `<div class="picker-item-main">` +
+        `  <span>${escapeHtml(node.icon || (node.type === 'folder' ? '📁' : '📄'))}</span>` +
+        `  <div style="min-width:0;">` +
+        `    <div class="picker-item-name">${escapeHtml(node.name)}</div>` +
+        `    <div class="picker-item-path">${escapeHtml(folderText)}</div>` +
+        `  </div>` +
+        `</div>` +
+        `<span class="picker-item-badge">＋ 연결</span>`;
+
+      row.addEventListener('click', () => {
+        const mode = $('relation-type-select').value;
+        const label = $('relation-label-input').value.trim();
+        let res = null;
+        if (mode === 'project' || mode === 'area' || mode === 'resource') {
+          res = addRelation({ sourceId: relationSourceItem.id, targetId: node.id, type: mode, label });
+        } else if (mode === 'child') {
+          res = addRelation({ sourceId: relationSourceItem.id, targetId: node.id, type: 'parent', label });
+        } else if (mode === 'parent') {
+          res = addRelation({ sourceId: node.id, targetId: relationSourceItem.id, type: 'parent', label });
+        } else if (mode === 'reference') {
+          res = addRelation({ sourceId: relationSourceItem.id, targetId: node.id, type: 'reference', label });
+        } else {
+          res = addRelation({ sourceId: relationSourceItem.id, targetId: node.id, type: 'related', label });
+        }
+        if (res) {
+          scheduleDriveSync();
+          if (state.selectedItem) renderDetailRelations(state.selectedItem);
+          renderRelationsDbPanel();
+          showToast(`🔗 "${relationSourceItem.name}" ↔ "${node.name}" 연결되었습니다.`);
+          elRelationModal.style.display = 'none';
+        }
+      });
+      listEl.appendChild(row);
+    });
+  }
+
+  function openRelationModal(item) {
+    if (!item || item.id === 'root') return;
+    relationSourceItem = item;
+    $('relation-source-label').textContent = `기준: ${item.icon || '📄'} ${item.name}`;
+    $('relation-label-input').value = '';
+    $('relation-target-search').value = '';
+    renderRelationTargetPicker('');
+    elRelationModal.style.display = 'flex';
+    $('relation-target-search').focus();
+  }
+
+  $('btn-open-relation-modal')?.addEventListener('click', () => {
+    if (state.selectedItem) openRelationModal(state.selectedItem);
+  });
+  $('btn-goto-relation-db')?.addEventListener('click', () => {
+    switchRightTab('relations');
+  });
+  $('btn-close-relation-modal')?.addEventListener('click', () => { elRelationModal.style.display = 'none'; });
+  $('btn-cancel-relation-modal')?.addEventListener('click', () => { elRelationModal.style.display = 'none'; });
+  elRelationModal?.addEventListener('click', (e) => { if (e.target === elRelationModal) elRelationModal.style.display = 'none'; });
+  $('relation-target-search')?.addEventListener('input', (e) => renderRelationTargetPicker(e.target.value));
+  $('relation-type-select')?.addEventListener('change', () => renderRelationTargetPicker($('relation-target-search')?.value || ''));
+
+  // ================= Notion-Style Right-Panel Relation DB =================
+  let reldbFilterType = 'all';
+  let reldbPickerMode = null; // 'project' | 'area' | 'resource' | 'parent' | 'child' | 'related' | 'reference'
+
+  const RELDB_PROP_META = {
+    project: { title: '🚀 프로젝트', chipCls: 'rel-project', pickerTitle: '🚀 프로젝트 연관 지정', keywords: ['프로젝트', 'project', 'projects'] },
+    area: { title: '🧭 영역', chipCls: 'rel-area', pickerTitle: '🧭 영역 연관 지정', keywords: ['영역', 'area', 'areas'] },
+    resource: { title: '📚 리소스', chipCls: 'rel-resource', pickerTitle: '📚 리소스 연관 지정', keywords: ['리소스', '자료', 'resource', 'resources'] },
+    parent: { title: '⬆️ 상위', chipCls: 'rel-parent', pickerTitle: '⬆️ 상위 파일 지정', keywords: [] },
+    child: { title: '⬇️ 하위', chipCls: 'rel-child', pickerTitle: '⬇️ 하위 파일 지정', keywords: [] },
+    related: { title: '🔗 일반 연관', chipCls: 'rel-related', pickerTitle: '🔗 일반 연관 파일 지정', keywords: [] },
+    reference: { title: '📎 참조', chipCls: 'rel-ref', pickerTitle: '📎 참조 파일 지정', keywords: [] }
+  };
+
+  function findMatchingRelationForMode(baseId, targetId, mode) {
+    return (state.relations || []).find((r) => {
+      if (mode === 'project' || mode === 'area' || mode === 'resource' || mode === 'related') {
+        return r.type === mode &&
+          ((r.sourceId === baseId && r.targetId === targetId) || (r.sourceId === targetId && r.targetId === baseId));
+      }
+      if (mode === 'parent') return r.type === 'parent' && r.sourceId === targetId && r.targetId === baseId;
+      if (mode === 'child') return r.type === 'parent' && r.sourceId === baseId && r.targetId === targetId;
+      if (mode === 'reference') return r.type === 'reference' && r.sourceId === baseId && r.targetId === targetId;
+      return false;
+    });
+  }
+
+  function closeInlineRelationPicker() {
+    reldbPickerMode = null;
+    const picker = $('reldb-inline-picker');
+    if (picker) picker.style.display = 'none';
+  }
+
+  function renderInlineRelationPickerList() {
+    const listEl = $('reldb-picker-list');
+    const item = state.selectedItem;
+    if (!listEl || !item || !reldbPickerMode) return;
+
+    const q = String($('reldb-picker-search')?.value || '').trim().toLowerCase();
+    const isParaMode = reldbPickerMode === 'project' || reldbPickerMode === 'area' || reldbPickerMode === 'resource';
+
+    let basePool = [];
+    if (isParaMode) {
+      // 프로젝트·영역·리소스 연결은 PARA로 선언된 해당 카테고리 항목으로만 제한
+      const poolMap = new Map();
+      getParaEntities(reldbPickerMode).forEach((ent) => poolMap.set(ent.id, ent));
+      // 기존에 이미 연결돼 있던 항목이 있다면 해제할 수 있도록 표시 유지
+      (state.relations || []).forEach((r) => {
+        if (r.type === reldbPickerMode && (r.sourceId === item.id || r.targetId === item.id)) {
+          const otherId = r.sourceId === item.id ? r.targetId : r.sourceId;
+          const found = resolveAnyNode(otherId);
+          if (found) poolMap.set(found.id, found);
+        }
+      });
+      basePool = Array.from(poolMap.values());
+    } else {
+      basePool = collectAllNodes(state.fileSystem);
+    }
+
+    const candidates = basePool.filter((n) => {
+      if (n.id === item.id || !isItemVisible(n)) return false;
+      if (!q) return true;
+      return `${n.name || ''} ${n.tag || ''}`.toLowerCase().includes(q);
+    });
+
+    // 이미 연결된 항목 → 이름순 정렬
+    candidates.sort((a, b) => {
+      const aLinked = findMatchingRelationForMode(item.id, a.id, reldbPickerMode) ? 0 : 1;
+      const bLinked = findMatchingRelationForMode(item.id, b.id, reldbPickerMode) ? 0 : 1;
+      if (aLinked !== bLinked) return aLinked - bLinked;
+      return (a.name || '').localeCompare(b.name || '', 'ko');
+    });
+
+    listEl.innerHTML = '';
+
+    // 프로젝트·영역·리소스 피커에서 새 이름을 입력하면 즉시 선언(폴더 자동 생성) + 연결
+    const rawSearch = String($('reldb-picker-search')?.value || '').trim();
+    if (isParaMode && rawSearch) {
+      const exactExists = candidates.some((n) => String(n.name || '').trim().toLowerCase() === rawSearch.toLowerCase());
+      if (!exactExists) {
+        const rootNameMap = { project: '🧭 1. 프로젝트', area: '🧭 2. 영역', resource: '🧭 3. 리소스' };
+        const labelMap = { project: '🚀 프로젝트', area: '🧭 영역', resource: '📚 리소스' };
+        const createRow = document.createElement('div');
+        createRow.className = 'reldb-picker-create';
+        createRow.innerHTML =
+          `<span>✨ "${escapeHtml(rawSearch)}" ${labelMap[reldbPickerMode]} 선언 &amp; 바로 연결</span>` +
+          `<span style="font-size:0.68rem; opacity:0.8;">${rootNameMap[reldbPickerMode]} 가상 트리</span>`;
+        createRow.addEventListener('click', () => {
+          saveStateForUndo();
+          const created = declareParaEntity({ paraType: reldbPickerMode, name: rawSearch });
+          if (created) {
+            const label = String($('reldb-picker-label')?.value || '').trim();
+            addRelation({ sourceId: item.id, targetId: created.id, type: reldbPickerMode, label });
+            saveAndRender();
+            renderDetailRelations(item);
+            renderRelationsDbPanel();
+            if ($('reldb-picker-search')) $('reldb-picker-search').value = '';
+            renderInlineRelationPickerList();
+            showToast(`${labelMap[reldbPickerMode]} "${created.name}" 선언 및 가상 연결 완료!`);
+          }
+        });
+        listEl.appendChild(createRow);
+      }
+    }
+
+    if (candidates.length === 0 && listEl.children.length === 0) {
+      const labelMap = { project: '🚀 프로젝트', area: '🧭 영역', resource: '📚 리소스' };
+      listEl.innerHTML = `<div class="reldb-empty-card-msg">${isParaMode ? `선언된 ${labelMap[reldbPickerMode]} 항목이 아직 없습니다.<br>위 검색창에 새 이름을 입력하면 바로 선언·연결됩니다.` : '연결할 수 있는 파일이 없습니다.'}</div>`;
+      return;
+    }
+
+    candidates.slice(0, 80).forEach((node) => {
+      const existingRel = findMatchingRelationForMode(item.id, node.id, reldbPickerMode);
+      const isVirtualEnt = Boolean(node.isVirtual || node.type === 'para-entity');
+      const pathNodes = isVirtualEnt ? [] : (getPathToNode(node.id) || []);
+      const folderText = isVirtualEnt
+        ? `🧭 PARA 가상 트리 (${node.tag || node.paraType})`
+        : (pathNodes.length > 2 ? pathNodes.slice(1, -1).map((p) => p.name).join(' / ') : '💾 물리 보관소 루트');
+
+      const row = document.createElement('div');
+      row.className = `reldb-picker-row${existingRel ? ' linked' : ''}`;
+      row.innerHTML =
+        `<div class="reldb-picker-left">` +
+        `  <span class="reldb-check">${existingRel ? '✓' : ''}</span>` +
+        `  <span>${escapeHtml(node.icon || (node.type === 'folder' ? '📁' : '📄'))}</span>` +
+        `  <div style="min-width:0; flex:1;">` +
+        `    <div class="reldb-picker-name">${escapeHtml(node.name)}</div>` +
+        `    <div class="reldb-picker-path">${escapeHtml(folderText)}</div>` +
+        `  </div>` +
+        `</div>` +
+        `<span class="reldb-picker-state">${existingRel ? '연결됨' : '＋ 선택'}</span>`;
+
+      row.addEventListener('click', () => {
+        const curRel = findMatchingRelationForMode(item.id, node.id, reldbPickerMode);
+        if (curRel) {
+          if (removeRelation(curRel.id)) {
+            scheduleDriveSync();
+            renderDetailRelations(item);
+            renderRelationsDbPanel();
+            renderInlineRelationPickerList();
+          }
+          return;
+        }
+        const label = String($('reldb-picker-label')?.value || '').trim();
+        let res = null;
+        if (reldbPickerMode === 'project' || reldbPickerMode === 'area' || reldbPickerMode === 'resource') {
+          res = addRelation({ sourceId: item.id, targetId: node.id, type: reldbPickerMode, label });
+        } else if (reldbPickerMode === 'parent') {
+          res = addRelation({ sourceId: node.id, targetId: item.id, type: 'parent', label });
+        } else if (reldbPickerMode === 'child') {
+          res = addRelation({ sourceId: item.id, targetId: node.id, type: 'parent', label });
+        } else if (reldbPickerMode === 'reference') {
+          res = addRelation({ sourceId: item.id, targetId: node.id, type: 'reference', label });
+        } else {
+          res = addRelation({ sourceId: item.id, targetId: node.id, type: 'related', label });
+        }
+        if (res) {
+          scheduleDriveSync();
+          renderDetailRelations(item);
+          renderRelationsDbPanel();
+          renderInlineRelationPickerList();
+        }
+      });
+
+      listEl.appendChild(row);
+    });
+  }
+
+  function openInlineRelationPicker(mode) {
+    const item = state.selectedItem;
+    const picker = $('reldb-inline-picker');
+    if (!item || !picker || !RELDB_PROP_META[mode]) return;
+    if (reldbPickerMode === mode && picker.style.display !== 'none') {
+      closeInlineRelationPicker();
+      return;
+    }
+    reldbPickerMode = mode;
+    const titleEl = $('reldb-picker-title');
+    if (titleEl) titleEl.textContent = `${RELDB_PROP_META[mode].pickerTitle} — ${item.name}`;
+    if ($('reldb-picker-search')) $('reldb-picker-search').value = '';
+    if ($('reldb-picker-label')) $('reldb-picker-label').value = '';
+    picker.style.display = 'flex';
+    renderInlineRelationPickerList();
+    $('reldb-picker-search')?.focus();
+  }
+
+  function renderRelationsDbTable(validRels) {
+    const bodyEl = $('reldb-table-body');
+    if (!bodyEl) return;
+
+    const q = String($('reldb-table-search')?.value || '').trim().toLowerCase();
+    const unassignedNodes = getUnassignedNodes(isItemVisible);
+    const unassignedBadge = $('reldb-unassigned-count');
+    if (unassignedBadge) {
+      unassignedBadge.textContent = unassignedNodes.length > 0 ? `(${unassignedNodes.length})` : '';
+    }
+
+    const filteredUnassigned = unassignedNodes.filter((n) => {
+      if (!q) return true;
+      return `${n.name || ''} ${n.tag || ''}`.toLowerCase().includes(q);
+    });
+
+    const mkUnassignedRow = (node) => {
+      const row = document.createElement('div');
+      row.className = 'reldb-table-row is-unassigned';
+
+      const mainLine = document.createElement('div');
+      mainLine.className = 'reldb-row-main';
+
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'reldb-node-btn';
+      btn.title = `${node.name} — 클릭하여 이동 · 더블클릭하여 열기`;
+      btn.textContent = `${node.icon || '📄'} ${node.name}`;
+      btn.addEventListener('click', () => navigateToNode(node));
+      btn.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        launchItemDirectly(node);
+      });
+
+      const badge = document.createElement('span');
+      badge.className = 'reldb-rel-badge type-unassigned';
+      badge.textContent = '⚠️ 지정필요';
+
+      mainLine.appendChild(btn);
+      mainLine.appendChild(badge);
+
+      const metaLine = document.createElement('div');
+      metaLine.className = 'reldb-row-meta';
+      const quickWrap = document.createElement('div');
+      quickWrap.className = 'reldb-quick-assign';
+
+      [
+        { mode: 'project', label: '＋🚀 프로젝트' },
+        { mode: 'area', label: '＋🧭 영역' },
+        { mode: 'resource', label: '＋📚 리소스' }
+      ].forEach(({ mode, label }) => {
+        const qBtn = document.createElement('button');
+        qBtn.type = 'button';
+        qBtn.className = 'reldb-quick-btn';
+        qBtn.textContent = label;
+        qBtn.addEventListener('click', () => {
+          navigateToNode(node);
+          switchRightTab('relations');
+          openInlineRelationPicker(mode);
+        });
+        quickWrap.appendChild(qBtn);
+      });
+
+      metaLine.appendChild(quickWrap);
+      row.appendChild(mainLine);
+      row.appendChild(metaLine);
+      return row;
+    };
+
+    bodyEl.innerHTML = '';
+
+    // 지정필요 전용 필터 뷰
+    if (reldbFilterType === 'unassigned') {
+      if (filteredUnassigned.length === 0) {
+        bodyEl.innerHTML = `<div class="reldb-empty-card-msg">🎉 지정이 필요한 미분류 파일이 없습니다!</div>`;
+        return;
+      }
+      filteredUnassigned.forEach((n) => bodyEl.appendChild(mkUnassignedRow(n)));
+      return;
+    }
+
+    const filtered = validRels.filter(({ rel, source, target }) => {
+      if (reldbFilterType !== 'all' && rel.type !== reldbFilterType) return false;
+      if (!q) return true;
+      const hay = `${source.name || ''} ${target.name || ''} ${rel.label || ''}`.toLowerCase();
+      return hay.includes(q);
+    });
+
+    if (filtered.length === 0 && !(reldbFilterType === 'all' && filteredUnassigned.length > 0)) {
+      bodyEl.innerHTML = `<div class="reldb-empty-card-msg">${validRels.length === 0 ? '아직 등록된 연결 관계가 없습니다.<br>상단 <b>🌱 PARA 선언</b>으로 프로젝트·영역·리소스를 만든 뒤 연결해 보세요.' : '필터 조건에 맞는 연결이 없습니다.'}</div>`;
+      return;
+    }
+
+    const typeInfo = {
+      project: { text: '🚀 프로젝트', cls: 'type-project' },
+      area: { text: '🧭 영역', cls: 'type-area' },
+      resource: { text: '📚 리소스', cls: 'type-resource' },
+      parent: { text: '상위 → 하위', cls: 'type-parent' },
+      related: { text: '↔ 일반연관', cls: 'type-related' },
+      reference: { text: '📎 참조 →', cls: 'type-reference' }
+    };
+
+    filtered.forEach(({ rel, source, target }) => {
+      const info = typeInfo[rel.type] || typeInfo.related;
+      const row = document.createElement('div');
+      row.className = 'reldb-table-row';
+
+      const mainLine = document.createElement('div');
+      mainLine.className = 'reldb-row-main';
+
+      const mkNodeBtn = (node) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'reldb-node-btn';
+        btn.title = `${node.name} — 클릭하여 이동 · 더블클릭하여 열기`;
+        btn.textContent = `${node.icon || (node.type === 'folder' ? '📁' : '📄')} ${node.name}`;
+        btn.addEventListener('click', () => navigateToNode(node));
+        btn.addEventListener('dblclick', (e) => {
+          e.stopPropagation();
+          launchItemDirectly(node);
+        });
+        return btn;
+      };
+
+      const badge = document.createElement('span');
+      badge.className = `reldb-rel-badge ${info.cls}`;
+      badge.textContent = info.text;
+
+      mainLine.appendChild(mkNodeBtn(source));
+      mainLine.appendChild(badge);
+      mainLine.appendChild(mkNodeBtn(target));
+
+      const metaLine = document.createElement('div');
+      metaLine.className = 'reldb-row-meta';
+      const labelSpan = document.createElement('span');
+      labelSpan.textContent = rel.label ? `🏷️ ${rel.label}` : '라벨 없음';
+
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'reldb-row-del';
+      delBtn.title = '연결 삭제';
+      delBtn.textContent = '✕ 삭제';
+      delBtn.addEventListener('click', () => {
+        if (removeRelation(rel.id)) {
+          scheduleDriveSync();
+          if (state.selectedItem) renderDetailRelations(state.selectedItem);
+          renderRelationsDbPanel();
+          if (reldbPickerMode) renderInlineRelationPickerList();
+          showToast('연결 관계가 해제되었습니다.');
+        }
+      });
+
+      metaLine.appendChild(labelSpan);
+      metaLine.appendChild(delBtn);
+
+      row.appendChild(mainLine);
+      row.appendChild(metaLine);
+      bodyEl.appendChild(row);
+    });
+
+    // '전체' 필터에서는 하단에 ⚠️ 지정필요 미분류 파일도 함께 분류 표시
+    if (reldbFilterType === 'all' && filteredUnassigned.length > 0) {
+      const divider = document.createElement('div');
+      divider.style.cssText = 'font-size:0.72rem; font-weight:700; color:#e11d48; margin:8px 2px 2px;';
+      divider.textContent = `⚠️ 지정필요 · 미분류 파일 (${filteredUnassigned.length})`;
+      bodyEl.appendChild(divider);
+      filteredUnassigned.forEach((n) => bodyEl.appendChild(mkUnassignedRow(n)));
+    }
+  }
+
+  function renderRelationsDbPanel() {
+    const validRels = [];
+    (state.relations || []).forEach((rel) => {
+      const s = resolveAnyNode(rel.sourceId);
+      const t = resolveAnyNode(rel.targetId);
+      if (s && t && isItemVisible(s) && isItemVisible(t)) {
+        validRels.push({ rel, source: s, target: t });
+      }
+    });
+    renderParaTree();
+
+    const tabBadge = $('relations-tab-badge');
+    if (tabBadge) {
+      if (validRels.length > 0) {
+        tabBadge.textContent = String(validRels.length);
+        tabBadge.style.display = 'inline-flex';
+      } else {
+        tabBadge.style.display = 'none';
+      }
+    }
+
+    const titleEl = $('reldb-current-title');
+    const propsEl = $('reldb-props-body');
+    if (!titleEl || !propsEl) return;
+
+    const item = state.selectedItem;
+    if (!item || item.id === 'root') {
+      titleEl.textContent = '파일을 선택해 PARA 관계를 지정하세요';
+      propsEl.innerHTML = `<div class="reldb-empty-card-msg">중앙 탐색기에서 파일이나 폴더를 클릭하면 <b>🚀 프로젝트 · 🧭 영역 · 📚 리소스</b> 및 상하 관계를 노션 DB처럼 지정할 수 있습니다.</div>`;
+      closeInlineRelationPicker();
+    } else {
+      titleEl.textContent = `${item.icon || (item.type === 'folder' ? '📁' : '📄')} ${item.name}`;
+      const rels = getRelationsForNode(item.id);
+      const propRows = [
+        { mode: 'project', label: '🚀 프로젝트', items: rels.projects || [], cls: 'rel-project', canAdd: true },
+        { mode: 'area', label: '🧭 영역', items: rels.areas || [], cls: 'rel-area', canAdd: true },
+        { mode: 'resource', label: '📚 리소스', items: rels.resources || [], cls: 'rel-resource', canAdd: true },
+        { mode: 'parent', label: '⬆️ 상위', items: rels.parents || [], cls: 'rel-parent', canAdd: true },
+        { mode: 'child', label: '⬇️ 하위', items: rels.children || [], cls: 'rel-child', canAdd: true }
+      ];
+
+      propsEl.innerHTML = '';
+      propRows.forEach((rowDef) => {
+        const rowEl = document.createElement('div');
+        rowEl.className = 'reldb-prop-row';
+
+        const keyEl = document.createElement('div');
+        keyEl.className = 'reldb-prop-key';
+        keyEl.textContent = rowDef.label;
+
+        const valEl = document.createElement('div');
+        valEl.className = 'reldb-prop-val';
+
+        rowDef.items.forEach(({ rel, node }) => {
+          const chip = document.createElement('span');
+          chip.className = `relation-chip ${rowDef.cls}`;
+          chip.title = `${node.name}${rel.label ? ` (${rel.label})` : ''} — 클릭하여 이동 · 더블클릭하여 열기`;
+          chip.innerHTML =
+            `<span>${escapeHtml(node.icon || (node.type === 'folder' ? '📁' : '📄'))} ${escapeHtml(node.name)}</span>` +
+            (rel.label ? `<span class="relation-chip-label">· ${escapeHtml(rel.label)}</span>` : '') +
+            `<button type="button" class="relation-chip-del" title="연결 해제">✕</button>`;
+
+          chip.addEventListener('click', () => navigateToNode(node));
+          chip.addEventListener('dblclick', (e) => {
+            e.stopPropagation();
+            launchItemDirectly(node);
+          });
+          chip.querySelector('.relation-chip-del').addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (removeRelation(rel.id)) {
+              scheduleDriveSync();
+              renderDetailRelations(item);
+              renderRelationsDbPanel();
+              if (reldbPickerMode) renderInlineRelationPickerList();
+              showToast('연결 관계가 해제되었습니다.');
+            }
+          });
+          valEl.appendChild(chip);
+        });
+
+        if (rowDef.canAdd) {
+          const addBtn = document.createElement('button');
+          addBtn.type = 'button';
+          addBtn.className = 'reldb-add-btn';
+          addBtn.textContent = '＋ 추가';
+          addBtn.addEventListener('click', () => openInlineRelationPicker(rowDef.mode));
+          valEl.appendChild(addBtn);
+        }
+
+        rowEl.appendChild(keyEl);
+        rowEl.appendChild(valEl);
+        propsEl.appendChild(rowEl);
+      });
+    }
+
+    renderRelationsDbTable(validRels);
+  }
+
+  $('btn-reldb-open-map')?.addEventListener('click', openRelationMapWindow);
+  $('btn-reldb-close-picker')?.addEventListener('click', closeInlineRelationPicker);
+  $('reldb-picker-search')?.addEventListener('input', () => renderInlineRelationPickerList());
+  $('reldb-table-search')?.addEventListener('input', () => renderRelationsDbPanel());
+  $('reldb-filter-pills')?.querySelectorAll('.reldb-pill').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      reldbFilterType = btn.dataset.filter || 'all';
+      $('reldb-filter-pills').querySelectorAll('.reldb-pill').forEach((b) => {
+        b.classList.toggle('active', b === btn);
+      });
+      renderRelationsDbPanel();
+    });
+  });
+
+  // PARA Quick-Declare Bar (프로젝트 · 영역 · 리소스 선언 → 해당 기본 폴더에 자동 폴더 생성)
+  let pendingDeclareType = null;
+  const elDeclareForm = $('reldb-declare-form');
+  const elDeclareInput = $('reldb-declare-input');
+
+  function openDeclareForm(paraType) {
+    pendingDeclareType = paraType;
+    const phMap = {
+      project: '새 프로젝트 이름 (🧭 PARA 트리에 가상 선언)...',
+      area: '새 영역 이름 (🧭 PARA 트리에 가상 선언)...',
+      resource: '새 리소스 이름 (🧭 PARA 트리에 가상 선언)...',
+      archive: '새 아카이브 이름 (🧭 PARA 트리에 가상 선언)...'
+    };
+    if (elDeclareInput) {
+      elDeclareInput.value = '';
+      elDeclareInput.placeholder = phMap[paraType] || '이름 입력...';
+    }
+    if (elDeclareForm) elDeclareForm.style.display = 'flex';
+    elDeclareInput?.focus();
+  }
+
+  function closeDeclareForm() {
+    pendingDeclareType = null;
+    if (elDeclareForm) elDeclareForm.style.display = 'none';
+    if (elDeclareInput) elDeclareInput.value = '';
+  }
+
+  function commitDeclareForm() {
+    if (!pendingDeclareType || !elDeclareInput) return;
+    const name = elDeclareInput.value.trim();
+    if (!name) {
+      elDeclareInput.focus();
+      return;
+    }
+    saveStateForUndo();
+    const created = declareParaEntity({ paraType: pendingDeclareType, name });
+    if (created) {
+      const rootNameMap = { project: '1. 프로젝트', area: '2. 영역', resource: '3. 리소스', archive: '4. 아카이브' };
+      const iconMap = { project: '🚀', area: '🧭', resource: '📚', archive: '📦' };
+      // 현재 파일이 선택된 상태라면 자연스럽게 방금 선언한 프로젝트/영역/리소스와 연결
+      if (state.selectedItem && state.selectedItem.id !== 'root' && state.selectedItem.id !== created.id) {
+        addRelation({ sourceId: state.selectedItem.id, targetId: created.id, type: pendingDeclareType, label: '' });
+      }
+      saveAndRender();
+      if (state.selectedItem) renderDetailRelations(state.selectedItem);
+      renderRelationsDbPanel();
+      showToast(`${iconMap[pendingDeclareType]} "${created.name}" 선언 완료! (🧭 PARA 트리 › ${rootNameMap[pendingDeclareType]})`);
+      closeDeclareForm();
+    }
+  }
+
+  $('btn-declare-project')?.addEventListener('click', () => openDeclareForm('project'));
+  $('btn-declare-area')?.addEventListener('click', () => openDeclareForm('area'));
+  $('btn-declare-resource')?.addEventListener('click', () => openDeclareForm('resource'));
+  $('btn-declare-confirm')?.addEventListener('click', commitDeclareForm);
+  $('btn-declare-cancel')?.addEventListener('click', closeDeclareForm);
+  elDeclareInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitDeclareForm();
+    } else if (e.key === 'Escape') {
+      closeDeclareForm();
+    }
+  });
+
+  // 시각적 관계 맵 OS 창 (Obsidian 스타일 열매 방사형 그래프)
+  function openRelationMapWindow() {
+    const winId = 'app-relation-map';
+    const existing = WinManager.getWindow(winId);
+    if (existing) {
+      existing.restore();
+      return;
+    }
+
+    const wrap = document.createElement('div');
+    wrap.className = 'relmap-wrap';
+    wrap.innerHTML =
+      `<div class="relmap-toolbar">` +
+      `  <div class="relmap-toolbar-group">` +
+      `    <div class="relmap-mode-pills" data-role="mode">` +
+      `      <button type="button" class="relmap-pill active" data-mode="fruit">🍇 열매 방사형</button>` +
+      `      <button type="button" class="relmap-pill" data-mode="obsidian">🕸️ 전체 옵시디언</button>` +
+      `    </div>` +
+      `    <div class="relmap-mode-pills" data-role="cat">` +
+      `      <button type="button" class="relmap-pill active" data-cat="all">전체</button>` +
+      `      <button type="button" class="relmap-pill" data-cat="project">🚀 프로젝트</button>` +
+      `      <button type="button" class="relmap-pill" data-cat="area">🧭 영역</button>` +
+      `      <button type="button" class="relmap-pill" data-cat="resource">📚 리소스</button>` +
+      `      <button type="button" class="relmap-pill" data-cat="unassigned">⚠️ 미분류</button>` +
+      `      <button type="button" class="relmap-pill" data-cat="parent">⬆️ 상하</button>` +
+      `    </div>` +
+      `  </div>` +
+      `  <div class="relmap-toolbar-group">` +
+      `    <input type="text" class="relmap-search" placeholder="🔍 노드 검색..." autocomplete="off">` +
+      `    <button type="button" class="relmap-action-btn" data-act="collapse" title="열매 허브만 남기고 접기">🌱 접기</button>` +
+      `    <button type="button" class="relmap-action-btn" data-act="expand-all" title="연결된 모든 열매 펼치기">🌸 전체 펼치기</button>` +
+      `    <button type="button" class="relmap-action-btn" data-act="reset" title="화면 중앙 정렬">🎯 중앙</button>` +
+      `    <button type="button" class="relmap-action-btn" data-act="refresh" title="관계 데이터 새로고침">🔄</button>` +
+      `  </div>` +
+      `</div>` +
+      `<div class="relmap-stage">` +
+      `  <canvas class="relmap-canvas-el"></canvas>` +
+      `  <div class="relmap-hud-hint">클릭: 열매 방사형 펼치기/접기 · 더블클릭: 파일 열기 · 드래그: 이동 · 휠: 확대/축소</div>` +
+      `  <div class="relmap-inspector" style="display:none;">` +
+      `    <div class="relmap-insp-info">` +
+      `      <span class="relmap-insp-title"></span>` +
+      `      <span class="relmap-insp-sub"></span>` +
+      `    </div>` +
+      `    <div class="relmap-insp-actions">` +
+      `      <button type="button" class="relmap-action-btn" data-insp="navigate">📂 이동</button>` +
+      `      <button type="button" class="relmap-action-btn" data-insp="open">🚀 열기</button>` +
+      `      <button type="button" class="relmap-action-btn" data-insp="link">🔗 관계 추가</button>` +
+      `    </div>` +
+      `  </div>` +
+      `</div>`;
+
+    const stage = wrap.querySelector('.relmap-stage');
+    const canvas = wrap.querySelector('.relmap-canvas-el');
+    const ctx = canvas.getContext('2d');
+    const searchInput = wrap.querySelector('.relmap-search');
+    const inspector = wrap.querySelector('.relmap-inspector');
+    const inspTitle = wrap.querySelector('.relmap-insp-title');
+    const inspSub = wrap.querySelector('.relmap-insp-sub');
+
+    const HUB_DEFS = [
+      { id: 'hub:project', type: 'project', icon: '🚀', name: '프로젝트', color: '#818cf8', glow: 'rgba(129,140,248,0.42)' },
+      { id: 'hub:area', type: 'area', icon: '🧭', name: '영역', color: '#34d399', glow: 'rgba(52,211,153,0.40)' },
+      { id: 'hub:resource', type: 'resource', icon: '📚', name: '리소스', color: '#fbbf24', glow: 'rgba(251,191,36,0.40)' },
+      { id: 'hub:unassigned', type: 'unassigned', icon: '⚠️', name: '미분류', color: '#fb7185', glow: 'rgba(251,113,133,0.42)' }
+    ];
+
+    const EDGE_COLORS = {
+      project: '#818cf8',
+      area: '#34d399',
+      resource: '#fbbf24',
+      unassigned: '#fb7185',
+      parent: '#c084fc',
+      related: '#38bdf8',
+      reference: '#fb923c'
+    };
+
+    let viewMode = 'fruit'; // 'fruit' | 'obsidian'
+    let catFilter = 'all';  // 'all' | 'project' | 'area' | 'resource' | 'parent'
+    let searchText = '';
+    let expandedIds = new Set(); // 현재 방사형으로 펼쳐진 허브/노드 ID
+    let cam = { x: 0, y: 0, zoom: 1 };
+    let hoveredId = null;
+    let selectedId = null;
+    let dragNodeId = null;
+    let isPanning = false;
+    let pointerDownPos = { x: 0, y: 0 };
+    let pointerMoved = false;
+    let lastPanPos = { x: 0, y: 0 };
+    let rafId = 0;
+
+    // 그래프 물리/렌더 노드 상태 (위치 보존하여 부드러운 스프링 애니메이션)
+    const nodeState = new Map(); // id -> { id, isHub, hubType, icon, name, color, glow, r, x, y, tx, ty, scale, alpha, pinned, fsNode, parentId, hiddenCount }
+    let visibleNodeIds = new Set();
+    let visibleEdges = []; // { from, to, type, label, isHubEdge }
+    let allValidRels = [];
+    let adjMap = new Map(); // nodeId -> Array<{ neighborId, rel }>
+    let hubMembers = { project: [], area: [], resource: [], unassigned: [] };
+
+    function getFilteredRels() {
+      if (catFilter === 'unassigned') return [];
+      const valid = (state.relations || []).filter((r) => {
+        const s = resolveAnyNode(r.sourceId);
+        const t = resolveAnyNode(r.targetId);
+        if (!s || !t || !isItemVisible(s) || !isItemVisible(t)) return false;
+        if (catFilter !== 'all' && r.type !== catFilter) return false;
+        return true;
+      });
+      return valid;
+    }
+
+    function getPrimaryColorForNode(nodeId) {
+      if ((hubMembers.unassigned || []).includes(nodeId)) {
+        return { color: '#fb7185', glow: 'rgba(251,113,133,0.36)' };
+      }
+      const links = adjMap.get(nodeId) || [];
+      if (links.some((l) => l.rel.type === 'project')) return { color: '#818cf8', glow: 'rgba(129,140,248,0.36)' };
+      if (links.some((l) => l.rel.type === 'area')) return { color: '#34d399', glow: 'rgba(52,211,153,0.34)' };
+      if (links.some((l) => l.rel.type === 'resource')) return { color: '#fbbf24', glow: 'rgba(251,191,36,0.34)' };
+      if (links.some((l) => l.rel.type === 'parent')) return { color: '#c084fc', glow: 'rgba(192,132,252,0.34)' };
+      return { color: '#38bdf8', glow: 'rgba(56,189,248,0.34)' };
+    }
+
+    function rebuildGraphData(spawnFromId = null) {
+      allValidRels = getFilteredRels();
+      adjMap = new Map();
+      const memberSets = { project: new Set(), area: new Set(), resource: new Set(), unassigned: new Set() };
+
+      const pushAdj = (aId, bId, relObj) => {
+        if (!aId || !bId || aId === bId) return;
+        if (!adjMap.has(aId)) adjMap.set(aId, []);
+        if (!adjMap.has(bId)) adjMap.set(bId, []);
+        if (!adjMap.get(aId).some((x) => x.neighborId === bId && x.rel.type === relObj.type)) {
+          adjMap.get(aId).push({ neighborId: bId, rel: relObj });
+        }
+        if (!adjMap.get(bId).some((x) => x.neighborId === aId && x.rel.type === relObj.type)) {
+          adjMap.get(bId).push({ neighborId: aId, rel: relObj });
+        }
+      };
+
+      // 1) 프로젝트 · 영역 · 리소스 허브 하위에는 PARA로 선언된 엔티티 폴더만 직접 연결
+      ['project', 'area', 'resource'].forEach((pType) => {
+        if (catFilter !== 'all' && catFilter !== pType) return;
+        const entities = getParaEntities(pType).filter((n) => isItemVisible(n));
+        entities.forEach((ent) => {
+          memberSets[pType].add(ent.id);
+          // 선언된 프로젝트/영역/리소스 폴더 안의 자식 파일·폴더는 해당 엔티티를 눌렀을 때 2차 방사형으로 펼쳐짐
+          if (Array.isArray(ent.children)) {
+            ent.children.forEach((child) => {
+              if (child && isItemVisible(child)) {
+                pushAdj(ent.id, child.id, { id: `folder:${ent.id}:${child.id}`, sourceId: ent.id, targetId: child.id, type: pType, label: '' });
+              }
+            });
+          }
+        });
+      });
+
+      // 2) 미분류(지정필요) 허브에는 PARA에 아직 연결/배치되지 않은 파일들을 표시
+      if (catFilter === 'all' || catFilter === 'unassigned') {
+        getUnassignedNodes(isItemVisible).forEach((n) => {
+          memberSets.unassigned.add(n.id);
+        });
+      }
+
+      // 3) DB에 저장된 명시적 연결 관계는 각 엔티티/파일 간 2차·3차 연쇄 연결로만 반영 (허브에 일반 파일을 직접 붙이지 않음)
+      allValidRels.forEach((rel) => {
+        pushAdj(rel.sourceId, rel.targetId, rel);
+      });
+
+      hubMembers = {
+        project: Array.from(memberSets.project),
+        area: Array.from(memberSets.area),
+        resource: Array.from(memberSets.resource),
+        unassigned: Array.from(memberSets.unassigned)
+      };
+
+      const nextVisible = new Set();
+      const nextEdges = [];
+      const edgeKeySet = new Set();
+
+      const addEdgeUnique = (from, to, type, label, isHubEdge = false) => {
+        const key = isHubEdge ? `h:${from}->${to}` : `${type}:${[from, to].sort().join('::')}`;
+        if (edgeKeySet.has(key)) return;
+        edgeKeySet.add(key);
+        nextEdges.push({ from, to, type, label: label || '', isHubEdge });
+      };
+
+      const ensureFileNode = (id, parentId, tx, ty) => {
+        const fsNode = resolveAnyNode(id);
+        if (!fsNode) return null;
+        const deg = (adjMap.get(id) || []).length;
+        const palette = getPrimaryColorForNode(id);
+        const radius = Math.min(25, 16 + Math.min(6, deg) * 1.4);
+        let st = nodeState.get(id);
+        if (!st) {
+          const spawnParent = (spawnFromId && nodeState.get(spawnFromId)) || (parentId && nodeState.get(parentId));
+          const sx = spawnParent ? spawnParent.x : 0;
+          const sy = spawnParent ? spawnParent.y : 0;
+          st = {
+            id,
+            isHub: false,
+            icon: fsNode.icon || (fsNode.type === 'folder' ? '📁' : '📄'),
+            name: fsNode.name,
+            color: palette.color,
+            glow: palette.glow,
+            r: radius,
+            x: sx,
+            y: sy,
+            tx,
+            ty,
+            scale: 0.15,
+            alpha: 0,
+            pinned: false,
+            fsNode,
+            parentId,
+            hiddenCount: 0
+          };
+          nodeState.set(id, st);
+        } else {
+          st.icon = fsNode.icon || (fsNode.type === 'folder' ? '📁' : '📄');
+          st.name = fsNode.name;
+          st.color = palette.color;
+          st.glow = palette.glow;
+          st.r = radius;
+          st.fsNode = fsNode;
+          if (!st.pinned) {
+            st.tx = tx;
+            st.ty = ty;
+          }
+        }
+        nextVisible.add(id);
+        return st;
+      };
+
+      if (viewMode === 'fruit') {
+        // 1. 3개 PARA 열매 허브 배치 (필터에 맞게 표시)
+        const activeHubs = HUB_DEFS.filter((h) => catFilter === 'all' || catFilter === h.type);
+        const hubSpread = activeHubs.length === 1 ? 0 : 128;
+
+        activeHubs.forEach((h, idx) => {
+          const angle = activeHubs.length === 1 ? 0 : -Math.PI / 2 + (idx * 2 * Math.PI) / activeHubs.length;
+          const hx = Math.cos(angle) * hubSpread;
+          const hy = Math.sin(angle) * hubSpread;
+          let st = nodeState.get(h.id);
+          if (!st) {
+            st = {
+              id: h.id,
+              isHub: true,
+              hubType: h.type,
+              icon: h.icon,
+              name: h.name,
+              color: h.color,
+              glow: h.glow,
+              r: 34,
+              x: hx,
+              y: hy,
+              tx: hx,
+              ty: hy,
+              scale: 0.4,
+              alpha: 0,
+              pinned: false,
+              fsNode: null,
+              parentId: null,
+              hiddenCount: 0
+            };
+            nodeState.set(h.id, st);
+          } else if (!st.pinned) {
+            st.tx = hx;
+            st.ty = hy;
+          }
+          nextVisible.add(h.id);
+        });
+
+        // 상하(parent) 필터 전용일 때는 루트 노드들을 초기 열매로 노출
+        if (catFilter === 'parent') {
+          const allIds = Array.from(adjMap.keys());
+          const radius = Math.max(110, allIds.length * 16);
+          allIds.forEach((nid, idx) => {
+            const ang = (idx * 2 * Math.PI) / Math.max(1, allIds.length) - Math.PI / 2;
+            ensureFileNode(nid, null, Math.cos(ang) * radius, Math.sin(ang) * radius);
+          });
+        }
+
+        // 2. 펼쳐진 허브 → 1차 방사형 열매 펼치기
+        activeHubs.forEach((h) => {
+          if (!expandedIds.has(h.id)) return;
+          const hubSt = nodeState.get(h.id);
+          const members = hubMembers[h.type] || [];
+          const count = members.length;
+          const ringR = Math.max(145, Math.min(240, 115 + count * 13));
+          const baseAng = activeHubs.length > 1 ? Math.atan2(hubSt.ty, hubSt.tx) : -Math.PI / 2;
+          const arcSpan = activeHubs.length > 1 ? Math.min(Math.PI * 1.55, Math.max(Math.PI * 0.85, count * 0.42)) : Math.PI * 2;
+
+          members.forEach((mid, i) => {
+            const ang = activeHubs.length > 1
+              ? baseAng - arcSpan / 2 + (count === 1 ? arcSpan / 2 : (i * arcSpan) / (count - 1))
+              : (i * 2 * Math.PI) / Math.max(1, count) - Math.PI / 2;
+            const tx = hubSt.tx + Math.cos(ang) * ringR;
+            const ty = hubSt.ty + Math.sin(ang) * ringR;
+            ensureFileNode(mid, h.id, tx, ty);
+            addEdgeUnique(h.id, mid, h.type, '', true);
+          });
+        });
+
+        // 3. 펼쳐진 파일/폴더 노드 → 2차·3차 연쇄 방사형 펼치기 (BFS)
+        const queue = Array.from(expandedIds).filter((id) => !id.startsWith('hub:') && nextVisible.has(id));
+        const visitedExpand = new Set(queue);
+        let guard = 0;
+        while (queue.length > 0 && guard < 120) {
+          guard++;
+          const curId = queue.shift();
+          const curSt = nodeState.get(curId);
+          if (!curSt) continue;
+          const neighbors = adjMap.get(curId) || [];
+          const fresh = [];
+          neighbors.forEach(({ neighborId, rel }) => {
+            if (!nextVisible.has(neighborId)) {
+              fresh.push({ neighborId, rel });
+            }
+          });
+
+          const parentSt = curSt.parentId ? nodeState.get(curSt.parentId) : null;
+          const outAngle = parentSt ? Math.atan2(curSt.ty - parentSt.ty, curSt.tx - parentSt.tx) : Math.atan2(curSt.ty, curSt.tx);
+          const count = fresh.length;
+          const ringR = Math.max(125, Math.min(200, 105 + count * 11));
+          const span = Math.min(Math.PI * 1.45, Math.max(Math.PI * 0.65, count * 0.48));
+
+          fresh.forEach(({ neighborId }, idx) => {
+            const ang = count === 1
+              ? outAngle
+              : outAngle - span / 2 + (idx * span) / (count - 1);
+            const tx = curSt.tx + Math.cos(ang) * ringR;
+            const ty = curSt.ty + Math.sin(ang) * ringR;
+            ensureFileNode(neighborId, curId, tx, ty);
+            if (expandedIds.has(neighborId) && !visitedExpand.has(neighborId)) {
+              visitedExpand.add(neighborId);
+              queue.push(neighborId);
+            }
+          });
+        }
+
+        // 4. 현재 화면에 떠 있는 노드들 사이의 모든 DB 관계 및 선언 폴더-하위파일 엣지 연결
+        adjMap.forEach((links, nodeId) => {
+          if (!nextVisible.has(nodeId)) return;
+          links.forEach(({ neighborId, rel }) => {
+            if (nextVisible.has(neighborId)) {
+              addEdgeUnique(rel.sourceId, rel.targetId, rel.type, rel.label, false);
+            }
+          });
+        });
+      } else {
+        // 전체 옵시디언 모드: 선언된 PARA 엔티티 + 미분류 파일 + 연결된 모든 노드를 방사형 별자리로 배치
+        const allIdSet = new Set(adjMap.keys());
+        ['project', 'area', 'resource', 'unassigned'].forEach((pType) => {
+          (hubMembers[pType] || []).forEach((id) => allIdSet.add(id));
+        });
+        const allIds = Array.from(allIdSet);
+        // 연결 수(degree) 높은 허브 노드를 안쪽 링에 배치
+        allIds.sort((a, b) => (adjMap.get(b)?.length || 0) - (adjMap.get(a)?.length || 0));
+        allIds.forEach((nid, idx) => {
+          const ring = idx === 0 && allIds.length > 4 ? 0 : (idx < 7 ? 1 : (idx < 20 ? 2 : 3));
+          const ringR = ring === 0 ? 0 : ring === 1 ? 140 : ring === 2 ? 255 : 365;
+          const ang = idx * 2.3999632; // 황금각 방사형 분포
+          ensureFileNode(nid, null, Math.cos(ang) * ringR, Math.sin(ang) * ringR);
+        });
+        adjMap.forEach((links, nodeId) => {
+          if (!nextVisible.has(nodeId)) return;
+          links.forEach(({ neighborId, rel }) => {
+            if (nextVisible.has(neighborId)) {
+              addEdgeUnique(rel.sourceId, rel.targetId, rel.type, rel.label, false);
+            }
+          });
+        });
+      }
+
+      // 5. 각 노드의 미펼침(숨겨진) 연결 개수 계산 (+N 열매 배지용)
+      nextVisible.forEach((id) => {
+        const st = nodeState.get(id);
+        if (!st) return;
+        if (st.isHub) {
+          const members = hubMembers[st.hubType] || [];
+          st.hiddenCount = expandedIds.has(id) ? 0 : members.length;
+        } else {
+          const neighbors = adjMap.get(id) || [];
+          const uniqHidden = new Set();
+          neighbors.forEach(({ neighborId }) => {
+            if (!nextVisible.has(neighborId)) uniqHidden.add(neighborId);
+          });
+          st.hiddenCount = uniqHidden.size;
+        }
+      });
+
+      // 사라진 노드는 상태 정리
+      Array.from(nodeState.keys()).forEach((id) => {
+        if (!nextVisible.has(id)) nodeState.delete(id);
+      });
+
+      visibleNodeIds = nextVisible;
+      visibleEdges = nextEdges;
+      updateInspector();
+    }
+
+    function updateInspector() {
+      if (!selectedId || selectedId.startsWith('hub:') || !nodeState.has(selectedId)) {
+        inspector.style.display = 'none';
+        return;
+      }
+      const st = nodeState.get(selectedId);
+      if (!st || !st.fsNode) {
+        inspector.style.display = 'none';
+        return;
+      }
+      const rels = getRelationsForNode(st.fsNode.id);
+      const pCnt = (rels.projects || []).length;
+      const aCnt = (rels.areas || []).length;
+      const rCnt = (rels.resources || []).length;
+      const hCnt = (rels.parents || []).length + (rels.children || []).length;
+      inspTitle.textContent = `${st.icon} ${st.name}`;
+      inspSub.textContent = `🚀 프로젝트 ${pCnt} · 🧭 영역 ${aCnt} · 📚 리소스 ${rCnt}` + (hCnt ? ` · ⬆️⬇️ 상하 ${hCnt}` : '');
+      inspector.style.display = 'flex';
+    }
+
+    function screenToWorld(sx, sy) {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: (sx - rect.width / 2 - cam.x) / cam.zoom,
+        y: (sy - rect.height / 2 - cam.y) / cam.zoom
+      };
+    }
+
+    function hitTestNode(wx, wy) {
+      const ids = Array.from(visibleNodeIds).reverse();
+      for (const id of ids) {
+        const st = nodeState.get(id);
+        if (!st) continue;
+        const dx = wx - st.x;
+        const dy = wy - st.y;
+        const hitR = st.r + 7;
+        if (dx * dx + dy * dy <= hitR * hitR) return st;
+      }
+      return null;
+    }
+
+    function resizeCanvas() {
+      const rect = stage.getBoundingClientRect();
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const w = Math.max(300, Math.floor(rect.width));
+      const h = Math.max(240, Math.floor(rect.height));
+      if (canvas.width !== Math.floor(w * dpr) || canvas.height !== Math.floor(h * dpr)) {
+        canvas.width = Math.floor(w * dpr);
+        canvas.height = Math.floor(h * dpr);
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      return { w, h };
+    }
+
+    function stepPhysics() {
+      const arr = Array.from(visibleNodeIds).map((id) => nodeState.get(id)).filter(Boolean);
+      // 1. 부드러운 타겟 스프링 이동
+      for (const n of arr) {
+        n.scale += (1 - n.scale) * 0.16;
+        n.alpha += (1 - n.alpha) * 0.16;
+        if (n.id === dragNodeId || n.pinned) continue;
+        n.x += (n.tx - n.x) * 0.13;
+        n.y += (n.ty - n.y) * 0.13;
+      }
+      // 2. 가벼운 노드 간 반발력 (겹침 방지)
+      for (let i = 0; i < arr.length; i++) {
+        for (let j = i + 1; j < arr.length; j++) {
+          const a = arr[i];
+          const b = arr[j];
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const dist = Math.hypot(dx, dy) || 0.01;
+          const minDist = a.r + b.r + 42;
+          if (dist < minDist) {
+            const push = (minDist - dist) * 0.045;
+            const ux = dx / dist;
+            const uy = dy / dist;
+            if (!a.pinned && a.id !== dragNodeId && !a.isHub) {
+              a.x -= ux * push;
+              a.y -= uy * push;
+              a.tx -= ux * push * 0.4;
+              a.ty -= uy * push * 0.4;
+            }
+            if (!b.pinned && b.id !== dragNodeId && !b.isHub) {
+              b.x += ux * push;
+              b.y += uy * push;
+              b.tx += ux * push * 0.4;
+              b.ty += uy * push * 0.4;
+            }
+          }
+        }
+      }
+    }
+
+    function drawFrame() {
+      if (!document.body.contains(wrap)) {
+        cancelAnimationFrame(rafId);
+        return;
+      }
+      const { w, h } = resizeCanvas();
+      stepPhysics();
+
+      ctx.clearRect(0, 0, w, h);
+      ctx.save();
+      ctx.translate(w / 2 + cam.x, h / 2 + cam.y);
+      ctx.scale(cam.zoom, cam.zoom);
+
+      const q = searchText.trim().toLowerCase();
+      const focusId = hoveredId || selectedId;
+      const connectedToFocus = new Set();
+      if (focusId) {
+        connectedToFocus.add(focusId);
+        visibleEdges.forEach((e) => {
+          if (e.from === focusId) connectedToFocus.add(e.to);
+          if (e.to === focusId) connectedToFocus.add(e.from);
+        });
+      }
+
+      // 1. Draw curved glowing edges
+      visibleEdges.forEach((e) => {
+        const a = nodeState.get(e.from);
+        const b = nodeState.get(e.to);
+        if (!a || !b) return;
+        const isHi = !focusId || e.from === focusId || e.to === focusId;
+        const col = EDGE_COLORS[e.type] || '#64748b';
+        ctx.save();
+        ctx.globalAlpha = Math.min(a.alpha, b.alpha) * (isHi ? (e.isHubEdge ? 0.55 : 0.78) : 0.14);
+        ctx.strokeStyle = col;
+        ctx.lineWidth = isHi ? (e.isHubEdge ? 2.2 : 1.9) : 1.1;
+        if (e.type === 'related' || e.type === 'reference') {
+          ctx.setLineDash([5, 4]);
+        }
+
+        const mx = (a.x + b.x) / 2;
+        const my = (a.y + b.y) / 2;
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const curve = e.isHubEdge ? 0.08 : 0.12;
+        const cx = mx - dy * curve;
+        const cy = my + dx * curve;
+
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.quadraticCurveTo(cx, cy, b.x, b.y);
+        ctx.stroke();
+
+        if (e.label && isHi && cam.zoom >= 0.7) {
+          ctx.setLineDash([]);
+          ctx.font = '600 10px Pretendard, system-ui, sans-serif';
+          ctx.fillStyle = '#cbd5e1';
+          ctx.textAlign = 'center';
+          ctx.fillText(e.label, cx, cy - 4);
+        }
+        ctx.restore();
+      });
+
+      // 2. Draw nodes (Fruit Hubs & File Orbs)
+      visibleNodeIds.forEach((id) => {
+        const n = nodeState.get(id);
+        if (!n) return;
+        const isMatched = q ? n.name.toLowerCase().includes(q) : false;
+        const isHi = (!focusId || connectedToFocus.has(id)) && (!q || isMatched);
+        const isExpanded = expandedIds.has(id);
+        const r = n.r * n.scale;
+
+        ctx.save();
+        ctx.globalAlpha = n.alpha * (isHi ? 1 : 0.22);
+
+        // Outer Obsidian / Fruit Glow
+        if (n.isHub || isExpanded || id === hoveredId || id === selectedId || isMatched) {
+          const grad = ctx.createRadialGradient(n.x, n.y, r * 0.4, n.x, n.y, r * (n.isHub ? 2.1 : 1.9));
+          grad.addColorStop(0, n.glow);
+          grad.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = grad;
+          ctx.beginPath();
+          ctx.arc(n.x, n.y, r * (n.isHub ? 2.1 : 1.9), 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // Main orb body
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+        ctx.fillStyle = n.isHub ? '#111827' : '#0f172a';
+        ctx.fill();
+
+        // Colored rim
+        ctx.lineWidth = id === selectedId || isMatched ? 3 : (n.isHub || isExpanded ? 2.4 : 1.6);
+        ctx.strokeStyle = isMatched ? '#f43f5e' : n.color;
+        ctx.stroke();
+
+        // Inner icon
+        ctx.font = `${n.isHub ? 20 : 14}px system-ui, "Segoe UI Emoji", sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#f8fafc';
+        ctx.fillText(n.icon, n.x, n.y + 1);
+
+        // Unexpanded fruit count badge (+N)
+        if (n.hiddenCount > 0) {
+          const bx = n.x + r * 0.76;
+          const by = n.y - r * 0.72;
+          ctx.beginPath();
+          ctx.arc(bx, by, 10, 0, Math.PI * 2);
+          ctx.fillStyle = n.color;
+          ctx.fill();
+          ctx.font = '800 9.5px Pretendard, system-ui, sans-serif';
+          ctx.fillStyle = '#090d1a';
+          ctx.fillText(`+${n.hiddenCount}`, bx, by + 0.5);
+        } else if (isExpanded && viewMode === 'fruit') {
+          // Expanded indicator dot
+          const bx = n.x + r * 0.76;
+          const by = n.y - r * 0.72;
+          ctx.beginPath();
+          ctx.arc(bx, by, 5, 0, Math.PI * 2);
+          ctx.fillStyle = '#ffffff';
+          ctx.fill();
+        }
+
+        // Label below orb
+        const shortName = n.name.length > 16 ? n.name.slice(0, 15) + '…' : n.name;
+        const labelText = n.isHub ? `${shortName} (${(hubMembers[n.hubType] || []).length})` : shortName;
+        ctx.font = `${n.isHub ? '700 12px' : '600 11px'} Pretendard, system-ui, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        const tw = ctx.measureText(labelText).width;
+        const lx = n.x;
+        const ly = n.y + r + 6;
+        ctx.fillStyle = 'rgba(9, 13, 26, 0.78)';
+        ctx.beginPath();
+        if (ctx.roundRect) {
+          ctx.roundRect(lx - tw / 2 - 6, ly - 2, tw + 12, 17, 6);
+        } else {
+          ctx.rect(lx - tw / 2 - 6, ly - 2, tw + 12, 17);
+        }
+        ctx.fill();
+        ctx.fillStyle = isHi ? '#f8fafc' : '#94a3b8';
+        ctx.fillText(labelText, lx, ly + 1);
+
+        ctx.restore();
+      });
+
+      ctx.restore();
+      rafId = requestAnimationFrame(drawFrame);
+    }
+
+    // Pointer Events (Click Bloom · Double-Click Open · Drag Node/Pan · Wheel Zoom)
+    canvas.addEventListener('mousedown', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const sx = e.clientX - rect.left;
+      const sy = e.clientY - rect.top;
+      pointerDownPos = { x: sx, y: sy };
+      pointerMoved = false;
+      const wPos = screenToWorld(sx, sy);
+      const hit = hitTestNode(wPos.x, wPos.y);
+      if (hit) {
+        dragNodeId = hit.id;
+        canvas.classList.add('dragging');
+      } else {
+        isPanning = true;
+        lastPanPos = { x: e.clientX, y: e.clientY };
+        canvas.classList.add('dragging');
+      }
+    });
+
+    canvas.addEventListener('mousemove', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const sx = e.clientX - rect.left;
+      const sy = e.clientY - rect.top;
+      if (Math.hypot(sx - pointerDownPos.x, sy - pointerDownPos.y) > 4) {
+        pointerMoved = true;
+      }
+      if (dragNodeId) {
+        const st = nodeState.get(dragNodeId);
+        if (st) {
+          const wPos = screenToWorld(sx, sy);
+          st.x = wPos.x;
+          st.y = wPos.y;
+          st.tx = wPos.x;
+          st.ty = wPos.y;
+          st.pinned = true;
+        }
+        return;
+      }
+      if (isPanning) {
+        cam.x += e.clientX - lastPanPos.x;
+        cam.y += e.clientY - lastPanPos.y;
+        lastPanPos = { x: e.clientX, y: e.clientY };
+        return;
+      }
+      const wPos = screenToWorld(sx, sy);
+      const hit = hitTestNode(wPos.x, wPos.y);
+      hoveredId = hit ? hit.id : null;
+      canvas.style.cursor = hit ? 'pointer' : 'grab';
+    });
+
+    const endDrag = (e) => {
+      const wasDraggingNode = dragNodeId;
+      dragNodeId = null;
+      isPanning = false;
+      canvas.classList.remove('dragging');
+      if (pointerMoved) return;
+
+      const rect = canvas.getBoundingClientRect();
+      const sx = e.clientX - rect.left;
+      const sy = e.clientY - rect.top;
+      const wPos = screenToWorld(sx, sy);
+      const hit = hitTestNode(wPos.x, wPos.y);
+
+      if (!hit) {
+        selectedId = null;
+        updateInspector();
+        return;
+      }
+
+      selectedId = hit.id;
+      if (viewMode === 'fruit') {
+        if (hit.isHub) {
+          const members = hubMembers[hit.hubType] || [];
+          if (members.length === 0) {
+            showToast(`아직 ${hit.icon} ${hit.name} 연관으로 연결된 파일이 없습니다. 우측 [🗃️ 연결 DB] 탭에서 연결해 보세요.`);
+            return;
+          }
+        }
+        if (expandedIds.has(hit.id)) {
+          expandedIds.delete(hit.id);
+        } else {
+          expandedIds.add(hit.id);
+        }
+        rebuildGraphData(hit.id);
+      } else {
+        updateInspector();
+      }
+    };
+
+    canvas.addEventListener('mouseup', endDrag);
+    canvas.addEventListener('mouseleave', () => {
+      dragNodeId = null;
+      isPanning = false;
+      hoveredId = null;
+      canvas.classList.remove('dragging');
+    });
+
+    canvas.addEventListener('dblclick', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const wPos = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+      const hit = hitTestNode(wPos.x, wPos.y);
+      if (hit && !hit.isHub && hit.fsNode) {
+        launchItemDirectly(hit.fsNode);
+      }
+    });
+
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left - rect.width / 2;
+      const my = e.clientY - rect.top - rect.height / 2;
+      const factor = e.deltaY < 0 ? 1.12 : 0.89;
+      const nextZoom = Math.max(0.35, Math.min(2.4, cam.zoom * factor));
+      const ratio = nextZoom / cam.zoom;
+      cam.x = mx - (mx - cam.x) * ratio;
+      cam.y = my - (my - cam.y) * ratio;
+      cam.zoom = nextZoom;
+    }, { passive: false });
+
+    // Toolbar Controls
+    wrap.querySelectorAll('[data-role="mode"] .relmap-pill').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        viewMode = btn.dataset.mode || 'fruit';
+        wrap.querySelectorAll('[data-role="mode"] .relmap-pill').forEach((b) => b.classList.toggle('active', b === btn));
+        nodeState.clear();
+        cam = { x: 0, y: 0, zoom: 1 };
+        rebuildGraphData();
+      });
+    });
+
+    wrap.querySelectorAll('[data-role="cat"] .relmap-pill').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        catFilter = btn.dataset.cat || 'all';
+        wrap.querySelectorAll('[data-role="cat"] .relmap-pill').forEach((b) => b.classList.toggle('active', b === btn));
+        nodeState.clear();
+        if (catFilter !== 'all' && catFilter !== 'parent') {
+          expandedIds = new Set([`hub:${catFilter}`]);
+        }
+        cam = { x: 0, y: 0, zoom: 1 };
+        rebuildGraphData();
+      });
+    });
+
+    searchInput.addEventListener('input', (e) => {
+      searchText = e.target.value || '';
+      const q = searchText.trim().toLowerCase();
+      if (!q) return;
+      for (const id of visibleNodeIds) {
+        const st = nodeState.get(id);
+        if (st && st.name.toLowerCase().includes(q)) {
+          cam.x = -st.x * cam.zoom;
+          cam.y = -st.y * cam.zoom;
+          break;
+        }
+      }
+    });
+
+    wrap.querySelector('[data-act="collapse"]').addEventListener('click', () => {
+      expandedIds.clear();
+      selectedId = null;
+      rebuildGraphData();
+    });
+
+    wrap.querySelector('[data-act="expand-all"]').addEventListener('click', () => {
+      HUB_DEFS.forEach((h) => expandedIds.add(h.id));
+      allValidRels.forEach((r) => {
+        expandedIds.add(r.sourceId);
+        expandedIds.add(r.targetId);
+      });
+      rebuildGraphData();
+    });
+
+    wrap.querySelector('[data-act="reset"]').addEventListener('click', () => {
+      cam = { x: 0, y: 0, zoom: 1 };
+      nodeState.forEach((st) => { st.pinned = false; });
+      rebuildGraphData();
+    });
+
+    wrap.querySelector('[data-act="refresh"]').addEventListener('click', () => {
+      rebuildGraphData();
+      showToast('관계 맵이 최신 DB 상태로 갱신되었습니다.');
+    });
+
+    wrap.querySelector('[data-insp="navigate"]').addEventListener('click', () => {
+      const st = selectedId ? nodeState.get(selectedId) : null;
+      if (st?.fsNode) navigateToNode(st.fsNode);
+    });
+    wrap.querySelector('[data-insp="open"]').addEventListener('click', () => {
+      const st = selectedId ? nodeState.get(selectedId) : null;
+      if (st?.fsNode) launchItemDirectly(st.fsNode);
+    });
+    wrap.querySelector('[data-insp="link"]').addEventListener('click', () => {
+      const st = selectedId ? nodeState.get(selectedId) : null;
+      if (st?.fsNode) openRelationModal(st.fsNode);
+    });
+
+    WinManager.openWindow({
+      id: winId,
+      title: 'PARA 관계 맵 (열매 방사형 · 옵시디언)',
+      icon: '🕸️',
+      meta: 'Radial Graph',
+      width: 960,
+      height: 640,
+      contentEl: wrap
+    });
+
+    rebuildGraphData();
+    rafId = requestAnimationFrame(drawFrame);
+  }
+
+  $('btn-open-relation-map')?.addEventListener('click', openRelationMapWindow);
+
+  // ================= Smartphone / Launchpad Home Screen =================
+  const elHomeScreen = $('home-screen');
+  const elAppBody = $('app-body');
+  const elBtnHomeMode = $('btn-home-mode');
+  const elPinAppModal = $('pin-app-modal');
+
+  function updateHomeClock() {
+    const clockEl = $('home-clock');
+    const dateEl = $('home-date');
+    if (!clockEl || !dateEl) return;
+    const now = new Date();
+    clockEl.textContent = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    dateEl.textContent = now.toLocaleDateString('ko-KR', { month: 'long', day: 'numeric', weekday: 'long' });
+  }
+
+  function getAppTileVisual(item) {
+    const name = String(item?.name || '').toLowerCase();
+    if (item.type === 'folder') return { icon: item.icon || '📁', grad: 'tile-grad-blue', badge: 'DIR' };
+    if (/\.html?$/.test(name) || isHtmlContentItem(item)) return { icon: item.icon || '🌐', grad: 'tile-grad-cyan', badge: 'APP' };
+    if (isSpreadsheetItem(item)) return { icon: item.icon || '📊', grad: 'tile-grad-emerald', badge: 'XLS' };
+    if (/\.md$/.test(name)) return { icon: item.icon || '📝', grad: 'tile-grad-indigo', badge: 'MD' };
+    if (/\.pdf$/.test(name)) return { icon: item.icon || '📕', grad: 'tile-grad-rose', badge: 'PDF' };
+    if (/\.pptx?$/.test(name)) return { icon: item.icon || '📙', grad: 'tile-grad-amber', badge: 'PPT' };
+    return { icon: item.icon || '📄', grad: 'tile-grad-slate', badge: '' };
+  }
+
+  function togglePinAppToHome(item) {
+    if (!item || item.id === 'root') return;
+    const idx = state.pinnedAppIds.indexOf(item.id);
+    if (idx >= 0) {
+      state.pinnedAppIds.splice(idx, 1);
+      persistPinnedApps();
+      scheduleDriveSync();
+      renderHomePinnedApps();
+      showToast(`📱 "${item.name}" 홈 화면 고정이 해제되었습니다.`);
+    } else {
+      state.pinnedAppIds.push(item.id);
+      persistPinnedApps();
+      scheduleDriveSync();
+      renderHomePinnedApps();
+      showToast(`📱 "${item.name}"이(가) 홈 화면 앱으로 등록되었습니다.`);
+    }
+  }
+
+  function renderHomePinnedApps() {
+    const grid = $('home-pinned-grid');
+    if (!grid) return;
+
+    const validPinned = [];
+    const seen = new Set();
+    state.pinnedAppIds = (state.pinnedAppIds || []).filter((id) => {
+      const node = findNodeAndParent(id)?.node;
+      if (node && isItemVisible(node) && !seen.has(id)) {
+        seen.add(id);
+        validPinned.push(node);
+        return true;
+      }
+      return false;
+    });
+
+    grid.innerHTML = '';
+    validPinned.forEach((item) => {
+      const vis = getAppTileVisual(item);
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'os-nav-subitem';
+      row.title = item.name;
+      row.innerHTML =
+        `<span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(vis.icon)} ${escapeHtml(item.name.replace(/\.(html?|md|xlsx)$/i, ''))}</span>` +
+        `<span class="para-entity-del" style="opacity:0.7;" title="고정 해제">✕</span>`;
+
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('.para-entity-del')) return;
+        closeOsNavMenu();
+        launchItemDirectly(item);
+      });
+      row.querySelector('.para-entity-del').addEventListener('click', (e) => {
+        e.stopPropagation();
+        togglePinAppToHome(item);
+      });
+      grid.appendChild(row);
+    });
+  }
+
+  function closeOsNavMenu() {
+    const menu = $('os-nav-menu');
+    if (menu) menu.style.display = 'none';
+  }
+
+  function setHomeMode(enable) {
+    isHomeMode = Boolean(enable);
+    if (elHomeScreen) elHomeScreen.style.display = isHomeMode ? 'block' : 'none';
+    if (elAppBody) elAppBody.style.display = isHomeMode ? 'none' : 'flex';
+    if (elBtnHomeMode) {
+      $('home-mode-icon').textContent = isHomeMode ? '🏠' : '🗂️';
+      $('home-mode-text').textContent = isHomeMode ? '대시보드' : '탐색기';
+    }
+    document.querySelectorAll('#os-nav-menu .os-nav-item[data-nav]').forEach((btn) => {
+      const nav = btn.dataset.nav;
+      btn.classList.toggle('active', (nav === 'dashboard' && isHomeMode) || (nav === 'explorer' && !isHomeMode));
+    });
+    if (isHomeMode) {
+      updateHomeClock();
+      renderHomePinnedApps();
+      refreshHomeDashboard();
+    }
+  }
+
+  // 좌측 상단 드롭다운 메뉴 (대시보드 · 탐색기 · 앱)
+  elBtnHomeMode?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const menu = $('os-nav-menu');
+    if (!menu) {
+      setHomeMode(!isHomeMode);
+      return;
+    }
+    const willOpen = menu.style.display === 'none';
+    if (willOpen) {
+      renderHomePinnedApps();
+      menu.style.display = 'flex';
+    } else {
+      menu.style.display = 'none';
+    }
+  });
+
+  $('os-nav-menu')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const navBtn = e.target.closest('.os-nav-item[data-nav]');
+    if (navBtn) {
+      const target = navBtn.dataset.nav;
+      if (target === 'dashboard') setHomeMode(true);
+      else if (target === 'explorer') setHomeMode(false);
+      closeOsNavMenu();
+    }
+  });
+
+  $('btn-nav-apps-toggle')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const list = $('os-nav-apps-list');
+    const arrow = $('nav-apps-arrow');
+    if (!list) return;
+    const hidden = list.style.display === 'none';
+    list.style.display = hidden ? 'flex' : 'none';
+    if (arrow) arrow.textContent = hidden ? '▾' : '▸';
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#os-nav-dropdown-wrap')) {
+      closeOsNavMenu();
+    }
+    if (!e.target.closest('#dfp-composer-para-wrap')) {
+      const pop = $('dfp-composer-para-popover');
+      if (pop) pop.style.display = 'none';
+    }
+    if (!e.target.closest('.dfp-card-para-wrap')) {
+      document.querySelectorAll('.dfp-card-para-popover').forEach((p) => { p.style.display = 'none'; });
+    }
+  });
+
+  $('home-builtin-grid')?.addEventListener('click', (e) => {
+    const tile = e.target.closest('.home-app-tile');
+    if (!tile) return;
+    closeOsNavMenu();
+    const app = tile.dataset.builtin;
+    if (app === 'explorer') {
+      setHomeMode(false);
+    } else if (app === 'markdown') {
+      createNew('doc');
+    } else if (app === 'spreadsheet' || app === 'origin') {
+      createNew('sheet');
+    } else if (app === 'relation-map') {
+      openRelationMapWindow();
+    } else if (app === 'ai-chat') {
+      setHomeMode(false);
+      switchRightTab('chat');
+    }
+  });
+
+  // ================= Home Dashboard: Daily Focus Planner + Reverse Schedule + Daily MD Memo Bin =================
+  let dfpSelectedMemoCat = 'todo'; // 'todo' | 'knowledge' | 'thinking'
+  let dfpMemoScope = 'today';      // 'today' | 'all'
+  let dfpActiveBinTab = 'all';     // 'all' | 'todo' | 'knowledge' | 'thinking' | 'unassigned'
+  let dfpActiveTaskTab = 'backlog'; // 'backlog' | 'archive'
+  let dfpSchedFormMode = 'once';   // 'once' | 'recurring'
+  const dfpComposerParaSet = new Set(); // 다중 선택된 'type::entityId'
+
+  function getTodayYMD(d = new Date()) {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  function getDfpStorageKey() {
+    const email = String(getActiveUserEmail() || 'guest').trim().toLowerCase();
+    return `brainOS_dfp_${encodeURIComponent(email)}`;
+  }
+
+  function loadDfpState() {
+    const defaults = {
+      top3: [], // [{ id, title, docId }]
+      backlog: [], // [{ id, title, docId }]
+      archive: [], // [{ id, title, completedAt, docId }]
+      completedDates: {}, // { 'YYYY-MM-DD': count }
+      schedules: [], // [{ id, type: 'once'|'recurring', date, weekdays, time, title, travelMins, prepMins, bufferMins, completedInstances: [] }]
+      checklist: [
+        { id: 'c1', text: '스마트폰·지갑', checked: false },
+        { id: 'c2', text: '노트북·충전기', checked: false },
+        { id: 'c3', text: '차키·교통카드', checked: false }
+      ]
+    };
+    try {
+      const raw = localStorage.getItem(getDfpStorageKey());
+      if (!raw) return defaults;
+      const parsed = JSON.parse(raw);
+      return {
+        ...defaults,
+        ...parsed,
+        top3: Array.isArray(parsed.top3) ? parsed.top3 : [],
+        backlog: Array.isArray(parsed.backlog) ? parsed.backlog : [],
+        archive: Array.isArray(parsed.archive) ? parsed.archive : [],
+        schedules: Array.isArray(parsed.schedules) ? parsed.schedules : [],
+        checklist: Array.isArray(parsed.checklist) ? parsed.checklist : defaults.checklist
+      };
+    } catch (_) {
+      return defaults;
+    }
+  }
+
+  function saveDfpState(st) {
+    try {
+      localStorage.setItem(getDfpStorageKey(), JSON.stringify(st));
+    } catch (_) {}
+  }
+
+  function getOrCreateDailyMemoFolder() {
+    if (!state.fileSystem.children) state.fileSystem.children = [];
+    let folder = state.fileSystem.children.find(
+      (c) => c.type === 'folder' && (c.id === 'daily-memo-inbox' || c.name === '일일 메모함')
+    );
+    if (!folder) {
+      folder = {
+        id: 'daily-memo-inbox',
+        name: '일일 메모함',
+        type: 'folder',
+        icon: '🗂️',
+        tag: '#일일메모',
+        children: []
+      };
+      state.fileSystem.children.unshift(folder);
+    }
+    return folder;
+  }
+
+  function inferMemoCategory(doc) {
+    if (doc.memoCategory && ['todo', 'knowledge', 'thinking'].includes(doc.memoCategory)) {
+      return doc.memoCategory;
+    }
+    const hay = `${doc.tag || ''} ${doc.name || ''}`.toLowerCase();
+    if (hay.includes('#todo') || hay.includes('할일')) return 'todo';
+    if (hay.includes('#thinking') || hay.includes('생각')) return 'thinking';
+    return 'knowledge';
+  }
+
+  function setDocMemoCategory(doc, newCat) {
+    if (!doc || !['todo', 'knowledge', 'thinking'].includes(newCat)) return;
+    doc.memoCategory = newCat;
+    const tagMap = { todo: '#Todo', knowledge: '#Knowledge', thinking: '#Thinking' };
+    const cleanTags = String(doc.tag || '')
+      .replace(/#(todo|knowledge|thinking)\b/gi, '')
+      .trim();
+    doc.tag = `${tagMap[newCat]}${cleanTags ? ' ' + cleanTags : ''}`;
+    if (newCat === 'todo') {
+      const dfp = loadDfpState();
+      const alreadyInTodo =
+        dfp.top3.some((t) => t.docId === doc.id) ||
+        dfp.backlog.some((t) => t.docId === doc.id);
+      if (!alreadyInTodo) {
+        const cleanTitle = String(doc.name || '').replace(/\.md$/i, '');
+        dfp.backlog.unshift({ id: `t-${genId()}`, title: cleanTitle, docId: doc.id });
+        saveDfpState(dfp);
+      }
+    }
+    saveAndRender();
+    scheduleDocFileSyncToDrive(doc, true);
+    refreshHomeDashboard();
+  }
+
+  function isDocParaUnassigned(doc) {
+    if (!doc) return true;
+    const rels = getRelationsForNode(doc.id);
+    const total = (rels.projects?.length || 0) + (rels.areas?.length || 0) + (rels.resources?.length || 0);
+    return total === 0;
+  }
+
+  function renderComposerParaUI() {
+    const btn = $('dfp-composer-para-btn');
+    const pop = $('dfp-composer-para-popover');
+    const chipsEl = $('dfp-composer-para-chips');
+    if (!btn || !pop || !chipsEl) return;
+
+    // 유효하지 않은 엔티티 정리
+    Array.from(dfpComposerParaSet).forEach((val) => {
+      const [, eid] = val.split('::');
+      if (!findParaEntity(eid)) dfpComposerParaSet.delete(val);
+    });
+
+    const cnt = dfpComposerParaSet.size;
+    btn.textContent = cnt > 0 ? `🧭 PARA (${cnt}) ▾` : '🧭 PARA ▾';
+
+    chipsEl.innerHTML = '';
+    dfpComposerParaSet.forEach((val) => {
+      const [, eid] = val.split('::');
+      const ent = findParaEntity(eid);
+      if (!ent) return;
+      const chip = document.createElement('span');
+      chip.className = 'dfp-para-chip-mini';
+      chip.innerHTML = `${escapeHtml(ent.icon)} ${escapeHtml(ent.name)} <span style="cursor:pointer; margin-left:2px;">✕</span>`;
+      chip.querySelector('span').addEventListener('click', () => {
+        dfpComposerParaSet.delete(val);
+        renderComposerParaUI();
+      });
+      chipsEl.appendChild(chip);
+    });
+
+    pop.innerHTML = '';
+    const groups = [
+      { type: 'project', label: '🚀 1. 프로젝트' },
+      { type: 'area', label: '🧭 2. 영역' },
+      { type: 'resource', label: '📚 3. 리소스' }
+    ];
+    let hasAny = false;
+    groups.forEach((g) => {
+      const ents = getParaEntities(g.type, { onlyActive: true });
+      if (ents.length === 0) return;
+      hasAny = true;
+      const title = document.createElement('div');
+      title.className = 'dfp-para-group-title';
+      title.textContent = g.label;
+      pop.appendChild(title);
+
+      ents.forEach((ent) => {
+        const key = `${g.type}::${ent.id}`;
+        const checked = dfpComposerParaSet.has(key);
+        const row = document.createElement('div');
+        row.className = 'dfp-para-check-row' + (checked ? ' checked' : '');
+        row.innerHTML =
+          `<span>${checked ? '☑' : '☐'}</span>` +
+          `<span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(ent.icon)} ${escapeHtml(ent.name)}</span>`;
+        row.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (dfpComposerParaSet.has(key)) dfpComposerParaSet.delete(key);
+          else dfpComposerParaSet.add(key);
+          renderComposerParaUI();
+        });
+        pop.appendChild(row);
+      });
+    });
+
+    if (!hasAny) {
+      pop.innerHTML = `<div style="padding:8px; font-size:0.73rem; color:var(--text-muted); text-align:center;">선언된 PARA 항목 없음</div>`;
+    }
+  }
+
+  $('dfp-composer-para-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const pop = $('dfp-composer-para-popover');
+    if (!pop) return;
+    const willOpen = pop.style.display === 'none';
+    renderComposerParaUI();
+    pop.style.display = willOpen ? 'flex' : 'none';
+  });
+
+  function populateDashboardParaSelect() {
+    renderComposerParaUI();
+  }
+
+  function saveQuickMemoToPhysicalStorage() {
+    const titleEl = $('dfp-memo-title-input');
+    const bodyEl = $('dfp-memo-body-input');
+    if (!bodyEl) return;
+
+    const rawTitle = String(titleEl?.value || '').trim();
+    const rawBody = String(bodyEl.value || '').trim();
+    if (!rawTitle && !rawBody) {
+      bodyEl.focus();
+      return;
+    }
+
+    saveStateForUndo();
+    const todayStr = getTodayYMD();
+    const inboxFolder = getOrCreateDailyMemoFolder();
+    const firstLine = (rawTitle || rawBody.split('\n')[0] || '메모')
+      .replace(/^[#\-*\s]+/, '')
+      .slice(0, 42)
+      .trim() || '메모';
+    const fileName = getUniqueNameInFolder(inboxFolder, firstLine, '.md');
+    const tagMap = { todo: '#Todo', knowledge: '#Knowledge', thinking: '#Thinking' };
+    const iconMap = { todo: '✅', knowledge: '💡', thinking: '💭' };
+
+    const newDoc = {
+      id: genId(),
+      type: 'doc',
+      name: fileName,
+      icon: iconMap[dfpSelectedMemoCat] || '📝',
+      tag: `${tagMap[dfpSelectedMemoCat]} #${todayStr}`,
+      summary: rawBody ? (rawTitle ? `# ${rawTitle}\n\n${rawBody}` : rawBody) : `# ${firstLine}`,
+      link: '',
+      dailyDate: todayStr,
+      memoCategory: dfpSelectedMemoCat,
+      createdAt: Date.now()
+    };
+
+    inboxFolder.children.unshift(newDoc);
+
+    // 중복 체크된 모든 PARA 영역을 동시에 연결
+    dfpComposerParaSet.forEach((paraVal) => {
+      if (paraVal.includes('::')) {
+        const [pType, pId] = paraVal.split('::');
+        addRelation({ sourceId: newDoc.id, targetId: pId, type: pType });
+      }
+    });
+    dfpComposerParaSet.clear();
+
+    if (dfpSelectedMemoCat === 'todo') {
+      const dfp = loadDfpState();
+      if (dfp.top3.length < 3) {
+        dfp.top3.push({ id: `t-${genId()}`, title: firstLine, docId: newDoc.id });
+      } else {
+        dfp.backlog.unshift({ id: `t-${genId()}`, title: firstLine, docId: newDoc.id });
+      }
+      saveDfpState(dfp);
+    }
+
+    if (titleEl) titleEl.value = '';
+    bodyEl.value = '';
+
+    saveAndRender();
+    scheduleDocFileSyncToDrive(newDoc, true);
+    syncItemToLocalFolderNow(newDoc, { allowAutoDownload: true }).catch(() => {});
+    refreshHomeDashboard();
+    showToast(`저장됨: ${fileName}`);
+  }
+
+  function renderDailyMemoBin() {
+    const listEl = $('dfp-memo-bin-list');
+    if (!listEl) return;
+    const todayStr = getTodayYMD();
+
+    const allDocs = collectAllNodes(state.fileSystem).filter((n) => {
+      if (!n || n.type !== 'doc' || !isItemVisible(n) || isSpreadsheetItem(n)) return false;
+      if (dfpMemoScope === 'today') {
+        return n.dailyDate === todayStr || String(n.tag || '').includes(todayStr);
+      }
+      return true;
+    });
+
+    const counts = { all: allDocs.length, todo: 0, knowledge: 0, thinking: 0, unassigned: 0 };
+    allDocs.forEach((d) => {
+      const c = inferMemoCategory(d);
+      counts[c] = (counts[c] || 0) + 1;
+      if (isDocParaUnassigned(d)) counts.unassigned++;
+    });
+
+    if ($('dfp-bin-count-all')) $('dfp-bin-count-all').textContent = String(counts.all);
+    if ($('dfp-bin-count-todo')) $('dfp-bin-count-todo').textContent = String(counts.todo);
+    if ($('dfp-bin-count-knowledge')) $('dfp-bin-count-knowledge').textContent = String(counts.knowledge);
+    if ($('dfp-bin-count-thinking')) $('dfp-bin-count-thinking').textContent = String(counts.thinking);
+    if ($('dfp-bin-count-unassigned')) $('dfp-bin-count-unassigned').textContent = String(counts.unassigned);
+
+    const filtered = allDocs.filter((d) => {
+      if (dfpActiveBinTab === 'all') return true;
+      if (dfpActiveBinTab === 'unassigned') return isDocParaUnassigned(d);
+      return inferMemoCategory(d) === dfpActiveBinTab;
+    });
+    listEl.innerHTML = '';
+
+    if (filtered.length === 0) {
+      listEl.innerHTML = `<div class="reldb-empty-card-msg" style="padding:16px 8px;">메모 없음</div>`;
+      return;
+    }
+
+    const paraGroups = [
+      { type: 'project', label: '🚀 1. 프로젝트' },
+      { type: 'area', label: '🧭 2. 영역' },
+      { type: 'resource', label: '📚 3. 리소스' }
+    ];
+
+    filtered.slice(0, 60).forEach((doc) => {
+      const cat = inferMemoCategory(doc);
+      const rels = getRelationsForNode(doc.id);
+      const currentParaLinks = [...(rels.projects || []), ...(rels.areas || []), ...(rels.resources || [])];
+      const linkedIdSet = new Set(currentParaLinks.map((x) => x.node.id));
+
+      const card = document.createElement('div');
+      card.className = 'dfp-memo-card';
+      card.draggable = true;
+      card.dataset.docId = doc.id;
+
+      card.addEventListener('dragstart', (e) => {
+        card.classList.add('dragging-card');
+        e.dataTransfer.setData('application/x-dfp-memo-id', doc.id);
+        e.dataTransfer.setData('text/plain', doc.id);
+      });
+      card.addEventListener('dragend', () => {
+        card.classList.remove('dragging-card');
+        document.querySelectorAll('.drag-over-tab').forEach((el) => el.classList.remove('drag-over-tab'));
+      });
+
+      const cleanSnippet = String(doc.summary || '').replace(/^#+\s*/gm, '').trim();
+
+      card.innerHTML =
+        `<div class="dfp-memo-card-top">` +
+        `  <span class="dfp-memo-card-title">${escapeHtml(doc.icon || '📝')} ${escapeHtml(doc.name.replace(/\.md$/i, ''))}</span>` +
+        `  <div style="display:flex; gap:4px; flex-shrink:0;">` +
+        (cat === 'todo' ? `<button type="button" class="dfp-mini-btn" data-act="to-top3" title="핵심 3가지로">★</button>` : '') +
+        `    <button type="button" class="dfp-mini-btn" data-act="open-md">MD</button>` +
+        `    <button type="button" class="dfp-mini-btn" data-act="locate">🗂️</button>` +
+        `  </div>` +
+        `</div>` +
+        (cleanSnippet ? `<div class="dfp-memo-card-body">${escapeHtml(cleanSnippet)}</div>` : '') +
+        `<div class="dfp-memo-card-foot">` +
+        `  <div class="dfp-cat-switch-group">` +
+        `    <button type="button" class="dfp-cat-mini ${cat === 'todo' ? 'active' : ''}" data-cat="todo">Todo</button>` +
+        `    <button type="button" class="dfp-cat-mini ${cat === 'knowledge' ? 'active' : ''}" data-cat="knowledge">Knowledge</button>` +
+        `    <button type="button" class="dfp-cat-mini ${cat === 'thinking' ? 'active' : ''}" data-cat="thinking">Thinking</button>` +
+        `  </div>` +
+        `  <div class="dfp-card-para-chips">` +
+        currentParaLinks.map(({ rel, node }) =>
+          `<span class="dfp-para-chip-mini" data-rel-id="${escapeHtml(rel.id)}">${escapeHtml(node.icon)} ${escapeHtml(node.name)} <span class="del-para" style="cursor:pointer;">✕</span></span>`
+        ).join('') +
+        `    <div class="dfp-multi-para-wrap dfp-card-para-wrap">` +
+        `      <button type="button" class="dfp-mini-btn dfp-card-para-btn">${currentParaLinks.length === 0 ? '⚠️ PARA＋' : '＋'}</button>` +
+        `      <div class="dfp-multi-para-popover dfp-card-para-popover" style="display:none;"></div>` +
+        `    </div>` +
+        `  </div>` +
+        `</div>`;
+
+      card.querySelector('.dfp-memo-card-title').addEventListener('click', () => openMarkdownWindow(doc, 'split'));
+      card.querySelector('[data-act="open-md"]').addEventListener('click', () => openMarkdownWindow(doc, 'split'));
+      card.querySelector('[data-act="locate"]').addEventListener('click', () => navigateToNode(doc));
+
+      card.querySelector('[data-act="to-top3"]')?.addEventListener('click', () => {
+        const dfp = loadDfpState();
+        if (dfp.top3.length >= 3) {
+          showToast('핵심 3가지가 모두 찼습니다.');
+          return;
+        }
+        const title = String(doc.name || '').replace(/\.md$/i, '');
+        dfp.backlog = dfp.backlog.filter((t) => t.docId !== doc.id);
+        if (!dfp.top3.some((t) => t.docId === doc.id)) {
+          dfp.top3.push({ id: `t-${genId()}`, title, docId: doc.id });
+          saveDfpState(dfp);
+          renderDfpTodos();
+        }
+      });
+
+      card.querySelectorAll('.dfp-cat-mini').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          setDocMemoCategory(doc, btn.dataset.cat);
+        });
+      });
+
+      card.querySelectorAll('.dfp-para-chip-mini .del-para').forEach((delEl) => {
+        delEl.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const relId = delEl.closest('.dfp-para-chip-mini')?.dataset.relId;
+          if (relId && removeRelation(relId)) {
+            saveAndRender();
+            refreshHomeDashboard();
+          }
+        });
+      });
+
+      const paraBtn = card.querySelector('.dfp-card-para-btn');
+      const paraPop = card.querySelector('.dfp-card-para-popover');
+      paraBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        document.querySelectorAll('.dfp-card-para-popover').forEach((p) => {
+          if (p !== paraPop) p.style.display = 'none';
+        });
+        const willOpen = paraPop.style.display === 'none';
+        if (!willOpen) {
+          paraPop.style.display = 'none';
+          return;
+        }
+        paraPop.innerHTML = '';
+        let anyEnt = false;
+        paraGroups.forEach((g) => {
+          const ents = getParaEntities(g.type, { onlyActive: true });
+          if (ents.length === 0) return;
+          anyEnt = true;
+          const gt = document.createElement('div');
+          gt.className = 'dfp-para-group-title';
+          gt.textContent = g.label;
+          paraPop.appendChild(gt);
+
+          ents.forEach((ent) => {
+            const isChecked = linkedIdSet.has(ent.id);
+            const rEl = document.createElement('div');
+            rEl.className = 'dfp-para-check-row' + (isChecked ? ' checked' : '');
+            rEl.innerHTML = `<span>${isChecked ? '☑' : '☐'}</span><span>${escapeHtml(ent.icon)} ${escapeHtml(ent.name)}</span>`;
+            rEl.addEventListener('click', (ev) => {
+              ev.stopPropagation();
+              const existing = currentParaLinks.find((x) => x.node.id === ent.id);
+              if (existing) {
+                removeRelation(existing.rel.id);
+              } else {
+                addRelation({ sourceId: doc.id, targetId: ent.id, type: g.type });
+              }
+              saveAndRender();
+              refreshHomeDashboard();
+            });
+            paraPop.appendChild(rEl);
+          });
+        });
+        if (!anyEnt) {
+          paraPop.innerHTML = `<div style="padding:8px; font-size:0.72rem; color:var(--text-muted); text-align:center;">PARA 항목 없음</div>`;
+        }
+        paraPop.style.display = 'flex';
+      });
+
+      listEl.appendChild(card);
+    });
+  }
+
+  // Todo Planner (오늘의 핵심 3가지 + 할 일 보관함 + 완료 아카이브)
+  function renderDfpTodos() {
+    const dfp = loadDfpState();
+    const todayStr = getTodayYMD();
+    const doneToday = Number(dfp.completedDates?.[todayStr] || 0);
+    const clampedDone = Math.min(3, doneToday);
+
+    const badge = $('dfp-completion-badge');
+    if (badge) badge.textContent = `${clampedDone} / 3`;
+    for (let i = 1; i <= 3; i++) {
+      const slotEl = $(`dfp-slot-${i}`);
+      if (slotEl) slotEl.classList.toggle('filled', i <= clampedDone);
+    }
+
+    const top3El = $('dfp-top3-list');
+    if (top3El) {
+      top3El.innerHTML = '';
+      for (let idx = 0; idx < 3; idx++) {
+        const task = dfp.top3[idx];
+        if (task) {
+          const row = document.createElement('div');
+          row.className = 'dfp-task-card';
+          row.innerHTML =
+            `<div class="dfp-task-left">` +
+            `  <span class="dfp-task-num">${idx + 1}</span>` +
+            `  <div class="dfp-task-title" contenteditable="true" spellcheck="false">${escapeHtml(task.title)}</div>` +
+            `</div>` +
+            `<div class="dfp-task-btns">` +
+            (task.docId ? `<button type="button" class="dfp-mini-btn" data-act="md">MD</button>` : '') +
+            `  <button type="button" class="dfp-mini-btn btn-done" data-act="done">✓</button>` +
+            `  <button type="button" class="dfp-mini-btn" data-act="down">↓</button>` +
+            `</div>`;
+
+          const titleDiv = row.querySelector('.dfp-task-title');
+          titleDiv.addEventListener('blur', () => {
+            const nextTitle = titleDiv.textContent.trim();
+            if (nextTitle && nextTitle !== task.title) {
+              const cur = loadDfpState();
+              if (cur.top3[idx]) {
+                cur.top3[idx].title = nextTitle;
+                saveDfpState(cur);
+              }
+            }
+          });
+          titleDiv.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              titleDiv.blur();
+            }
+          });
+
+          row.querySelector('[data-act="md"]')?.addEventListener('click', () => {
+            const doc = findNodeAndParent(task.docId)?.node;
+            if (doc) openMarkdownWindow(doc, 'split');
+          });
+
+          row.querySelector('[data-act="done"]').addEventListener('click', () => {
+            const cur = loadDfpState();
+            const removed = cur.top3.splice(idx, 1)[0];
+            if (removed) {
+              cur.archive.unshift({ ...removed, completedAt: todayStr });
+              if (!cur.completedDates) cur.completedDates = {};
+              cur.completedDates[todayStr] = Number(cur.completedDates[todayStr] || 0) + 1;
+              saveDfpState(cur);
+              renderDfpTodos();
+            }
+          });
+
+          row.querySelector('[data-act="down"]').addEventListener('click', () => {
+            const cur = loadDfpState();
+            const removed = cur.top3.splice(idx, 1)[0];
+            if (removed) {
+              cur.backlog.unshift(removed);
+              saveDfpState(cur);
+              renderDfpTodos();
+            }
+          });
+
+          top3El.appendChild(row);
+        } else {
+          const empty = document.createElement('div');
+          empty.className = 'dfp-empty-slot';
+          empty.innerHTML =
+            `<span>#${idx + 1}</span>` +
+            `<button type="button" class="dfp-mini-btn">＋ 추가</button>`;
+          empty.querySelector('button').addEventListener('click', () => {
+            const cur = loadDfpState();
+            if (cur.backlog.length > 0) {
+              cur.top3.push(cur.backlog.shift());
+              saveDfpState(cur);
+              renderDfpTodos();
+            } else {
+              $('dfp-new-task-input')?.focus();
+            }
+          });
+          top3El.appendChild(empty);
+        }
+      }
+    }
+
+    if ($('dfp-backlog-count')) $('dfp-backlog-count').textContent = String(dfp.backlog.length);
+    if ($('dfp-archive-count')) $('dfp-archive-count').textContent = String(dfp.archive.length);
+
+    const backlogEl = $('dfp-backlog-list');
+    if (backlogEl) {
+      backlogEl.innerHTML = '';
+      if (dfp.backlog.length === 0) {
+        backlogEl.innerHTML = `<div class="reldb-empty-card-msg">할 일 없음</div>`;
+      } else {
+        dfp.backlog.forEach((item, i) => {
+          const row = document.createElement('div');
+          row.className = 'dfp-task-card';
+          row.style.padding = '8px 10px';
+          row.innerHTML =
+            `<span style="font-size:0.81rem; font-weight:650; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(item.title)}</span>` +
+            `<div class="dfp-task-btns">` +
+            `  <button type="button" class="dfp-mini-btn" data-act="up">★</button>` +
+            `  <button type="button" class="dfp-mini-btn btn-done" data-act="done">✓</button>` +
+            `  <button type="button" class="dfp-mini-btn" data-act="del">✕</button>` +
+            `</div>`;
+          row.querySelector('[data-act="up"]').addEventListener('click', () => {
+            const cur = loadDfpState();
+            if (cur.top3.length >= 3) {
+              showToast('핵심 3가지가 모두 차 있습니다.');
+              return;
+            }
+            const picked = cur.backlog.splice(i, 1)[0];
+            if (picked) {
+              cur.top3.push(picked);
+              saveDfpState(cur);
+              renderDfpTodos();
+            }
+          });
+          row.querySelector('[data-act="done"]').addEventListener('click', () => {
+            const cur = loadDfpState();
+            const picked = cur.backlog.splice(i, 1)[0];
+            if (picked) {
+              cur.archive.unshift({ ...picked, completedAt: todayStr });
+              saveDfpState(cur);
+              renderDfpTodos();
+            }
+          });
+          row.querySelector('[data-act="del"]').addEventListener('click', () => {
+            const cur = loadDfpState();
+            cur.backlog.splice(i, 1);
+            saveDfpState(cur);
+            renderDfpTodos();
+          });
+          backlogEl.appendChild(row);
+        });
+      }
+    }
+
+    const archEl = $('dfp-archive-list');
+    if (archEl) {
+      archEl.innerHTML = '';
+      if (dfp.archive.length === 0) {
+        archEl.innerHTML = `<div class="reldb-empty-card-msg">완료 항목 없음</div>`;
+      } else {
+        dfp.archive.slice(0, 50).forEach((item, i) => {
+          const row = document.createElement('div');
+          row.className = 'dfp-task-card';
+          row.style.padding = '7px 10px';
+          row.innerHTML =
+            `<span style="font-size:0.78rem; color:var(--text-muted); text-decoration:line-through; flex:1;">${escapeHtml(item.title)} <small>(${escapeHtml(item.completedAt || '')})</small></span>` +
+            `<button type="button" class="dfp-mini-btn">↩️</button>`;
+          row.querySelector('button').addEventListener('click', () => {
+            const cur = loadDfpState();
+            const restored = cur.archive.splice(i, 1)[0];
+            if (restored) {
+              cur.backlog.unshift(restored);
+              saveDfpState(cur);
+              renderDfpTodos();
+            }
+          });
+          archEl.appendChild(row);
+        });
+      }
+    }
+  }
+
+  // 다음 일정 안 늦게 역산하는 신호등 엔진
+  function formatHHMM(d) {
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  }
+
+  function computeNextScheduleInstance(dfp, now = new Date()) {
+    const candidates = [];
+    (dfp.schedules || []).forEach((s) => {
+      const [hh, mm] = String(s.time || '09:00').split(':').map(Number);
+      const travel = Number(s.travelMins || 0);
+      const prep = Number(s.prepMins || 0);
+      const buffer = Number(s.bufferMins || 0);
+
+      if (s.type === 'recurring') {
+        const days = Array.isArray(s.weekdays) ? s.weekdays.map(Number) : [1, 2, 3, 4, 5];
+        for (let offset = 0; offset <= 7; offset++) {
+          const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offset, hh || 0, mm || 0, 0, 0);
+          if (!days.includes(d.getDay())) continue;
+          const instKey = `${s.id}@${getTodayYMD(d)}`;
+          if ((s.completedInstances || []).includes(instKey)) continue;
+          if (d.getTime() + 15 * 60000 < now.getTime()) continue;
+          candidates.push({ sched: s, arrival: d, instKey, travel, prep, buffer });
+          break;
+        }
+      } else if (s.date) {
+        const [y, m, day] = s.date.split('-').map(Number);
+        const d = new Date(y, (m || 1) - 1, day || 1, hh || 0, mm || 0, 0, 0);
+        const instKey = `${s.id}@${s.date}`;
+        if ((s.completedInstances || []).includes(instKey)) return;
+        if (d.getTime() + 15 * 60000 < now.getTime()) return;
+        candidates.push({ sched: s, arrival: d, instKey, travel, prep, buffer });
+      }
+    });
+
+    candidates.sort((a, b) => a.arrival.getTime() - b.arrival.getTime());
+    return candidates[0] || null;
+  }
+
+  function renderDfpTrafficLight() {
+    const dfp = loadDfpState();
+    const now = new Date();
+    const next = computeNextScheduleInstance(dfp, now);
+
+    const bar = $('dfp-traffic-bar');
+    const bGreen = $('dfp-bulb-green');
+    const bYellow = $('dfp-bulb-yellow');
+    const bRed = $('dfp-bulb-red');
+    const badge = $('dfp-traffic-badge');
+    const hint = $('dfp-traffic-hint');
+    const headline = $('dfp-countdown-headline');
+    const progress = $('dfp-schedule-progress');
+    const timeline = $('dfp-timeline-summary');
+    const headerBadge = $('dfp-next-schedule-badge');
+    const departBtn = $('dfp-complete-schedule-btn');
+
+    // 외출 체크리스트 렌더
+    const checkWrap = $('dfp-checklist-items');
+    if (checkWrap) {
+      checkWrap.innerHTML = '';
+      (dfp.checklist || []).forEach((c, idx) => {
+        const chip = document.createElement('span');
+        chip.className = `dfp-outing-chip${c.checked ? ' checked' : ''}`;
+        chip.textContent = `${c.checked ? '✓ ' : ''}${c.text}`;
+        chip.addEventListener('click', () => {
+          const cur = loadDfpState();
+          if (cur.checklist[idx]) {
+            cur.checklist[idx].checked = !cur.checklist[idx].checked;
+            saveDfpState(cur);
+            renderDfpTrafficLight();
+          }
+        });
+        checkWrap.appendChild(chip);
+      });
+    }
+
+    if (!bar) return;
+
+    if (!next) {
+      bar.className = 'dfp-traffic-banner bar-safe';
+      if (bGreen) bGreen.className = 'dfp-bulb bulb-green-on';
+      if (bYellow) bYellow.className = 'dfp-bulb bulb-yellow-off';
+      if (bRed) bRed.className = 'dfp-bulb bulb-red-off';
+      if (badge) { badge.textContent = '여유'; badge.style.background = '#d1fae5'; badge.style.color = '#065f46'; }
+      if (headline) headline.textContent = '예정된 일정 없음';
+      if (progress) { progress.style.width = '100%'; progress.style.background = '#10b981'; }
+      if (timeline) timeline.textContent = '';
+      if (headerBadge) headerBadge.textContent = '없음';
+      if (departBtn) departBtn.style.display = 'none';
+      return;
+    }
+
+    const departTime = new Date(next.arrival.getTime() - (next.travel + next.buffer) * 60000);
+    const prepStartTime = new Date(departTime.getTime() - next.prep * 60000);
+    const minsToDepart = Math.round((departTime.getTime() - now.getTime()) / 60000);
+    const minsToPrep = Math.round((prepStartTime.getTime() - now.getTime()) / 60000);
+
+    if (headerBadge) {
+      headerBadge.textContent = `${next.sched.title} · ${formatHHMM(departTime)} 출발`;
+    }
+    if (departBtn) {
+      departBtn.style.display = 'block';
+      departBtn.onclick = () => {
+        const cur = loadDfpState();
+        const target = cur.schedules.find((s) => s.id === next.sched.id);
+        if (target) {
+          if (!Array.isArray(target.completedInstances)) target.completedInstances = [];
+          target.completedInstances.push(next.instKey);
+          saveDfpState(cur);
+          renderDfpTrafficLight();
+        }
+      };
+    }
+
+    if (timeline) {
+      timeline.innerHTML =
+        `<span>준비 <b>${formatHHMM(prepStartTime)}</b></span>` +
+        `<span>· 출발 <b>${formatHHMM(departTime)}</b></span>` +
+        `<span>· 도착 <b>${formatHHMM(next.arrival)}</b></span>`;
+    }
+
+    if (minsToDepart <= 0) {
+      bar.className = 'dfp-traffic-banner bar-urgent';
+      if (bGreen) bGreen.className = 'dfp-bulb bulb-green-off';
+      if (bYellow) bYellow.className = 'dfp-bulb bulb-yellow-off';
+      if (bRed) bRed.className = 'dfp-bulb bulb-red-on';
+      if (badge) { badge.textContent = '즉시 출발'; badge.style.background = '#ffffff'; badge.style.color = '#b91c1c'; }
+      if (headline) headline.textContent = `🚨 ${next.sched.title} · 출발 ${Math.abs(minsToDepart)}분 초과`;
+      if (progress) { progress.style.width = '100%'; progress.style.background = '#fef2f2'; }
+    } else if (minsToPrep <= 0) {
+      bar.className = 'dfp-traffic-banner bar-warning';
+      if (bGreen) bGreen.className = 'dfp-bulb bulb-green-off';
+      if (bYellow) bYellow.className = 'dfp-bulb bulb-yellow-on';
+      if (bRed) bRed.className = 'dfp-bulb bulb-red-off';
+      if (badge) { badge.textContent = '준비 중'; badge.style.background = '#fde68a'; badge.style.color = '#78350f'; }
+      if (headline) headline.textContent = `⏳ ${next.sched.title} · 출발까지 ${minsToDepart}분`;
+      const pct = Math.max(8, Math.min(100, Math.round((minsToDepart / Math.max(1, next.prep)) * 100)));
+      if (progress) { progress.style.width = `${pct}%`; progress.style.background = '#f59e0b'; }
+    } else {
+      bar.className = 'dfp-traffic-banner bar-safe';
+      if (bGreen) bGreen.className = 'dfp-bulb bulb-green-on';
+      if (bYellow) bYellow.className = 'dfp-bulb bulb-yellow-off';
+      if (bRed) bRed.className = 'dfp-bulb bulb-red-off';
+      if (badge) { badge.textContent = '여유'; badge.style.background = '#d1fae5'; badge.style.color = '#065f46'; }
+      const h = Math.floor(minsToDepart / 60);
+      const m = minsToDepart % 60;
+      if (headline) headline.textContent = `${next.sched.title} · 출발까지 ${h > 0 ? `${h}시간 ` : ''}${m}분`;
+      if (progress) { progress.style.width = '100%'; progress.style.background = '#10b981'; }
+    }
+  }
+
+  function updateScheduleReversePreview() {
+    const prevEl = $('dfp-reverse-preview');
+    if (!prevEl) return;
+    const timeVal = dfpSchedFormMode === 'once' ? $('dfp-sched-time-once')?.value : $('dfp-sched-time-rec')?.value;
+    const travel = Number($('dfp-sched-travel')?.value || 0);
+    const prep = Number($('dfp-sched-prep')?.value || 0);
+    const buffer = Number($('dfp-sched-buffer')?.value || 0);
+    if (!timeVal) {
+      prevEl.textContent = '';
+      return;
+    }
+    const [hh, mm] = timeVal.split(':').map(Number);
+    const base = new Date(2026, 0, 1, hh || 0, mm || 0, 0, 0);
+    const depart = new Date(base.getTime() - (travel + buffer) * 60000);
+    const prepStart = new Date(depart.getTime() - prep * 60000);
+    prevEl.innerHTML =
+      `준비 <b>${formatHHMM(prepStart)}</b> → 출발 <b>${formatHHMM(depart)}</b> → 도착 <b>${timeVal}</b>`;
+  }
+
+  function renderScheduleModalList() {
+    const listEl = $('dfp-schedule-list');
+    if (!listEl) return;
+    const dfp = loadDfpState();
+    listEl.innerHTML = '';
+    if (!dfp.schedules || dfp.schedules.length === 0) {
+      listEl.innerHTML = `<div class="reldb-empty-card-msg">등록된 주요 일정이 없습니다.</div>`;
+      return;
+    }
+    const dayNames = ['일', '월', '화', '수', '목', '금', '토'];
+    dfp.schedules.forEach((s, idx) => {
+      const row = document.createElement('div');
+      row.className = 'dfp-task-card';
+      row.style.padding = '8px 10px';
+      const whenLabel = s.type === 'recurring'
+        ? `🔁 ${(s.weekdays || []).map((d) => dayNames[d]).join('·')} ${s.time}`
+        : `📌 ${s.date} ${s.time}`;
+      row.innerHTML =
+        `<div style="flex:1; min-width:0;">` +
+        `  <div style="font-size:0.8rem; font-weight:750;">${escapeHtml(s.title)} <small style="color:#4f46e5;">(${escapeHtml(whenLabel)})</small></div>` +
+        `  <div style="font-size:0.7rem; color:var(--text-muted);">준비 ${s.prepMins}분 · 이동 ${s.travelMins}분 · 버퍼 ${s.bufferMins}분</div>` +
+        `</div>` +
+        `<button type="button" class="dfp-mini-btn">✕ 삭제</button>`;
+      row.querySelector('button').addEventListener('click', () => {
+        const cur = loadDfpState();
+        cur.schedules.splice(idx, 1);
+        saveDfpState(cur);
+        renderScheduleModalList();
+        renderDfpTrafficLight();
+      });
+      listEl.appendChild(row);
+    });
+  }
+
+  function refreshHomeDashboard() {
+    populateDashboardParaSelect();
+    renderDfpTrafficLight();
+    renderDfpTodos();
+    renderDailyMemoBin();
+  }
+
+  // Dashboard Event Listeners
+  $('dfp-memo-cat-group')?.querySelectorAll('.dfp-cat-pill').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      dfpSelectedMemoCat = btn.dataset.memoCat || 'todo';
+      $('dfp-memo-cat-group').querySelectorAll('.dfp-cat-pill').forEach((b) => b.classList.toggle('active', b === btn));
+    });
+  });
+
+  $('dfp-save-memo-btn')?.addEventListener('click', saveQuickMemoToPhysicalStorage);
+  $('dfp-memo-body-input')?.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      saveQuickMemoToPhysicalStorage();
+    }
+  });
+
+  $('dfp-memo-scope-today')?.addEventListener('click', () => {
+    dfpMemoScope = 'today';
+    $('dfp-memo-scope-today').classList.add('active');
+    $('dfp-memo-scope-all')?.classList.remove('active');
+    renderDailyMemoBin();
+  });
+  $('dfp-memo-scope-all')?.addEventListener('click', () => {
+    dfpMemoScope = 'all';
+    $('dfp-memo-scope-all').classList.add('active');
+    $('dfp-memo-scope-today')?.classList.remove('active');
+    renderDailyMemoBin();
+  });
+
+  $('dfp-bin-tabs')?.querySelectorAll('.dfp-tab-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      dfpActiveBinTab = btn.dataset.binTab || 'all';
+      $('dfp-bin-tabs').querySelectorAll('.dfp-tab-btn').forEach((b) => b.classList.toggle('active', b === btn));
+      renderDailyMemoBin();
+    });
+
+    // 드래그한 메모 카드를 Todo / Knowledge / Thinking 탭 위에 놓아 다른 통으로 이동
+    const dropCat = btn.dataset.dropCat;
+    if (dropCat) {
+      btn.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        btn.classList.add('drag-over-tab');
+      });
+      btn.addEventListener('dragleave', () => {
+        btn.classList.remove('drag-over-tab');
+      });
+      btn.addEventListener('drop', (e) => {
+        e.preventDefault();
+        btn.classList.remove('drag-over-tab');
+        const docId = e.dataTransfer.getData('application/x-dfp-memo-id') || e.dataTransfer.getData('text/plain');
+        const doc = findNodeAndParent(docId)?.node;
+        if (doc && doc.type === 'doc') {
+          setDocMemoCategory(doc, dropCat);
+          showToast(`"${doc.name.replace(/\.md$/i, '')}" → ${dropCat.toUpperCase()}`);
+        }
+      });
+    }
+  });
+
+  // 메모 카드를 좌측 [오늘의 핵심 3가지] 영역으로 드래그 앤 드롭해 바로 등록
+  $('dfp-top3-list')?.addEventListener('dragover', (e) => e.preventDefault());
+  $('dfp-top3-list')?.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const docId = e.dataTransfer.getData('application/x-dfp-memo-id') || e.dataTransfer.getData('text/plain');
+    const doc = findNodeAndParent(docId)?.node;
+    if (!doc || doc.type !== 'doc') return;
+    setDocMemoCategory(doc, 'todo');
+    const dfp = loadDfpState();
+    const title = String(doc.name || '').replace(/\.md$/i, '');
+    if (dfp.top3.length < 3 && !dfp.top3.some((t) => t.docId === doc.id)) {
+      dfp.backlog = dfp.backlog.filter((t) => t.docId !== doc.id);
+      dfp.top3.push({ id: `t-${genId()}`, title, docId: doc.id });
+      saveDfpState(dfp);
+      renderDfpTodos();
+    }
+  });
+
+  $('dfp-tab-backlog')?.addEventListener('click', () => {
+    dfpActiveTaskTab = 'backlog';
+    $('dfp-tab-backlog').classList.add('active');
+    $('dfp-tab-archive')?.classList.remove('active');
+    if ($('dfp-backlog-panel')) $('dfp-backlog-panel').style.display = 'block';
+    if ($('dfp-archive-panel')) $('dfp-archive-panel').style.display = 'none';
+  });
+  $('dfp-tab-archive')?.addEventListener('click', () => {
+    dfpActiveTaskTab = 'archive';
+    $('dfp-tab-archive').classList.add('active');
+    $('dfp-tab-backlog')?.classList.remove('active');
+    if ($('dfp-backlog-panel')) $('dfp-backlog-panel').style.display = 'none';
+    if ($('dfp-archive-panel')) $('dfp-archive-panel').style.display = 'block';
+  });
+
+  $('dfp-add-task-form')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const inp = $('dfp-new-task-input');
+    const title = String(inp?.value || '').trim();
+    if (!title) return;
+    const cur = loadDfpState();
+    if (cur.top3.length < 3) {
+      cur.top3.push({ id: `t-${genId()}`, title });
+    } else {
+      cur.backlog.unshift({ id: `t-${genId()}`, title });
+    }
+    saveDfpState(cur);
+    if (inp) inp.value = '';
+    renderDfpTodos();
+  });
+
+  $('dfp-clear-archive-btn')?.addEventListener('click', () => {
+    const cur = loadDfpState();
+    cur.archive = [];
+    saveDfpState(cur);
+    renderDfpTodos();
+  });
+
+  $('dfp-toggle-checklist-add')?.addEventListener('click', () => {
+    const f = $('dfp-checklist-form');
+    if (f) {
+      f.style.display = f.style.display === 'none' ? 'flex' : 'none';
+      $('dfp-checklist-input')?.focus();
+    }
+  });
+  $('dfp-reset-checklist')?.addEventListener('click', () => {
+    const cur = loadDfpState();
+    (cur.checklist || []).forEach((c) => { c.checked = false; });
+    saveDfpState(cur);
+    renderDfpTrafficLight();
+  });
+  $('dfp-checklist-form')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const inp = $('dfp-checklist-input');
+    const txt = String(inp?.value || '').trim();
+    if (!txt) return;
+    const cur = loadDfpState();
+    cur.checklist.push({ id: `c-${genId()}`, text: txt, checked: false });
+    saveDfpState(cur);
+    if (inp) inp.value = '';
+    renderDfpTrafficLight();
+  });
+
+  // Schedule Modal Events
+  $('dfp-open-schedule-btn')?.addEventListener('click', () => {
+    const modal = $('dfp-schedule-modal');
+    if (!modal) return;
+    if ($('dfp-sched-date') && !$('dfp-sched-date').value) $('dfp-sched-date').value = getTodayYMD();
+    if ($('dfp-sched-time-once') && !$('dfp-sched-time-once').value) $('dfp-sched-time-once').value = '09:00';
+    if ($('dfp-sched-time-rec') && !$('dfp-sched-time-rec').value) $('dfp-sched-time-rec').value = '09:00';
+    updateScheduleReversePreview();
+    renderScheduleModalList();
+    modal.style.display = 'flex';
+  });
+  $('dfp-close-schedule-modal')?.addEventListener('click', () => {
+    if ($('dfp-schedule-modal')) $('dfp-schedule-modal').style.display = 'none';
+  });
+
+  $('dfp-sched-type-group')?.querySelectorAll('.dfp-seg-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      dfpSchedFormMode = btn.dataset.schedType || 'once';
+      $('dfp-sched-type-group').querySelectorAll('.dfp-seg-btn').forEach((b) => b.classList.toggle('active', b === btn));
+      if ($('dfp-sched-once-fields')) $('dfp-sched-once-fields').style.display = dfpSchedFormMode === 'once' ? 'grid' : 'none';
+      if ($('dfp-sched-rec-fields')) $('dfp-sched-rec-fields').style.display = dfpSchedFormMode === 'recurring' ? 'flex' : 'none';
+      updateScheduleReversePreview();
+    });
+  });
+
+  $('dfp-weekday-group')?.querySelectorAll('.dfp-day-chip').forEach((chip) => {
+    chip.addEventListener('click', () => chip.classList.toggle('active'));
+  });
+
+  ['dfp-sched-time-once', 'dfp-sched-time-rec', 'dfp-sched-travel', 'dfp-sched-prep', 'dfp-sched-buffer'].forEach((id) => {
+    $(id)?.addEventListener('input', updateScheduleReversePreview);
+  });
+
+  $('dfp-add-schedule-form')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const travelMins = Math.max(0, Number($('dfp-sched-travel')?.value || 0));
+    const prepMins = Math.max(0, Number($('dfp-sched-prep')?.value || 0));
+    const bufferMins = Math.max(0, Number($('dfp-sched-buffer')?.value || 0));
+
+    const cur = loadDfpState();
+    if (dfpSchedFormMode === 'once') {
+      const date = $('dfp-sched-date')?.value || getTodayYMD();
+      const time = $('dfp-sched-time-once')?.value || '09:00';
+      const title = String($('dfp-sched-title-once')?.value || '').trim() || '주요 일정';
+      cur.schedules.push({ id: `sch-${genId()}`, type: 'once', date, time, title, travelMins, prepMins, bufferMins, completedInstances: [] });
+      if ($('dfp-sched-title-once')) $('dfp-sched-title-once').value = '';
+    } else {
+      const time = $('dfp-sched-time-rec')?.value || '09:00';
+      const title = String($('dfp-sched-title-rec')?.value || '').trim() || '반복 루틴';
+      const weekdays = Array.from($('dfp-weekday-group')?.querySelectorAll('.dfp-day-chip.active') || []).map((c) => Number(c.dataset.weekday));
+      if (weekdays.length === 0) {
+        showToast('반복할 요일을 하나 이상 선택해 주세요.');
+        return;
+      }
+      cur.schedules.push({ id: `sch-${genId()}`, type: 'recurring', weekdays, time, title, travelMins, prepMins, bufferMins, completedInstances: [] });
+      if ($('dfp-sched-title-rec')) $('dfp-sched-title-rec').value = '';
+    }
+    saveDfpState(cur);
+    renderScheduleModalList();
+    renderDfpTrafficLight();
+    showToast('📅 일정이 등록되고 역산 신호등에 반영되었습니다.');
+  });
+
+  function renderPinAppPicker(query = '') {
+    const listEl = $('pin-app-list');
+    if (!listEl) return;
+    const q = String(query || '').trim().toLowerCase();
+    const allNodes = collectAllNodes(state.fileSystem).filter((n) => {
+      if (!isItemVisible(n)) return false;
+      if (!q) return true;
+      return `${n.name || ''} ${n.tag || ''}`.toLowerCase().includes(q);
+    });
+
+    // HTML, 엑셀, MD 파일을 상단에 우선 정렬
+    allNodes.sort((a, b) => {
+      const score = (n) => {
+        if (isHtmlContentItem(n)) return 0;
+        if (isSpreadsheetItem(n)) return 1;
+        if (/\.md$/i.test(n.name || '')) return 2;
+        if (n.type === 'doc') return 3;
+        return 4;
+      };
+      return score(a) - score(b);
+    });
+
+    listEl.innerHTML = '';
+    if (allNodes.length === 0) {
+      listEl.innerHTML = `<div style="padding:14px; text-align:center; font-size:0.78rem; color:var(--text-muted);">추가할 파일이 없습니다.</div>`;
+      return;
+    }
+
+    allNodes.slice(0, 80).forEach((node) => {
+      const pinned = state.pinnedAppIds.includes(node.id);
+      const pathNodes = getPathToNode(node.id) || [];
+      const folderText = pathNodes.length > 2 ? pathNodes.slice(1, -1).map((p) => p.name).join(' / ') : '루트';
+      const row = document.createElement('div');
+      row.className = 'picker-item';
+      row.innerHTML =
+        `<div class="picker-item-main">` +
+        `  <span>${escapeHtml(node.icon || (node.type === 'folder' ? '📁' : '📄'))}</span>` +
+        `  <div style="min-width:0;">` +
+        `    <div class="picker-item-name">${escapeHtml(node.name)}</div>` +
+        `    <div class="picker-item-path">${escapeHtml(folderText)}</div>` +
+        `  </div>` +
+        `</div>` +
+        `<span class="picker-item-badge">${pinned ? '✅ 고정됨 (해제)' : '＋ 홈에 추가'}</span>`;
+
+      row.addEventListener('click', () => {
+        togglePinAppToHome(node);
+        renderPinAppPicker($('pin-app-search')?.value || '');
+      });
+      listEl.appendChild(row);
+    });
+  }
+
+  $('btn-home-add-app')?.addEventListener('click', () => {
+    $('pin-app-search').value = '';
+    renderPinAppPicker('');
+    elPinAppModal.style.display = 'flex';
+    $('pin-app-search').focus();
+  });
+  $('btn-close-pin-modal')?.addEventListener('click', () => { elPinAppModal.style.display = 'none'; });
+  $('btn-cancel-pin-modal')?.addEventListener('click', () => { elPinAppModal.style.display = 'none'; });
+  elPinAppModal?.addEventListener('click', (e) => { if (e.target === elPinAppModal) elPinAppModal.style.display = 'none'; });
+  $('pin-app-search')?.addEventListener('input', (e) => renderPinAppPicker(e.target.value));
+
   // ================= Initialize =================
   initTheme();
   elChatProvider.value = state.settings.lastProvider || 'gemini';
   populateModels(elChatProvider.value);
   updateApiStatusSummary();
   updateLoginClock();
-  setInterval(updateLoginClock, 15000);
+  updateHomeClock();
+  setInterval(() => {
+    updateLoginClock();
+    if (isHomeMode) {
+      updateHomeClock();
+      renderDfpTrafficLight();
+    }
+  }, 15000);
 
   // 온라인(http/https) 환경일 때만 웹 폰트 비동기 로드 (오프라인/file:// 즉시 실행 보장)
   if (!BrainAuth.isFileProtocol() && navigator.onLine !== false) {

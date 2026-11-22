@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Second Brain OS</title>
-  <link rel="stylesheet" href="css/style.css?v=26">
+  <link rel="stylesheet" href="css/style.css?v=34">
 </head>
 <body>
   <!-- Windows 스타일 OS 잠금 / Google 로그인 · 오프라인 게스트 화면 -->
@@ -60,12 +60,38 @@
     <!-- 상단 타이틀 바 -->
     <header id="title-bar">
       <div class="title-group">
+        <div class="os-nav-dropdown-wrap" id="os-nav-dropdown-wrap">
+          <button class="btn-toggle active" id="btn-home-mode" title="대시보드 · 탐색기 · 앱 메뉴">
+            <span id="home-mode-icon">🏠</span><span class="hide-sm" id="home-mode-text">대시보드</span><span style="font-size:0.62rem; opacity:0.7; margin-left:2px;">▾</span>
+          </button>
+          <div class="os-nav-menu" id="os-nav-menu" style="display:none;">
+            <button type="button" class="os-nav-item active" data-nav="dashboard">
+              <span>🏠</span><span>대시보드</span>
+            </button>
+            <button type="button" class="os-nav-item" data-nav="explorer">
+              <span>🗂️</span><span>탐색기</span>
+            </button>
+            <div class="os-nav-divider"></div>
+            <button type="button" class="os-nav-item os-nav-apps-head" id="btn-nav-apps-toggle">
+              <span>📱</span><span style="flex:1; text-align:left;">앱</span><span id="nav-apps-arrow" style="font-size:0.65rem; opacity:0.7;">▾</span>
+            </button>
+            <div class="os-nav-apps-list" id="os-nav-apps-list">
+              <div id="home-builtin-grid" class="os-nav-sublist">
+                <button type="button" class="os-nav-subitem home-app-tile" data-builtin="relation-map">🕸️ 관계 맵</button>
+                <button type="button" class="os-nav-subitem home-app-tile" data-builtin="spreadsheet">📊 엑셀 시트</button>
+                <button type="button" class="os-nav-subitem home-app-tile" data-builtin="origin">📈 그래프</button>
+                <button type="button" class="os-nav-subitem home-app-tile" data-builtin="markdown">📝 새 마크다운</button>
+              </div>
+              <div id="home-pinned-grid" class="os-nav-sublist"></div>
+              <button type="button" class="os-nav-subitem os-nav-add-app" id="btn-home-add-app">＋ 앱 추가</button>
+            </div>
+          </div>
+        </div>
         <button class="btn-toggle active" id="btn-sidebar" title="좌측 폴더 트리 토글">
           <span>📁</span><span class="hide-sm">트리</span>
         </button>
         <div class="window-title">
           Second Brain OS
-          <span class="version-badge" id="os-mode-badge">Multi-AI</span>
         </div>
       </div>
 
@@ -102,15 +128,298 @@
       </div>
     </header>
 
+    <!-- 홈 대시보드 -->
+    <section id="home-screen" class="home-screen" style="display:none;">
+      <div class="dfp-dashboard-wrap">
+        <!-- 1. 미니멀 상단 바 -->
+        <div class="dfp-top-bar">
+          <div class="dfp-brand-left">
+            <span class="dfp-brand-dot"></span>
+            <span id="home-date" class="dfp-date-text"></span>
+            <span id="home-clock" class="dfp-clock-pill">00:00</span>
+          </div>
+
+          <div class="dfp-top-actions">
+            <button type="button" class="dfp-btn dfp-btn-primary" id="dfp-open-schedule-btn">
+              <span>📅 일정</span>
+              <span id="dfp-next-schedule-badge" class="dfp-sched-badge">없음</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- 2. 다음 일정 역산 신호등 -->
+        <div id="dfp-traffic-bar" class="dfp-traffic-banner bar-safe">
+          <div class="dfp-traffic-inner">
+            <div class="dfp-traffic-signal-col">
+              <div class="dfp-traffic-housing" aria-label="다음 일정 신호등">
+                <div id="dfp-bulb-green" class="dfp-bulb bulb-green-off"></div>
+                <div id="dfp-bulb-yellow" class="dfp-bulb bulb-yellow-off"></div>
+                <div id="dfp-bulb-red" class="dfp-bulb bulb-red-off"></div>
+              </div>
+              <span id="dfp-traffic-badge" class="dfp-traffic-badge">대기</span>
+              <span id="dfp-traffic-hint" class="dfp-traffic-hint" style="display:none;"></span>
+            </div>
+
+            <div class="dfp-traffic-center">
+              <div class="dfp-countdown-row">
+                <h3 id="dfp-countdown-headline" class="dfp-countdown-headline">예정된 일정 없음</h3>
+              </div>
+              <div class="dfp-progress-track">
+                <div id="dfp-schedule-progress" class="dfp-progress-fill" style="width:100%;"></div>
+              </div>
+              <div id="dfp-timeline-summary" class="dfp-timeline-summary"></div>
+            </div>
+
+            <div class="dfp-traffic-right">
+              <div class="dfp-outing-box">
+                <div class="dfp-outing-head">
+                  <span>🎒 체크</span>
+                  <div style="display:flex; gap:4px;">
+                    <button type="button" id="dfp-toggle-checklist-add" class="dfp-mini-icon-btn" title="추가">＋</button>
+                    <button type="button" id="dfp-reset-checklist" class="dfp-mini-icon-btn" title="초기화">↺</button>
+                  </div>
+                </div>
+                <div id="dfp-checklist-items" class="dfp-outing-chips"></div>
+                <form id="dfp-checklist-form" class="dfp-checklist-form" style="display:none;">
+                  <input type="text" id="dfp-checklist-input" placeholder="항목..." maxlength="15" class="dfp-input-sm">
+                  <button type="submit" class="dfp-btn-dark-sm">추가</button>
+                </form>
+              </div>
+              <button type="button" id="dfp-complete-schedule-btn" class="dfp-depart-btn" style="display:none;">✓ 출발 완료</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. 메인 2단 대시보드 -->
+        <div class="dfp-main-grid">
+          <!-- 좌측: 오늘의 핵심 3가지 & 할 일 -->
+          <div class="dfp-col">
+            <div class="dfp-hero-card">
+              <div class="dfp-hero-accent"></div>
+              <div class="dfp-hero-body">
+                <div class="dfp-hero-head">
+                  <h3 class="dfp-hero-title">오늘의 핵심 3가지</h3>
+                  <span id="dfp-completion-badge" class="dfp-completion-pill">0 / 3</span>
+                </div>
+
+                <div class="dfp-slot-gauge">
+                  <div id="dfp-slot-1" class="dfp-slot-bar"></div>
+                  <div id="dfp-slot-2" class="dfp-slot-bar"></div>
+                  <div id="dfp-slot-3" class="dfp-slot-bar"></div>
+                </div>
+
+                <div id="dfp-top3-list" class="dfp-top3-stack"></div>
+              </div>
+            </div>
+
+            <div class="dfp-drawer-card">
+              <div class="dfp-tab-bar">
+                <button type="button" id="dfp-tab-backlog" class="dfp-tab-btn active">
+                  <span>보관함</span>
+                  <span id="dfp-backlog-count" class="dfp-count-pill">0</span>
+                </button>
+                <button type="button" id="dfp-tab-archive" class="dfp-tab-btn">
+                  <span>완료</span>
+                  <span id="dfp-archive-count" class="dfp-count-pill">0</span>
+                </button>
+              </div>
+
+              <div id="dfp-backlog-panel" class="dfp-drawer-body">
+                <form id="dfp-add-task-form" class="dfp-inline-form">
+                  <input type="text" id="dfp-new-task-input" placeholder="할 일 추가..." class="dfp-input">
+                  <button type="submit" class="dfp-btn-dark">추가</button>
+                </form>
+                <div id="dfp-backlog-list" class="dfp-list-scroll"></div>
+              </div>
+
+              <div id="dfp-archive-panel" class="dfp-drawer-body" style="display:none;">
+                <div style="display:flex; justify-content:flex-end; margin-bottom:6px;">
+                  <button type="button" id="dfp-clear-archive-btn" class="dfp-text-btn">비우기</button>
+                </div>
+                <div id="dfp-archive-list" class="dfp-list-scroll"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 우측: 메모 작성 & 메모통 -->
+          <div class="dfp-col">
+            <div class="dfp-card">
+              <div class="dfp-memo-composer">
+                <div class="dfp-composer-top-row">
+                  <div class="dfp-cat-select-pills" id="dfp-memo-cat-group">
+                    <button type="button" class="dfp-cat-pill active" data-memo-cat="todo">Todo</button>
+                    <button type="button" class="dfp-cat-pill" data-memo-cat="knowledge">Knowledge</button>
+                    <button type="button" class="dfp-cat-pill" data-memo-cat="thinking">Thinking</button>
+                  </div>
+
+                  <!-- 중복 체크 가능한 PARA 멀티 선택 팝오버 -->
+                  <div class="dfp-multi-para-wrap" id="dfp-composer-para-wrap">
+                    <button type="button" class="dfp-multi-para-btn" id="dfp-composer-para-btn">🧭 PARA 선택 ▾</button>
+                    <div class="dfp-multi-para-popover" id="dfp-composer-para-popover" style="display:none;"></div>
+                  </div>
+                </div>
+
+                <input type="text" id="dfp-memo-title-input" class="dfp-input" placeholder="제목">
+                <textarea id="dfp-memo-body-input" rows="7" class="dfp-textarea dfp-textarea-lg" placeholder="메모 작성... (Ctrl+Enter)"></textarea>
+
+                <div class="dfp-composer-foot">
+                  <div id="dfp-composer-para-chips" class="dfp-composer-para-chips"></div>
+                  <button type="button" id="dfp-save-memo-btn" class="dfp-btn-dark">저장</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 메모통 (드래그하여 다른 탭으로 이동 가능) -->
+            <div class="dfp-drawer-card">
+              <div class="dfp-bin-header">
+                <div class="dfp-bin-title-row">
+                  <span class="dfp-bin-title">메모통</span>
+                  <div class="dfp-scope-pills">
+                    <button type="button" id="dfp-memo-scope-today" class="dfp-scope-btn active">오늘</button>
+                    <button type="button" id="dfp-memo-scope-all" class="dfp-scope-btn">전체</button>
+                  </div>
+                </div>
+
+                <div class="dfp-tab-bar dfp-bin-tabs" id="dfp-bin-tabs">
+                  <button type="button" class="dfp-tab-btn active" data-bin-tab="all">
+                    <span>전체</span>
+                    <span id="dfp-bin-count-all" class="dfp-count-pill">0</span>
+                  </button>
+                  <button type="button" class="dfp-tab-btn dfp-drop-tab" data-bin-tab="todo" data-drop-cat="todo">
+                    <span>Todo</span>
+                    <span id="dfp-bin-count-todo" class="dfp-count-pill">0</span>
+                  </button>
+                  <button type="button" class="dfp-tab-btn dfp-drop-tab" data-bin-tab="knowledge" data-drop-cat="knowledge">
+                    <span>Knowledge</span>
+                    <span id="dfp-bin-count-knowledge" class="dfp-count-pill">0</span>
+                  </button>
+                  <button type="button" class="dfp-tab-btn dfp-drop-tab" data-bin-tab="thinking" data-drop-cat="thinking">
+                    <span>Thinking</span>
+                    <span id="dfp-bin-count-thinking" class="dfp-count-pill">0</span>
+                  </button>
+                  <button type="button" class="dfp-tab-btn" data-bin-tab="unassigned">
+                    <span>미분류</span>
+                    <span id="dfp-bin-count-unassigned" class="dfp-count-pill">0</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="dfp-drawer-body">
+                <div id="dfp-memo-bin-list" class="dfp-memo-bin-list"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 일정 역산 모달 -->
+      <div id="dfp-schedule-modal" class="modal-overlay" style="display:none;">
+        <div class="modal-card" style="max-width:560px; width:94%;">
+          <div class="modal-header">
+            <h3>📅 일정 역산</h3>
+            <button type="button" class="icon-btn-sm" id="dfp-close-schedule-modal">✕</button>
+          </div>
+          <div class="modal-body">
+            <form id="dfp-add-schedule-form" class="dfp-sched-form">
+              <div class="dfp-sched-type-row" id="dfp-sched-type-group">
+                <button type="button" class="dfp-seg-btn active" data-sched-type="once">일회성</button>
+                <button type="button" class="dfp-seg-btn" data-sched-type="recurring">반복</button>
+              </div>
+
+              <div id="dfp-sched-once-fields" class="dfp-sched-grid-3">
+                <div>
+                  <label class="dfp-field-label">날짜</label>
+                  <input type="date" id="dfp-sched-date" class="dfp-input">
+                </div>
+                <div>
+                  <label class="dfp-field-label">도착 시각</label>
+                  <input type="time" id="dfp-sched-time-once" class="dfp-input">
+                </div>
+                <div>
+                  <label class="dfp-field-label">일정명</label>
+                  <input type="text" id="dfp-sched-title-once" placeholder="일정명" class="dfp-input">
+                </div>
+              </div>
+
+              <div id="dfp-sched-rec-fields" style="display:none; flex-direction:column; gap:8px;">
+                <div>
+                  <label class="dfp-field-label">요일</label>
+                  <div id="dfp-weekday-group" class="dfp-weekday-row">
+                    <button type="button" data-weekday="1" class="dfp-day-chip active">월</button>
+                    <button type="button" data-weekday="2" class="dfp-day-chip active">화</button>
+                    <button type="button" data-weekday="3" class="dfp-day-chip active">수</button>
+                    <button type="button" data-weekday="4" class="dfp-day-chip active">목</button>
+                    <button type="button" data-weekday="5" class="dfp-day-chip active">금</button>
+                    <button type="button" data-weekday="6" class="dfp-day-chip">토</button>
+                    <button type="button" data-weekday="0" class="dfp-day-chip">일</button>
+                  </div>
+                </div>
+                <div class="dfp-sched-grid-2">
+                  <div>
+                    <label class="dfp-field-label">도착 시각</label>
+                    <input type="time" id="dfp-sched-time-rec" class="dfp-input">
+                  </div>
+                  <div>
+                    <label class="dfp-field-label">루틴명</label>
+                    <input type="text" id="dfp-sched-title-rec" placeholder="루틴명" class="dfp-input">
+                  </div>
+                </div>
+              </div>
+
+              <div class="dfp-sched-grid-3">
+                <div>
+                  <label class="dfp-field-label">이동(분)</label>
+                  <input type="number" id="dfp-sched-travel" min="0" max="600" value="30" class="dfp-input">
+                </div>
+                <div>
+                  <label class="dfp-field-label">준비(분)</label>
+                  <input type="number" id="dfp-sched-prep" min="0" max="600" value="60" class="dfp-input">
+                </div>
+                <div>
+                  <label class="dfp-field-label">버퍼(분)</label>
+                  <input type="number" id="dfp-sched-buffer" min="0" max="180" value="10" class="dfp-input">
+                </div>
+              </div>
+
+              <div id="dfp-reverse-preview" class="dfp-reverse-preview"></div>
+
+              <div style="display:flex; justify-content:flex-end;">
+                <button type="submit" class="dfp-btn-dark">등록</button>
+              </div>
+            </form>
+
+            <div style="margin-top:12px;">
+              <div id="dfp-schedule-list" class="dfp-schedule-list"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- 메인 워크스페이스 -->
     <div id="app-body">
-      <!-- 1. 좌측 사이드바 (폴더 트리) -->
+      <!-- 1. 좌측 사이드바 (PARA 트리 + 물리적 자료 보관소) -->
       <aside id="sidebar">
         <div class="sidebar-header">
           <span id="sidebar-title">내 지식 저장소</span>
-          <button class="icon-btn-sm" id="btn-quick-folder" title="현재 위치에 새 폴더">＋</button>
         </div>
-        <ul class="tree-root" id="tree-root"></ul>
+
+        <div class="sidebar-split-trees">
+          <div class="sidebar-tree-section para-section">
+            <div class="sidebar-section-head">
+              <span>🧭 PARA 트리</span>
+            </div>
+            <ul class="tree-root para-tree-root" id="para-tree-root"></ul>
+          </div>
+
+          <div class="sidebar-tree-section physical-section">
+            <div class="sidebar-section-head">
+              <span>💾 물리적 자료 보관소</span>
+              <button class="icon-btn-sm" id="btn-quick-folder" title="현재 물리 폴더에 새 폴더">＋</button>
+            </div>
+            <ul class="tree-root" id="tree-root"></ul>
+          </div>
+        </div>
 
         <div class="sidebar-footer">
           <div class="storage-hint" id="api-status-summary">API 키를 설정해 주세요</div>
@@ -122,13 +431,35 @@
       <main id="main">
         <div id="path-bar">
           <div id="breadcrumb"></div>
-          <div class="path-actions">
-            <button class="btn-sm" id="btn-new-folder" title="새 폴더">📁+ 폴더</button>
-            <button class="btn-sm btn-primary-soft" id="btn-new-doc" title="새 메모">📝+ 메모</button>
-            <button class="btn-sm btn-sheet-soft" id="btn-new-sheet" title="새 엑셀 스프레드시트 만들기">📊+ 시트</button>
-            <button class="btn-sm btn-drive-soft" id="btn-upload-file" title="이미지·PDF·PPT·Excel·HTML·MD 파일 업로드 (Google Drive 동기화)">📤 파일</button>
+          <div class="path-actions hip-action-bar">
+            <select id="sort-select" class="sort-select hip-sort" title="정렬 기준">
+              <option value="default">정렬 · 기본</option>
+              <option value="name-asc">이름순 ↑</option>
+              <option value="name-desc">이름역순 ↓</option>
+              <option value="type-asc">유형순</option>
+            </select>
+            <div class="hip-btn-group">
+              <button class="hip-btn hip-btn-folder" id="btn-new-folder" title="새 폴더 만들기">
+                <span class="hip-ico"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5h4l1.5 1.8H14v6.7H2V4.5z"/><line x1="8" y1="8.2" x2="8" y2="11.4"/><line x1="6.4" y1="9.8" x2="9.6" y2="9.8"/></svg></span>
+                <span>폴더</span>
+              </button>
+              <button class="hip-btn hip-btn-memo" id="btn-new-doc" title="새 마크다운 메모 만들기">
+                <span class="hip-ico"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="2" width="10" height="12" rx="2"/><line x1="5.5" y1="6" x2="10.5" y2="6"/><line x1="5.5" y1="9" x2="9" y2="9"/></svg></span>
+                <span>메모</span>
+              </button>
+              <button class="hip-btn hip-btn-sheet" id="btn-new-sheet" title="새 엑셀 시트 만들기">
+                <span class="hip-ico"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.2" y="2.5" width="11.6" height="11" rx="2"/><line x1="2.2" y1="6.2" x2="13.8" y2="6.2"/><line x1="2.2" y1="9.8" x2="13.8" y2="9.8"/><line x1="6.8" y1="6.2" x2="6.8" y2="13.5"/></svg></span>
+                <span>시트</span>
+              </button>
+              <button class="hip-btn hip-btn-upload" id="btn-upload-file" title="이미지·PDF·PPT·Excel·HTML·MD 파일 업로드">
+                <span class="hip-ico"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="11" x2="8" y2="3.5"/><path d="M5 6.2L8 3.2l3 3"/><path d="M2.5 11.5v1.8h11v-1.8"/></svg></span>
+                <span>업로드</span>
+              </button>
+            </div>
             <input type="file" id="file-upload-input" multiple style="display:none;">
-            <button class="btn-sm" id="btn-undo" title="실행 취소 (Ctrl+Z)">↩️</button>
+            <button class="hip-btn hip-btn-icon" id="btn-undo" title="실행 취소 (Ctrl+Z)">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 6.5H10a3.2 3.2 0 1 1 0 6.4H7"/><path d="M6.8 4L4.2 6.5L6.8 9"/></svg>
+            </button>
           </div>
         </div>
 
@@ -158,6 +489,8 @@
           <div class="menu-item" data-action="open-local"><span>🚀 바로 열기 / 실행</span></div>
           <div class="menu-item" data-action="save-to-pc"><span>💾 PC 로컬 파일로 저장</span></div>
           <div class="menu-item" data-action="rename"><span>✏️ 이름 바꾸기</span><span class="shortcut">F2</span></div>
+          <div class="menu-item" data-action="add-relation"><span>🔗 연결 관계 추가</span></div>
+          <div class="menu-item" data-action="pin-home"><span>📱 홈 화면에 앱 고정</span></div>
           <div class="menu-item ai-only" data-action="attach-ai"><span>🤖 AI 컨텍스트에 첨부</span></div>
           <hr>
           <div class="menu-item" data-action="select-all"><span>☑️ 전체 선택</span><span class="shortcut">Ctrl+A</span></div>
@@ -173,10 +506,14 @@
       <!-- 3. 우측 패널 (메모 상세 + Multi-AI 채팅 탭) -->
       <div class="resizer" id="resizer-right"></div>
       <aside id="right-panel">
-        <div class="panel-tabs">
-          <button class="panel-tab active" data-tab="preview" id="tab-preview">📝 메모 상세</button>
+        <div class="panel-tabs hip-segmented-tabs">
+          <button class="panel-tab active" data-tab="preview" id="tab-preview">📝 상세</button>
+          <button class="panel-tab" data-tab="relations" id="tab-relations">
+            🗃️ 연결 DB
+            <span class="context-count-badge" id="relations-tab-badge" style="display:none;">0</span>
+          </button>
           <button class="panel-tab ai-only" data-tab="chat" id="tab-chat">
-            🤖 AI 대화
+            ✨ AI
             <span class="context-count-badge" id="context-count-badge" style="display:none;">0</span>
           </button>
         </div>
@@ -184,9 +521,8 @@
         <!-- 탭 1: 메모 상세/편집 -->
         <div id="panel-preview" class="panel-view active">
           <div id="empty-state" class="empty-msg">
-            <div style="font-size: 2.5rem; margin-bottom: 10px;">🧠</div>
-            <div>메모를 선택하거나 빈 공간에서 드래그해 여러 항목을 선택하세요.</div>
-            <div class="empty-sub">드래그 영역 선택 · Ctrl/Shift 다중 선택 · Ctrl+A/C/X/V/Z 지원<br>오프라인 생성 파일은 상단 <b>📂 로컬 폴더</b> 연결 시 PC 폴더에 자동 저장됩니다</div>
+            <div style="font-size: 2rem; margin-bottom: 6px; opacity: 0.7;">🧠</div>
+            <div>항목을 선택하세요</div>
           </div>
 
           <div id="multi-select-state" class="multi-select-state" style="display:none;">
@@ -228,6 +564,19 @@
 
               <div class="detail-summary-wrap">
                 <div id="p-summary" class="markdown-body"></div>
+              </div>
+
+              <!-- 파일 간 연결 관계 (상위 · 하위 · 연관) -->
+              <div id="detail-relations-box" class="detail-relations-box">
+                <div class="relations-head">
+                  <span class="relations-title">🔗 연결 관계 <span id="relations-count-badge"></span></span>
+                  <div class="relations-head-actions">
+                    <button type="button" class="btn-xs-inline" id="btn-goto-relation-db" title="오른쪽 연결 DB 탭에서 노션처럼 관리">🗃️ DB</button>
+                    <button type="button" class="btn-xs-inline" id="btn-open-relation-modal">＋ 연결</button>
+                    <button type="button" class="btn-xs-inline" id="btn-open-relation-map" title="시각적 관계 맵 보기">🕸️ 맵</button>
+                  </div>
+                </div>
+                <div id="detail-relations-list" class="detail-relations-list"></div>
               </div>
 
               <div class="detail-actions">
@@ -284,7 +633,64 @@
           </div>
         </div>
 
-        <!-- 탭 2: Multi-AI 채팅 -->
+        <!-- 탭 2: 노션 스타일 연결 DB -->
+        <div id="panel-relations" class="panel-view">
+          <div class="reldb-wrap">
+            <!-- PARA 선언 바 -->
+            <div class="reldb-declare-bar">
+              <div class="reldb-declare-actions">
+                <button type="button" class="reldb-decl-btn decl-project" id="btn-declare-project">＋ 🚀 프로젝트</button>
+                <button type="button" class="reldb-decl-btn decl-area" id="btn-declare-area">＋ 🧭 영역</button>
+                <button type="button" class="reldb-decl-btn decl-resource" id="btn-declare-resource">＋ 📚 리소스</button>
+              </div>
+              <div id="reldb-declare-form" class="reldb-declare-form" style="display:none;">
+                <input type="text" id="reldb-declare-input" class="edit-input input-sm" placeholder="이름 입력 후 Enter..." autocomplete="off">
+                <button type="button" class="btn-xs-inline" id="btn-declare-confirm">선언</button>
+                <button type="button" class="icon-btn-sm" id="btn-declare-cancel">✕</button>
+              </div>
+            </div>
+
+            <!-- 현재 선택 파일의 Notion Property 관계 카드 -->
+            <div class="reldb-current-card" id="reldb-current-card">
+              <div class="reldb-current-head">
+                <div class="reldb-current-title" id="reldb-current-title">선택된 파일 없음</div>
+                <button type="button" class="btn-xs-inline" id="btn-reldb-open-map" title="전체 관계 그래프 보기">🕸️ 그래프</button>
+              </div>
+              <div id="reldb-props-body" class="reldb-props-body"></div>
+            </div>
+
+            <!-- 인라인 노션 스타일 관계 선택 팝오버 -->
+            <div id="reldb-inline-picker" class="reldb-inline-picker" style="display:none;">
+              <div class="reldb-picker-head">
+                <span id="reldb-picker-title">파일 연결 선택</span>
+                <button type="button" class="icon-btn-sm" id="btn-reldb-close-picker">✕</button>
+              </div>
+              <div class="reldb-picker-inputs">
+                <input type="text" id="reldb-picker-search" class="edit-input input-sm" placeholder="연결할 파일 검색..." autocomplete="off">
+                <input type="text" id="reldb-picker-label" class="edit-input input-sm" placeholder="관계 메모 라벨 (선택, 예: 근거 데이터)" autocomplete="off">
+              </div>
+              <div id="reldb-picker-list" class="reldb-picker-list"></div>
+            </div>
+
+            <!-- 전체 연결 DB 테이블 (노션 DB 뷰) -->
+            <div class="reldb-table-section">
+              <div class="reldb-table-head">
+                <span class="reldb-section-label">🗃️ 전체 연결 DB</span>
+                <div class="reldb-filter-pills" id="reldb-filter-pills">
+                  <button type="button" class="reldb-pill active" data-filter="all">전체</button>
+                  <button type="button" class="reldb-pill" data-filter="project">🚀 프로젝트</button>
+                  <button type="button" class="reldb-pill" data-filter="area">🧭 영역</button>
+                  <button type="button" class="reldb-pill" data-filter="resource">📚 리소스</button>
+                  <button type="button" class="reldb-pill reldb-pill-warn" data-filter="unassigned">⚠️ 지정필요 <span id="reldb-unassigned-count"></span></button>
+                </div>
+              </div>
+              <input type="text" id="reldb-table-search" class="edit-input input-sm" placeholder="DB 내 파일명·라벨 필터..." autocomplete="off" style="margin-top:0; margin-bottom:8px;">
+              <div id="reldb-table-body" class="reldb-table-body"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 탭 3: Multi-AI 채팅 -->
         <div id="panel-chat" class="panel-view">
           <!-- 모델 선택 바 -->
           <div class="chat-toolbar">
@@ -545,6 +951,64 @@
     </div>
   </div>
 
+  <!-- 파일 간 연결 관계 추가 모달 -->
+  <div id="relation-modal" class="modal-overlay" style="display: none;">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>🔗 파일 연결 관계 추가</h3>
+        <button class="icon-btn-sm" id="btn-close-relation-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="relation-source-badge" id="relation-source-label">기준 항목</div>
+
+        <div class="api-field">
+          <label for="relation-type-select"><span>관계 유형 (프로젝트 · 영역 · 리소스 · 상하)</span></label>
+          <select id="relation-type-select" class="select-input" style="width:100%; padding:8px 10px;">
+            <option value="project">🚀 프로젝트 연관 (프로젝트와 관련된 작업·자료 연결)</option>
+            <option value="area">🧭 영역 연관 (책임 영역·분야와 연결)</option>
+            <option value="resource">📚 리소스 연관 (참고 자료·지식 리소스와 연결)</option>
+            <option value="child">⬇️ 하위 항목으로 연결 (현재 항목이 상위 → 대상이 하위)</option>
+            <option value="parent">⬆️ 상위 항목으로 연결 (대상이 상위 → 현재 항목이 하위)</option>
+            <option value="related">🔗 일반 연관 관계 (양방향 연관)</option>
+            <option value="reference">📎 참조 자료로 연결 (현재 항목이 대상을 참고)</option>
+          </select>
+        </div>
+
+        <div class="api-field">
+          <label for="relation-label-input"><span>관계 설명 라벨 (선택)</span></label>
+          <input type="text" id="relation-label-input" class="edit-input" placeholder="예: 원본 데이터, 후속 보고서, 참고 논문...">
+        </div>
+
+        <div class="api-field">
+          <label for="relation-target-search"><span>대상 파일 / 폴더 선택</span></label>
+          <input type="text" id="relation-target-search" class="edit-input" placeholder="파일명 검색..." autocomplete="off">
+          <div id="relation-target-list" class="picker-list"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="btn-cancel-relation-modal">닫기</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 홈 화면 앱 추가 모달 -->
+  <div id="pin-app-modal" class="modal-overlay" style="display: none;">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>📱 홈 화면에 응용 프로그램 추가</h3>
+        <button class="icon-btn-sm" id="btn-close-pin-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="settings-desc">내가 만든 HTML 앱, 자주 쓰는 엑셀 시트, 마크다운 메모, 폴더를 스마트폰 홈 화면처럼 배치해 바로 실행할 수 있습니다.</p>
+        <input type="text" id="pin-app-search" class="edit-input" placeholder="HTML, 엑셀, MD 등 파일 검색..." autocomplete="off">
+        <div id="pin-app-list" class="picker-list"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="btn-cancel-pin-modal">닫기</button>
+      </div>
+    </div>
+  </div>
+
   <!-- OS 멀티 윈도우 레이어 (이동 · 크기조절 · 최소화 · 최대화 · 닫기) -->
   <div id="os-window-layer" class="os-window-layer"></div>
 
@@ -552,18 +1016,18 @@
   <div id="toast-container"></div>
 
   <!-- 스크립트 (file:// 및 GitHub Pages 모두 호환) -->
-  <script src="js/markdown.js?v=26"></script>
-  <script src="js/store.js?v=26"></script>
-  <script src="js/ai-client.js?v=26"></script>
-  <script src="js/auth.js?v=26"></script>
-  <script src="js/drive-sync.js?v=26"></script>
-  <script src="js/local-bridge.js?v=26"></script>
-  <script src="js/local-folder-sync.js?v=26"></script>
-  <script src="js/window-manager.js?v=26"></script>
-  <script src="js/origin-plot.js?v=26"></script>
-  <script src="js/spreadsheet.js?v=26"></script>
-  <script src="js/spreadsheet-ui.js?v=26"></script>
-  <script src="js/math-markdown-editor.js?v=26"></script>
-  <script src="js/app.js?v=26"></script>
+  <script src="js/markdown.js?v=34"></script>
+  <script src="js/store.js?v=34"></script>
+  <script src="js/ai-client.js?v=34"></script>
+  <script src="js/auth.js?v=34"></script>
+  <script src="js/drive-sync.js?v=34"></script>
+  <script src="js/local-bridge.js?v=34"></script>
+  <script src="js/local-folder-sync.js?v=34"></script>
+  <script src="js/window-manager.js?v=34"></script>
+  <script src="js/origin-plot.js?v=34"></script>
+  <script src="js/spreadsheet.js?v=34"></script>
+  <script src="js/spreadsheet-ui.js?v=34"></script>
+  <script src="js/math-markdown-editor.js?v=34"></script>
+  <script src="js/app.js?v=34"></script>
 </body>
 </html>

@@ -396,24 +396,15 @@
   }
 
   async function uploadFile(accessToken, file, userEmail = '', folderPath = []) {
-    const targetParentId = await ensureFolderPath(accessToken, folderPath, userEmail);
     const mimeType = guessMimeType(file);
-    let data;
-
-    if (file.size <= MULTIPART_LIMIT_BYTES) {
-      data = await uploadFileMultipart(accessToken, file, targetParentId, mimeType);
-    } else {
-      data = await uploadFileResumable(accessToken, file, targetParentId, mimeType);
-    }
-
-    return {
-      id: data.id,
-      name: data.name || file.name,
-      mimeType: data.mimeType || mimeType,
-      size: Number(data.size || file.size || 0),
-      webViewLink: data.webViewLink || `https://drive.google.com/file/d/${data.id}/view`,
-      uploadedAt: data.modifiedTime || new Date().toISOString()
-    };
+    return upsertBinaryFile(accessToken, {
+      fileId: '',
+      name: file.name,
+      blob: file,
+      mimeType,
+      folderPath,
+      userEmail
+    });
   }
 
   async function moveFile(accessToken, fileId, targetFolderPath = [], userEmail = '') {
