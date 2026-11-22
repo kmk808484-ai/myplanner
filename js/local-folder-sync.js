@@ -247,6 +247,15 @@
   }
 
   // ---- Bridge Offline-FS Mode (for localhost / local-bridge.ps1) ----
+  async function getBridgeJsonHeaders(baseUrl) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (global.BrainLocalBridge && typeof global.BrainLocalBridge.fetchBridgeSessionToken === 'function') {
+      const tok = await global.BrainLocalBridge.fetchBridgeSessionToken(baseUrl || bridgeBaseUrl);
+      if (tok) headers['X-Bridge-Token'] = tok;
+    }
+    return headers;
+  }
+
   async function tryConnectBridgeFolder(baseUrl, opts = {}) {
     const cleanUrl = String(baseUrl || '').trim().replace(/\/+$/, '');
     if (!cleanUrl) return { ok: false };
@@ -264,6 +273,9 @@
       bridgeBaseUrl = cleanUrl;
       bridgeFolderPath = data.folderPath || '';
       bridgeFolderName = data.folderName || 'offline-files';
+      if (global.BrainLocalBridge && typeof global.BrainLocalBridge.fetchBridgeSessionToken === 'function') {
+        global.BrainLocalBridge.fetchBridgeSessionToken(cleanUrl).catch(() => {});
+      }
       if (!opts.probeOnly) {
         activeMode = 'bridge';
         prefs.preferredMode = 'bridge';
@@ -283,9 +295,10 @@
     const cleanUrl = String(baseUrl || bridgeBaseUrl || '').trim().replace(/\/+$/, '');
     if (!cleanUrl) return { ok: false, message: '로컬 브릿지 주소가 없습니다.' };
     try {
+      const headers = await getBridgeJsonHeaders(cleanUrl);
       const res = await fetch(`${cleanUrl}/offline-fs/pick-folder`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: '{}'
       });
       const data = await res.json().catch(() => ({}));
@@ -367,9 +380,10 @@
 
     if (activeMode === 'bridge') {
       try {
+        const headers = await getBridgeJsonHeaders(bridgeBaseUrl);
         const res = await fetch(`${bridgeBaseUrl}/offline-fs/mkdir`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({ folderPath: segs })
         });
         return res.ok;
@@ -436,9 +450,10 @@
 
       if (activeMode === 'bridge') {
         try {
+          const headers = await getBridgeJsonHeaders(bridgeBaseUrl);
           const res = await fetch(`${bridgeBaseUrl}/offline-fs/write`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers,
             body: JSON.stringify({
               folderPath: segs,
               fileName: safeFile,
@@ -498,9 +513,10 @@
       if (activeMode === 'bridge') {
         try {
           const base64 = await blobToBase64(blob);
+          const headers = await getBridgeJsonHeaders(bridgeBaseUrl);
           const res = await fetch(`${bridgeBaseUrl}/offline-fs/write`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers,
             body: JSON.stringify({
               folderPath: segs,
               fileName: safeFile,
@@ -547,9 +563,10 @@
 
     if (activeMode === 'bridge') {
       try {
+        const headers = await getBridgeJsonHeaders(bridgeBaseUrl);
         const res = await fetch(`${bridgeBaseUrl}/offline-fs/delete`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({ folderPath: segs, name: safeName })
         });
         return { ok: res.ok };
@@ -571,9 +588,10 @@
 
     if (activeMode === 'bridge') {
       try {
+        const headers = await getBridgeJsonHeaders(bridgeBaseUrl);
         const res = await fetch(`${bridgeBaseUrl}/offline-fs/rename`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({
             oldFolderPath: oldSegs,
             oldName: safeOld,
@@ -642,7 +660,8 @@
 
     if (activeMode === 'bridge') {
       try {
-        const res = await fetch(`${bridgeBaseUrl}/offline-fs/list`, { method: 'GET' });
+        const headers = await getBridgeJsonHeaders(bridgeBaseUrl);
+        const res = await fetch(`${bridgeBaseUrl}/offline-fs/list`, { method: 'GET', headers });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.ok) return { ok: false, folders: [], files: [] };
         return {

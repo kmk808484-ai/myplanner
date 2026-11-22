@@ -19,6 +19,7 @@ function Load-BridgeConfig {
         firebaseProjectId = ""
         allowedEmail = ""
         offlineFolderPath = ""
+        allowedOrigins = @()
     }
     if (Test-Path -LiteralPath $configPath) {
         try {
@@ -29,6 +30,9 @@ function Load-BridgeConfig {
             if ($raw.firebaseProjectId) { $cfg.firebaseProjectId = ([string]$raw.firebaseProjectId).Trim() }
             if ($raw.allowedEmail) { $cfg.allowedEmail = ([string]$raw.allowedEmail).Trim().ToLowerInvariant() }
             if ($raw.offlineFolderPath) { $cfg.offlineFolderPath = ([string]$raw.offlineFolderPath).Trim() }
+            if ($raw.allowedOrigins) {
+                $cfg.allowedOrigins = @($raw.allowedOrigins | ForEach-Object { ([string]$_).Trim().TrimEnd('/') } | Where-Object { $_ })
+            }
         } catch {
             Write-Host "[경고] bridge-config.json 읽기 실패: $($_.Exception.Message)" -ForegroundColor Yellow
         }
@@ -61,27 +65,81 @@ if ($OpenBrowser) {
 # 검증된 Firebase ID Token 메모리 캐시 (token -> @{ email; aud; exp })
 $tokenCache = @{}
 
+# 보안: 세션별 암호학적 난수 브릿지 토큰 (X-Bridge-Token 헤더 검증)
+$rngBytes = New-Object byte[] 32
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+$rng.GetBytes($rngBytes)
+$rng.Dispose()
+$sessionBridgeToken = ([BitConverter]::ToString($rngBytes) -replace '-', '').ToLowerInvariant()
+
 Write-Host "=================================================================" -ForegroundColor Cyan
-Write-Host "  Second Brain OS - 로컬 실행 브릿지 (Firebase Auth v1.3)" -ForegroundColor Cyan
+Write-Host "  Second Brain OS - 로컬 실행 브릿지 (Origin + Token 보안 v1.4)" -ForegroundColor Cyan
 Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host "  웹 접속 주소 : http://localhost:$listenPort/" -ForegroundColor Green
 Write-Host "  브릿지 주소  : http://127.0.0.1:$listenPort/ (내 PC 전용)" -ForegroundColor Green
+Write-Host "  보안 정책    : 허용 Origin 제한 + X-Bridge-Token 세션 인증 활성" -ForegroundColor Green
 if ($config.allowedEmail -and $config.firebaseApiKey) {
     Write-Host "  인증 방식    : Firebase Google 로그인 ($($config.allowedEmail))" -ForegroundColor Yellow
 } elseif ($config.firebaseApiKey) {
     Write-Host "  인증 방식    : Firebase Google 로그인 (최초 로컬 실행 시 본인 계정 자동 등록)" -ForegroundColor Yellow
 } else {
-    Write-Host "  인증 설정    : [미완료] bridge-config.json에 firebaseApiKey를 입력해 주세요!" -ForegroundColor Red
+    Write-Host "  인증 설정    : [오프라인 전용] bridge-config.json에 firebaseApiKey 미설정" -ForegroundColor Yellow
 }
 Write-Host "  종료 방법    : Ctrl + C 또는 창 닫기" -ForegroundColor DarkGray
 Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host ""
 
+function Get-AllowedOrigins {
+    $cfg = Load-BridgeConfig
+    $list = @(
+        "http://localhost:$listenPort",
+        "http://127.0.0.1:$listenPort"
+    )
+    if ($cfg.allowedOrigins) {
+        foreach ($o in $cfg.allowedOrigins) {
+            if ($o -and -not ($list -contains $o)) { $list += $o }
+        }
+    }
+    return $list
+}
+
+function Test-AllowedOrigin {
+    param([System.Net.HttpListenerRequest]$Request)
+    $origin = $Request.Headers["Origin"]
+    if ([string]::IsNullOrWhiteSpace($origin)) {
+        # 동일 출처 GET/브라우저 탐색 등 Origin 헤더가 없는 경우 Sec-Fetch-Site 확인
+        $sfs = $Request.Headers["Sec-Fetch-Site"]
+        if ($sfs -and $sfs -eq "cross-site") {
+            return @{ ok = $false; origin = "" }
+        }
+        return @{ ok = $true; origin = "" }
+    }
+    $cleanOrigin = $origin.Trim().TrimEnd('/')
+    $allowed = Get-AllowedOrigins
+    if ($allowed -contains $cleanOrigin) {
+        return @{ ok = $true; origin = $cleanOrigin }
+    }
+    return @{ ok = $false; origin = $cleanOrigin }
+}
+
+function Test-BridgeToken {
+    param([System.Net.HttpListenerRequest]$Request)
+    $hdr = $Request.Headers["X-Bridge-Token"]
+    if ([string]::IsNullOrWhiteSpace($hdr)) { return $false }
+    return ($hdr.Trim() -ceq $sessionBridgeToken)
+}
+
 function Add-CorsHeaders {
-    param([System.Net.HttpListenerResponse]$Response)
-    $Response.Headers["Access-Control-Allow-Origin"] = "*"
+    param(
+        [System.Net.HttpListenerResponse]$Response,
+        [string]$AllowedOrigin = ""
+    )
+    if (-not [string]::IsNullOrWhiteSpace($AllowedOrigin)) {
+        $Response.Headers["Access-Control-Allow-Origin"] = $AllowedOrigin
+        $Response.Headers["Vary"] = "Origin"
+    }
     $Response.Headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    $Response.Headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    $Response.Headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Bridge-Token"
     $Response.Headers["Access-Control-Allow-Private-Network"] = "true"
 }
 
@@ -89,11 +147,13 @@ function Send-JsonResponse {
     param(
         [System.Net.HttpListenerResponse]$Response,
         [int]$StatusCode,
-        [hashtable]$Body
+        [hashtable]$Body,
+        [string]$AllowedOrigin = ""
     )
+    $effOrigin = if (-not [string]::IsNullOrWhiteSpace($AllowedOrigin)) { $AllowedOrigin } else { [string]$script:currentReqOrigin }
     $Response.StatusCode = $StatusCode
     $Response.ContentType = "application/json; charset=utf-8"
-    Add-CorsHeaders -Response $Response
+    Add-CorsHeaders -Response $Response -AllowedOrigin $effOrigin
 
     $json = $Body | ConvertTo-Json -Depth 5 -Compress
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
@@ -399,25 +459,65 @@ try {
         $response = $context.Response
         $method = $request.HttpMethod
         $urlPath = $request.Url.AbsolutePath
+        $originCheck = Test-AllowedOrigin -Request $request
+        $reqOrigin = $originCheck.origin
+        $script:currentReqOrigin = if ($originCheck.ok) { $reqOrigin } else { "" }
+
+        if (-not $originCheck.ok) {
+            Write-Host "[보안 차단] 비허용 Origin: $reqOrigin ($method $urlPath)" -ForegroundColor Red
+            Send-JsonResponse -Response $response -StatusCode 403 -Body @{
+                ok = $false
+                error = "허용되지 않은 출처(Origin)에서의 로컬 브릿지 접근이 차단되었습니다."
+            }
+            continue
+        }
 
         if ($method -eq "OPTIONS") {
             $response.StatusCode = 204
-            Add-CorsHeaders -Response $response
+            Add-CorsHeaders -Response $response -AllowedOrigin $reqOrigin
             $response.OutputStream.Close()
             continue
         }
 
         $trimmedPath = $urlPath.TrimEnd('/')
 
+        # 보안: 허용 Origin / 로컬 호스트 요청에만 세션 브릿지 토큰 발급
+        if ($method -eq "GET" -and $trimmedPath -eq "/bridge-session") {
+            Send-JsonResponse -Response $response -StatusCode 200 -AllowedOrigin $reqOrigin -Body @{
+                ok = $true
+                bridgeToken = $sessionBridgeToken
+                port = $listenPort
+            }
+            continue
+        }
+
+        # 보안: 모든 실행/쓰기 API는 유효한 X-Bridge-Token 필수
+        $protectedPaths = @(
+            "/pick-file", "/open", "/open-content",
+            "/offline-fs/pick-folder", "/offline-fs/mkdir", "/offline-fs/write",
+            "/offline-fs/delete", "/offline-fs/rename", "/offline-fs/list"
+        )
+        if ($protectedPaths -contains $trimmedPath) {
+            if (-not (Test-BridgeToken -Request $request)) {
+                Send-JsonResponse -Response $response -StatusCode 403 -AllowedOrigin $reqOrigin -Body @{
+                    ok = $false
+                    error = "유효한 로컬 브릿지 세션 토큰(X-Bridge-Token)이 필요합니다."
+                }
+                continue
+            }
+        }
+
         if ($method -eq "GET" -and $trimmedPath -eq "/health") {
             $cfg = Load-BridgeConfig
-            Send-JsonResponse -Response $response -StatusCode 200 -Body @{
+            Send-JsonResponse -Response $response -StatusCode 200 -AllowedOrigin $reqOrigin -Body @{
                 ok = $true
-                version = "1.3"
+                version = "1.4"
                 platform = "windows"
                 port = $listenPort
                 authProvider = "firebase"
                 authRequired = $true
+                tokenRequired = $true
+                originRestricted = $true
                 allowedEmailConfigured = (-not [string]::IsNullOrWhiteSpace($cfg.allowedEmail))
                 firebaseConfigured = (-not [string]::IsNullOrWhiteSpace($cfg.firebaseApiKey))
                 firebaseConfig = @{

@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Second Brain OS</title>
-  <link rel="stylesheet" href="css/style.css?v=34">
+  <title>세컨드 브레인</title>
+  <link rel="stylesheet" href="css/style.css?v=35">
 </head>
 <body>
   <!-- Windows 스타일 OS 잠금 / Google 로그인 · 오프라인 게스트 화면 -->
@@ -57,259 +57,163 @@
   </div>
 
   <div id="os-window" class="os-locked">
-    <!-- 상단 타이틀 바 -->
-    <header id="title-bar">
-      <div class="title-group">
+    <!-- 상단 타이틀 바 (미니멀 단일 헤더) -->
+    <header id="title-bar" class="sb-topbar">
+      <div class="title-group sb-topbar-left">
+        <button type="button" class="sb-brand-btn" id="btn-brand-home" title="세컨드 브레인 홈으로 이동">
+          <span class="sb-brand-badge">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <rect x="2.5" y="2.5" width="4.6" height="4.6" rx="1.2"/>
+              <rect x="8.9" y="2.5" width="4.6" height="4.6" rx="1.2"/>
+              <rect x="2.5" y="8.9" width="4.6" height="4.6" rx="1.2"/>
+              <rect x="8.9" y="8.9" width="4.6" height="4.6" rx="1.2"/>
+            </svg>
+          </span>
+          <span class="sb-brand-name">세컨드 브레인</span>
+        </button>
+
         <div class="os-nav-dropdown-wrap" id="os-nav-dropdown-wrap">
-          <button class="btn-toggle active" id="btn-home-mode" title="대시보드 · 탐색기 · 앱 메뉴">
-            <span id="home-mode-icon">🏠</span><span class="hide-sm" id="home-mode-text">대시보드</span><span style="font-size:0.62rem; opacity:0.7; margin-left:2px;">▾</span>
-          </button>
+          <div class="sb-mode-switch-group">
+            <button type="button" class="sb-mode-tab active" id="btn-mode-home" data-topmode="dashboard" title="PARA 대시보드 홈">홈</button>
+            <button type="button" class="sb-mode-tab" id="btn-mode-explorer" data-topmode="explorer" title="파일 탐색기 · 연결 DB">탐색기</button>
+            <button type="button" class="sb-mode-tab sb-mode-apps-trigger" id="btn-home-mode" title="내장 앱 및 고정 앱 메뉴">
+              <span id="home-mode-text">앱</span>
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg>
+            </button>
+          </div>
           <div class="os-nav-menu" id="os-nav-menu" style="display:none;">
             <button type="button" class="os-nav-item active" data-nav="dashboard">
-              <span>🏠</span><span>대시보드</span>
+              <span class="sb-menu-svg"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 7.5L8 2.8l5.5 4.7"/><path d="M4.2 6.8V13.2h7.6V6.8"/></svg></span>
+              <span>홈 대시보드</span>
             </button>
             <button type="button" class="os-nav-item" data-nav="explorer">
-              <span>🗂️</span><span>탐색기</span>
+              <span class="sb-menu-svg"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.2" y="3" width="11.6" height="10" rx="1.5"/><line x1="6.2" y1="3" x2="6.2" y2="13"/></svg></span>
+              <span>파일 탐색기</span>
             </button>
             <div class="os-nav-divider"></div>
             <button type="button" class="os-nav-item os-nav-apps-head" id="btn-nav-apps-toggle">
-              <span>📱</span><span style="flex:1; text-align:left;">앱</span><span id="nav-apps-arrow" style="font-size:0.65rem; opacity:0.7;">▾</span>
+              <span class="sb-menu-svg"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1"/><rect x="9" y="9" width="4.5" height="4.5" rx="1"/></svg></span>
+              <span class="sb-flex-1">내장 · 고정 앱</span>
+              <span id="nav-apps-arrow" class="sb-arrow-mini">▾</span>
             </button>
             <div class="os-nav-apps-list" id="os-nav-apps-list">
               <div id="home-builtin-grid" class="os-nav-sublist">
-                <button type="button" class="os-nav-subitem home-app-tile" data-builtin="relation-map">🕸️ 관계 맵</button>
-                <button type="button" class="os-nav-subitem home-app-tile" data-builtin="spreadsheet">📊 엑셀 시트</button>
-                <button type="button" class="os-nav-subitem home-app-tile" data-builtin="origin">📈 그래프</button>
-                <button type="button" class="os-nav-subitem home-app-tile" data-builtin="markdown">📝 새 마크다운</button>
+                <button type="button" class="os-nav-subitem home-app-tile" data-builtin="relation-map">관계 맵</button>
+                <button type="button" class="os-nav-subitem home-app-tile" data-builtin="spreadsheet">엑셀 시트</button>
+                <button type="button" class="os-nav-subitem home-app-tile" data-builtin="origin">Origin 그래프</button>
+                <button type="button" class="os-nav-subitem home-app-tile" data-builtin="markdown">새 마크다운</button>
               </div>
               <div id="home-pinned-grid" class="os-nav-sublist"></div>
               <button type="button" class="os-nav-subitem os-nav-add-app" id="btn-home-add-app">＋ 앱 추가</button>
             </div>
           </div>
         </div>
-        <button class="btn-toggle active" id="btn-sidebar" title="좌측 폴더 트리 토글">
-          <span>📁</span><span class="hide-sm">트리</span>
-        </button>
-        <div class="window-title">
-          Second Brain OS
-        </div>
       </div>
 
-      <!-- 통합 검색 -->
-      <div class="search-box">
-        <span class="search-icon">🔍</span>
-        <input type="text" id="global-search" placeholder="메모 검색... (Ctrl+K)" autocomplete="off">
+      <!-- 중앙 통합 검색 & 빠른 메모 -->
+      <div class="search-box sb-global-search-wrap" id="global-search-wrap">
+        <span class="search-icon">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7.2" cy="7.2" r="4.6"/><line x1="10.7" y1="10.7" x2="13.8" y2="13.8"/></svg>
+        </span>
+        <input type="text" id="global-search" placeholder="검색 또는 빠른 메모  Ctrl+K" autocomplete="off">
         <button id="btn-clear-search" class="icon-btn-sm" style="display:none;" title="검색 초기화">✕</button>
+        <div id="global-search-popover" class="sb-search-popover" style="display:none;"></div>
       </div>
 
-      <div class="title-group">
-        <button class="btn-toggle" id="btn-google-auth" title="계정 정보 및 Google Drive 설정">
-          <span id="auth-btn-icon">🔒</span><span class="hide-sm" id="auth-btn-text">Google 로그인</span>
-        </button>
-        <button class="btn-toggle" id="btn-lock-os" title="로그아웃 / 계정 전환 (잠금 화면으로 이동)">
-          <span>🚪</span><span class="hide-sm">계정 전환</span>
-        </button>
-        <button class="btn-toggle" id="btn-drive-sync" title="Google Drive (SecondBrainOS 폴더) 동기화">
-          <span class="drive-dot" id="drive-status-dot"></span><span class="hide-sm" id="drive-status-text">드라이브 미연결</span>
-        </button>
-        <button class="btn-toggle" id="btn-local-folder" title="오프라인 생성 파일을 PC 로컬 폴더에 자동 저장">
-          <span class="folder-dot" id="local-folder-dot"></span><span class="hide-sm" id="local-folder-text">로컬 폴더</span>
-        </button>
-        <button class="btn-toggle" id="btn-local-bridge" title="로컬 프로그램 실행 도우미 연결 상태 확인">
-          <span class="bridge-dot" id="bridge-status-dot"></span><span class="hide-sm" id="bridge-status-text">로컬 미연결</span>
-        </button>
-        <button class="btn-toggle" id="btn-theme" title="다크/라이트 모드 전환">🌙</button>
-        <button class="btn-toggle" id="btn-settings" title="API 키 및 백업 설정">
-          <span>⚙️</span><span class="hide-sm" id="settings-btn-text">API 설정</span>
-        </button>
-        <button class="btn-toggle active" id="btn-right-panel" title="우측 패널 토글">
-          <span>✨</span><span class="hide-sm" id="right-panel-btn-text">메모 / AI</span>
-        </button>
-      </div>
-    </header>
+      <!-- 우측: 연결 상태 점 + 더보기 메뉴 + 계정 원형 버튼 -->
+      <div class="title-group sb-topbar-right">
+        <div class="sb-status-dots" title="연결 상태">
+          <button type="button" class="sb-dot-btn" id="btn-drive-sync" title="Google Drive 동기화 상태">
+            <span class="drive-dot" id="drive-status-dot"></span>
+            <span class="sr-only" id="drive-status-text">드라이브 미연결</span>
+          </button>
+          <button type="button" class="sb-dot-btn" id="btn-local-folder" title="로컬 폴더 자동 저장 상태">
+            <span class="folder-dot" id="local-folder-dot"></span>
+            <span class="sr-only" id="local-folder-text">로컬 폴더</span>
+          </button>
+          <button type="button" class="sb-dot-btn" id="btn-local-bridge" title="로컬 실행 브릿지 연결 상태">
+            <span class="bridge-dot" id="bridge-status-dot"></span>
+            <span class="sr-only" id="bridge-status-text">로컬 미연결</span>
+          </button>
+        </div>
 
-    <!-- 홈 대시보드 -->
-    <section id="home-screen" class="home-screen" style="display:none;">
-      <div class="dfp-dashboard-wrap">
-        <!-- 1. 미니멀 상단 바 -->
-        <div class="dfp-top-bar">
-          <div class="dfp-brand-left">
-            <span class="dfp-brand-dot"></span>
-            <span id="home-date" class="dfp-date-text"></span>
-            <span id="home-clock" class="dfp-clock-pill">00:00</span>
-          </div>
-
-          <div class="dfp-top-actions">
-            <button type="button" class="dfp-btn dfp-btn-primary" id="dfp-open-schedule-btn">
-              <span>📅 일정</span>
-              <span id="dfp-next-schedule-badge" class="dfp-sched-badge">없음</span>
+        <div class="sb-more-wrap" id="sb-more-wrap">
+          <button type="button" class="sb-icon-circle-btn" id="btn-more-menu" title="더보기 (설정 · 테마 · 패널 · 연결)">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <circle cx="3.5" cy="8" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="12.5" cy="8" r="1.25"/>
+            </svg>
+          </button>
+          <div class="sb-more-menu" id="os-more-menu" style="display:none;">
+            <button type="button" class="sb-more-item" id="btn-theme">
+              <span id="theme-menu-label">다크 모드로 전환</span>
+            </button>
+            <button type="button" class="sb-more-item" id="btn-settings">
+              <span id="settings-btn-text">설정 · 백업 · 보안</span>
+            </button>
+            <div class="os-nav-divider"></div>
+            <button type="button" class="sb-more-item" id="btn-more-local-folder">
+              <span>로컬 폴더 자동 저장</span>
+              <span class="sb-more-badge" id="more-local-folder-badge">미연결</span>
+            </button>
+            <button type="button" class="sb-more-item" id="btn-more-drive-sync">
+              <span>Google Drive 동기화</span>
+              <span class="sb-more-badge" id="more-drive-badge">미연결</span>
+            </button>
+            <button type="button" class="sb-more-item" id="btn-more-local-bridge">
+              <span>로컬 실행 브릿지 확인</span>
+              <span class="sb-more-badge" id="more-bridge-badge">미연결</span>
+            </button>
+            <div class="os-nav-divider"></div>
+            <button type="button" class="sb-more-item" id="btn-sidebar">
+              <span>탐색기 좌측 트리 표시</span>
+            </button>
+            <button type="button" class="sb-more-item" id="btn-right-panel">
+              <span id="right-panel-btn-text">탐색기 우측 패널 표시</span>
+            </button>
+            <div class="os-nav-divider"></div>
+            <button type="button" class="sb-more-item" id="btn-lock-os">
+              <span>계정 전환 / 잠금 화면</span>
             </button>
           </div>
         </div>
 
-        <!-- 2. 다음 일정 역산 신호등 -->
-        <div id="dfp-traffic-bar" class="dfp-traffic-banner bar-safe">
-          <div class="dfp-traffic-inner">
-            <div class="dfp-traffic-signal-col">
-              <div class="dfp-traffic-housing" aria-label="다음 일정 신호등">
-                <div id="dfp-bulb-green" class="dfp-bulb bulb-green-off"></div>
-                <div id="dfp-bulb-yellow" class="dfp-bulb bulb-yellow-off"></div>
-                <div id="dfp-bulb-red" class="dfp-bulb bulb-red-off"></div>
-              </div>
-              <span id="dfp-traffic-badge" class="dfp-traffic-badge">대기</span>
-              <span id="dfp-traffic-hint" class="dfp-traffic-hint" style="display:none;"></span>
-            </div>
+        <button type="button" class="sb-avatar-btn" id="btn-google-auth" title="계정 정보 및 Google 로그인">
+          <span id="auth-btn-icon">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="5.6" r="2.6"/><path d="M3 13.4c.7-2.5 2.6-3.8 5-3.8s4.3 1.3 5 3.8"/></svg>
+          </span>
+          <span class="sr-only" id="auth-btn-text">Google 로그인</span>
+        </button>
+      </div>
+    </header>
 
-            <div class="dfp-traffic-center">
-              <div class="dfp-countdown-row">
-                <h3 id="dfp-countdown-headline" class="dfp-countdown-headline">예정된 일정 없음</h3>
-              </div>
-              <div class="dfp-progress-track">
-                <div id="dfp-schedule-progress" class="dfp-progress-fill" style="width:100%;"></div>
-              </div>
-              <div id="dfp-timeline-summary" class="dfp-timeline-summary"></div>
-            </div>
+    <!-- 홈 대시보드 (PARA 사이드바 + 대시보드/수신함/프로젝트/영역/자료/보관/주간리뷰 + 일정 역산 신호등) -->
+    <section id="home-screen" class="home-screen sb-home-shell" style="display:none;">
+      <aside class="sb-home-sidebar">
+        <nav class="sb-nav-list" id="para-nav-list" aria-label="PARA 주요 탐색"></nav>
 
-            <div class="dfp-traffic-right">
-              <div class="dfp-outing-box">
-                <div class="dfp-outing-head">
-                  <span>🎒 체크</span>
-                  <div style="display:flex; gap:4px;">
-                    <button type="button" id="dfp-toggle-checklist-add" class="dfp-mini-icon-btn" title="추가">＋</button>
-                    <button type="button" id="dfp-reset-checklist" class="dfp-mini-icon-btn" title="초기화">↺</button>
-                  </div>
-                </div>
-                <div id="dfp-checklist-items" class="dfp-outing-chips"></div>
-                <form id="dfp-checklist-form" class="dfp-checklist-form" style="display:none;">
-                  <input type="text" id="dfp-checklist-input" placeholder="항목..." maxlength="15" class="dfp-input-sm">
-                  <button type="submit" class="dfp-btn-dark-sm">추가</button>
-                </form>
-              </div>
-              <button type="button" id="dfp-complete-schedule-btn" class="dfp-depart-btn" style="display:none;">✓ 출발 완료</button>
-            </div>
+        <div class="sb-sidebar-group">
+          <div class="sb-sidebar-group-head">
+            <span>PARA 트리</span>
+            <button type="button" class="sb-icon-btn-xs" id="para-btn-add-para" title="새 프로젝트 추가">＋</button>
           </div>
+          <div class="sb-mini-tree" id="para-home-mini-tree"></div>
         </div>
 
-        <!-- 3. 메인 2단 대시보드 -->
-        <div class="dfp-main-grid">
-          <!-- 좌측: 오늘의 핵심 3가지 & 할 일 -->
-          <div class="dfp-col">
-            <div class="dfp-hero-card">
-              <div class="dfp-hero-accent"></div>
-              <div class="dfp-hero-body">
-                <div class="dfp-hero-head">
-                  <h3 class="dfp-hero-title">오늘의 핵심 3가지</h3>
-                  <span id="dfp-completion-badge" class="dfp-completion-pill">0 / 3</span>
-                </div>
-
-                <div class="dfp-slot-gauge">
-                  <div id="dfp-slot-1" class="dfp-slot-bar"></div>
-                  <div id="dfp-slot-2" class="dfp-slot-bar"></div>
-                  <div id="dfp-slot-3" class="dfp-slot-bar"></div>
-                </div>
-
-                <div id="dfp-top3-list" class="dfp-top3-stack"></div>
-              </div>
-            </div>
-
-            <div class="dfp-drawer-card">
-              <div class="dfp-tab-bar">
-                <button type="button" id="dfp-tab-backlog" class="dfp-tab-btn active">
-                  <span>보관함</span>
-                  <span id="dfp-backlog-count" class="dfp-count-pill">0</span>
-                </button>
-                <button type="button" id="dfp-tab-archive" class="dfp-tab-btn">
-                  <span>완료</span>
-                  <span id="dfp-archive-count" class="dfp-count-pill">0</span>
-                </button>
-              </div>
-
-              <div id="dfp-backlog-panel" class="dfp-drawer-body">
-                <form id="dfp-add-task-form" class="dfp-inline-form">
-                  <input type="text" id="dfp-new-task-input" placeholder="할 일 추가..." class="dfp-input">
-                  <button type="submit" class="dfp-btn-dark">추가</button>
-                </form>
-                <div id="dfp-backlog-list" class="dfp-list-scroll"></div>
-              </div>
-
-              <div id="dfp-archive-panel" class="dfp-drawer-body" style="display:none;">
-                <div style="display:flex; justify-content:flex-end; margin-bottom:6px;">
-                  <button type="button" id="dfp-clear-archive-btn" class="dfp-text-btn">비우기</button>
-                </div>
-                <div id="dfp-archive-list" class="dfp-list-scroll"></div>
-              </div>
-            </div>
+        <div class="sb-sidebar-group">
+          <div class="sb-sidebar-group-head">
+            <span>내 폴더</span>
+            <button type="button" class="sb-icon-btn-xs" id="para-btn-add-folder" title="새 폴더 만들기">＋</button>
           </div>
-
-          <!-- 우측: 메모 작성 & 메모통 -->
-          <div class="dfp-col">
-            <div class="dfp-card">
-              <div class="dfp-memo-composer">
-                <div class="dfp-composer-top-row">
-                  <div class="dfp-cat-select-pills" id="dfp-memo-cat-group">
-                    <button type="button" class="dfp-cat-pill active" data-memo-cat="todo">Todo</button>
-                    <button type="button" class="dfp-cat-pill" data-memo-cat="knowledge">Knowledge</button>
-                    <button type="button" class="dfp-cat-pill" data-memo-cat="thinking">Thinking</button>
-                  </div>
-
-                  <!-- 중복 체크 가능한 PARA 멀티 선택 팝오버 -->
-                  <div class="dfp-multi-para-wrap" id="dfp-composer-para-wrap">
-                    <button type="button" class="dfp-multi-para-btn" id="dfp-composer-para-btn">🧭 PARA 선택 ▾</button>
-                    <div class="dfp-multi-para-popover" id="dfp-composer-para-popover" style="display:none;"></div>
-                  </div>
-                </div>
-
-                <input type="text" id="dfp-memo-title-input" class="dfp-input" placeholder="제목">
-                <textarea id="dfp-memo-body-input" rows="7" class="dfp-textarea dfp-textarea-lg" placeholder="메모 작성... (Ctrl+Enter)"></textarea>
-
-                <div class="dfp-composer-foot">
-                  <div id="dfp-composer-para-chips" class="dfp-composer-para-chips"></div>
-                  <button type="button" id="dfp-save-memo-btn" class="dfp-btn-dark">저장</button>
-                </div>
-              </div>
-            </div>
-
-            <!-- 메모통 (드래그하여 다른 탭으로 이동 가능) -->
-            <div class="dfp-drawer-card">
-              <div class="dfp-bin-header">
-                <div class="dfp-bin-title-row">
-                  <span class="dfp-bin-title">메모통</span>
-                  <div class="dfp-scope-pills">
-                    <button type="button" id="dfp-memo-scope-today" class="dfp-scope-btn active">오늘</button>
-                    <button type="button" id="dfp-memo-scope-all" class="dfp-scope-btn">전체</button>
-                  </div>
-                </div>
-
-                <div class="dfp-tab-bar dfp-bin-tabs" id="dfp-bin-tabs">
-                  <button type="button" class="dfp-tab-btn active" data-bin-tab="all">
-                    <span>전체</span>
-                    <span id="dfp-bin-count-all" class="dfp-count-pill">0</span>
-                  </button>
-                  <button type="button" class="dfp-tab-btn dfp-drop-tab" data-bin-tab="todo" data-drop-cat="todo">
-                    <span>Todo</span>
-                    <span id="dfp-bin-count-todo" class="dfp-count-pill">0</span>
-                  </button>
-                  <button type="button" class="dfp-tab-btn dfp-drop-tab" data-bin-tab="knowledge" data-drop-cat="knowledge">
-                    <span>Knowledge</span>
-                    <span id="dfp-bin-count-knowledge" class="dfp-count-pill">0</span>
-                  </button>
-                  <button type="button" class="dfp-tab-btn dfp-drop-tab" data-bin-tab="thinking" data-drop-cat="thinking">
-                    <span>Thinking</span>
-                    <span id="dfp-bin-count-thinking" class="dfp-count-pill">0</span>
-                  </button>
-                  <button type="button" class="dfp-tab-btn" data-bin-tab="unassigned">
-                    <span>미분류</span>
-                    <span id="dfp-bin-count-unassigned" class="dfp-count-pill">0</span>
-                  </button>
-                </div>
-              </div>
-
-              <div class="dfp-drawer-body">
-                <div id="dfp-memo-bin-list" class="dfp-memo-bin-list"></div>
-              </div>
-            </div>
-          </div>
+          <div class="sb-mini-tree" id="para-home-folders"></div>
         </div>
+
+        <div class="sb-home-sidebar-foot">
+          <button type="button" class="sb-sidebar-status-btn" id="para-sidebar-status">API 키를 설정해 주세요</button>
+        </div>
+      </aside>
+
+      <div class="sb-home-main">
+        <div class="sb-home-container" id="para-main-canvas"></div>
       </div>
 
       <!-- 일정 역산 모달 -->
@@ -434,6 +338,8 @@
           <div class="path-actions hip-action-bar">
             <select id="sort-select" class="sort-select hip-sort" title="정렬 기준">
               <option value="default">정렬 · 기본</option>
+              <option value="updated-desc">최근 수정순</option>
+              <option value="created-desc">생성일 최신순</option>
               <option value="name-asc">이름순 ↑</option>
               <option value="name-desc">이름역순 ↓</option>
               <option value="type-asc">유형순</option>
@@ -636,12 +542,13 @@
         <!-- 탭 2: 노션 스타일 연결 DB -->
         <div id="panel-relations" class="panel-view">
           <div class="reldb-wrap">
-            <!-- PARA 선언 바 -->
+            <!-- PARA 선언 바 (프로젝트 · 영역 · 자료 · 보관) -->
             <div class="reldb-declare-bar">
               <div class="reldb-declare-actions">
-                <button type="button" class="reldb-decl-btn decl-project" id="btn-declare-project">＋ 🚀 프로젝트</button>
-                <button type="button" class="reldb-decl-btn decl-area" id="btn-declare-area">＋ 🧭 영역</button>
-                <button type="button" class="reldb-decl-btn decl-resource" id="btn-declare-resource">＋ 📚 리소스</button>
+                <button type="button" class="reldb-decl-btn decl-project" id="btn-declare-project">＋ 프로젝트</button>
+                <button type="button" class="reldb-decl-btn decl-area" id="btn-declare-area">＋ 영역</button>
+                <button type="button" class="reldb-decl-btn decl-resource" id="btn-declare-resource">＋ 자료</button>
+                <button type="button" class="reldb-decl-btn decl-archive" id="btn-declare-archive">＋ 보관</button>
               </div>
               <div id="reldb-declare-form" class="reldb-declare-form" style="display:none;">
                 <input type="text" id="reldb-declare-input" class="edit-input input-sm" placeholder="이름 입력 후 Enter..." autocomplete="off">
@@ -675,13 +582,14 @@
             <!-- 전체 연결 DB 테이블 (노션 DB 뷰) -->
             <div class="reldb-table-section">
               <div class="reldb-table-head">
-                <span class="reldb-section-label">🗃️ 전체 연결 DB</span>
+                <span class="reldb-section-label">전체 연결 DB</span>
                 <div class="reldb-filter-pills" id="reldb-filter-pills">
                   <button type="button" class="reldb-pill active" data-filter="all">전체</button>
-                  <button type="button" class="reldb-pill" data-filter="project">🚀 프로젝트</button>
-                  <button type="button" class="reldb-pill" data-filter="area">🧭 영역</button>
-                  <button type="button" class="reldb-pill" data-filter="resource">📚 리소스</button>
-                  <button type="button" class="reldb-pill reldb-pill-warn" data-filter="unassigned">⚠️ 지정필요 <span id="reldb-unassigned-count"></span></button>
+                  <button type="button" class="reldb-pill" data-filter="project">프로젝트</button>
+                  <button type="button" class="reldb-pill" data-filter="area">영역</button>
+                  <button type="button" class="reldb-pill" data-filter="resource">자료</button>
+                  <button type="button" class="reldb-pill" data-filter="archive">보관</button>
+                  <button type="button" class="reldb-pill reldb-pill-warn" data-filter="unassigned">수신함 <span id="reldb-unassigned-count"></span></button>
                 </div>
               </div>
               <input type="text" id="reldb-table-search" class="edit-input input-sm" placeholder="DB 내 파일명·라벨 필터..." autocomplete="off" style="margin-top:0; margin-bottom:8px;">
@@ -748,11 +656,23 @@
       </div>
       <div class="modal-body">
         <div class="security-notice ai-only" id="settings-ai-notice">
-          🔒 모든 API 키는 <b>현재 브라우저(localStorage)에만 저장</b>되며 GitHub이나 외부 서버로 전송되지 않습니다.
+          🔒 <b>보안 저장:</b> AI API 키는 평문으로 <code>localStorage</code>에 저장되지 않습니다. 기본은 <b>현재 세션 메모리</b>에만 보관되며, 원할 경우 <b>AES-256-GCM 암호화 금고</b>에 비밀번호로 잠가 저장할 수 있습니다.
         </div>
 
         <div class="settings-section ai-only" id="settings-ai-section">
-          <h4>🤖 AI API 키 설정</h4>
+          <h4>AI API 키 보안 저장</h4>
+          <div class="sb-vault-bar" id="sb-vault-bar">
+            <select id="key-storage-mode" class="select-input">
+              <option value="session">세션 전용 (권장 · 탭 닫으면 자동 삭제)</option>
+              <option value="vault">암호화 금고 (AES-256-GCM · 비밀번호로 잠금 저장)</option>
+            </select>
+            <div class="sb-vault-pass-row" id="sb-vault-pass-row" style="display:none;">
+              <input type="password" id="key-vault-passphrase" class="edit-input input-sm" placeholder="금고 암호화/해제 비밀번호 (4자 이상)" autocomplete="new-password">
+              <button type="button" class="btn btn-secondary" id="btn-unlock-vault">금고 해제</button>
+              <button type="button" class="btn btn-secondary" id="btn-clear-vault">금고 삭제</button>
+            </div>
+            <div class="settings-desc" id="sb-vault-status-text"></div>
+          </div>
 
           <div class="api-field">
             <label for="key-gemini">
@@ -804,13 +724,15 @@
         </div>
 
         <div class="settings-section">
-          <h4>💾 세컨드 브레인 데이터 백업 / 복원</h4>
-          <p class="settings-desc">다른 기기나 브라우저로 옮길 때 JSON 파일로 내보내거나 불러올 수 있습니다. (API 키는 백업 파일에 포함되지 않습니다)</p>
+          <h4>자동 백업 · 스냅샷 및 JSON 복원</h4>
+          <p class="settings-desc">가져오기 전 자동으로 안전 스냅샷을 남기며, 최근 백업 스냅샷에서 원클릭으로 되돌릴 수 있습니다. (파일·PARA·관계·일정·핵심할일 전체 포함, API 키 제외)</p>
           <div class="action-row">
-            <button class="btn btn-secondary" id="btn-export-json">⬇️ JSON 내보내기</button>
-            <button class="btn btn-secondary" id="btn-import-json">⬆️ JSON 불러오기</button>
+            <button type="button" class="btn btn-secondary" id="btn-save-snapshot-now">스냅샷 저장</button>
+            <button type="button" class="btn btn-secondary" id="btn-export-json">JSON 내보내기</button>
+            <button type="button" class="btn btn-secondary" id="btn-import-json">JSON 불러오기</button>
             <input type="file" id="import-file-input" accept=".json" style="display:none;">
           </div>
+          <div id="backup-snapshot-list" class="sb-snapshot-list"></div>
         </div>
       </div>
       <div class="modal-footer">
@@ -899,9 +821,9 @@
         </div>
 
         <div class="settings-section" style="margin-top: 14px;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-            <h4 style="margin:0;">🔥 Firebase 설정</h4>
-            <button type="button" class="btn-sm" id="btn-reset-firebase-default" title="기본 Firebase 프로젝트(gen-lang-client-0519883143)로 복원">🔄 기본값 복원</button>
+          <div class="sb-modal-row-between">
+            <h4>Firebase 설정 (본인 프로젝트 직접 입력)</h4>
+            <button type="button" class="btn-sm" id="btn-reset-firebase-default" title="Firebase 설정 비우기">설정 초기화</button>
           </div>
           <div class="api-field">
             <label for="auth-owner-email">
@@ -1009,6 +931,61 @@
     </div>
   </div>
 
+  <!-- PARA 프로젝트/영역/자료 생성·편집 모달 (마감일 · 상태 · 진행도 · 완료→보관) -->
+  <div id="para-entity-modal" class="modal-overlay" style="display:none;">
+    <div class="modal-card sb-modal-compact">
+      <div class="modal-header">
+        <h3 id="pem-title">새 프로젝트 만들기</h3>
+        <button type="button" class="icon-btn-sm" id="pem-close-btn">✕</button>
+      </div>
+      <form id="pem-form">
+        <div class="modal-body">
+          <input type="hidden" id="pem-id">
+          <input type="hidden" id="pem-type" value="project">
+
+          <div class="api-field">
+            <label for="pem-name"><span>이름</span></label>
+            <input type="text" id="pem-name" class="edit-input" placeholder="예: 웹사이트 리뉴얼 프로젝트" required autocomplete="off">
+          </div>
+
+          <div class="sb-pem-project-grid" id="pem-project-fields">
+            <div class="api-field">
+              <label for="pem-due"><span>마감일</span></label>
+              <input type="date" id="pem-due" class="edit-input">
+            </div>
+            <div class="api-field">
+              <label for="pem-status"><span>상태</span></label>
+              <select id="pem-status" class="select-input">
+                <option value="active">진행</option>
+                <option value="hold">보류</option>
+                <option value="completed">완료 (보관으로 이동)</option>
+              </select>
+            </div>
+            <div class="api-field sb-pem-prog-field">
+              <label for="pem-progress"><span>진행도</span><strong id="pem-progress-val">0%</strong></label>
+              <input type="range" id="pem-progress" min="0" max="100" step="5" value="0">
+            </div>
+          </div>
+
+          <div class="api-field">
+            <label for="pem-summary"><span>목표 · 요약 메모 (선택)</span></label>
+            <textarea id="pem-summary" class="edit-input" rows="3" placeholder="완료 기준이나 핵심 메모를 적어 두세요..."></textarea>
+          </div>
+        </div>
+        <div class="modal-footer sb-modal-foot-split">
+          <div class="sb-flex-gap-xs">
+            <button type="button" class="btn btn-secondary" id="pem-complete-archive-btn" style="display:none;">완료 → 보관</button>
+            <button type="button" class="btn btn-danger-soft" id="pem-delete-btn" style="display:none;">삭제</button>
+          </div>
+          <div class="sb-flex-gap-xs">
+            <button type="button" class="btn btn-secondary" id="pem-cancel-btn">취소</button>
+            <button type="submit" class="btn btn-ai">저장</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <!-- OS 멀티 윈도우 레이어 (이동 · 크기조절 · 최소화 · 최대화 · 닫기) -->
   <div id="os-window-layer" class="os-window-layer"></div>
 
@@ -1016,18 +993,20 @@
   <div id="toast-container"></div>
 
   <!-- 스크립트 (file:// 및 GitHub Pages 모두 호환) -->
-  <script src="js/markdown.js?v=34"></script>
-  <script src="js/store.js?v=34"></script>
-  <script src="js/ai-client.js?v=34"></script>
-  <script src="js/auth.js?v=34"></script>
-  <script src="js/drive-sync.js?v=34"></script>
-  <script src="js/local-bridge.js?v=34"></script>
-  <script src="js/local-folder-sync.js?v=34"></script>
-  <script src="js/window-manager.js?v=34"></script>
-  <script src="js/origin-plot.js?v=34"></script>
-  <script src="js/spreadsheet.js?v=34"></script>
-  <script src="js/spreadsheet-ui.js?v=34"></script>
-  <script src="js/math-markdown-editor.js?v=34"></script>
-  <script src="js/app.js?v=34"></script>
+  <script src="js/markdown.js?v=35"></script>
+  <script src="js/security-backup.js?v=35"></script>
+  <script src="js/store.js?v=35"></script>
+  <script src="js/ai-client.js?v=35"></script>
+  <script src="js/auth.js?v=35"></script>
+  <script src="js/drive-sync.js?v=35"></script>
+  <script src="js/local-bridge.js?v=35"></script>
+  <script src="js/local-folder-sync.js?v=35"></script>
+  <script src="js/window-manager.js?v=35"></script>
+  <script src="js/origin-plot.js?v=35"></script>
+  <script src="js/spreadsheet.js?v=35"></script>
+  <script src="js/spreadsheet-ui.js?v=35"></script>
+  <script src="js/math-markdown-editor.js?v=35"></script>
+  <script src="js/para-dashboard.js?v=36"></script>
+  <script src="js/app.js?v=36"></script>
 </body>
 </html>

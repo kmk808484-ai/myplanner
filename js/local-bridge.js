@@ -57,9 +57,33 @@
     }
   }
 
-  function buildAuthHeaders(idToken) {
+  const sessionTokenByBase = new Map();
+
+  async function fetchBridgeSessionToken(baseUrl, forceRefresh = false) {
+    const clean = getCleanBaseUrl(baseUrl);
+    if (!forceRefresh && sessionTokenByBase.has(clean)) {
+      return sessionTokenByBase.get(clean);
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1500);
+    try {
+      const res = await fetch(`${clean}/bridge-session`, { method: 'GET', signal: controller.signal });
+      if (!res.ok) return '';
+      const data = await res.json().catch(() => ({}));
+      const tok = String(data?.bridgeToken || '').trim();
+      if (tok) sessionTokenByBase.set(clean, tok);
+      return tok;
+    } catch (_) {
+      return '';
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function buildAuthHeaders(idToken, bridgeToken = '') {
     const headers = { 'Content-Type': 'application/json' };
     if (idToken) headers.Authorization = `Bearer ${idToken}`;
+    if (bridgeToken) headers['X-Bridge-Token'] = bridgeToken;
     return headers;
   }
 
@@ -67,12 +91,13 @@
     if (!idToken) {
       throw new Error('내 구글 계정으로 로그인해야 로컬 프로그램을 실행할 수 있습니다.');
     }
+    const bridgeToken = await fetchBridgeSessionToken(baseUrl);
     const url = `${getCleanBaseUrl(baseUrl)}/open`;
     let res;
     try {
       res = await fetch(url, {
         method: 'POST',
-        headers: buildAuthHeaders(idToken),
+        headers: buildAuthHeaders(idToken, bridgeToken),
         body: JSON.stringify({ path: targetPath, mode })
       });
     } catch (_) {
@@ -92,12 +117,13 @@
     if (!idToken) {
       throw new Error('내 구글 계정으로 로그인해야 PC 연결 프로그램으로 열 수 있습니다.');
     }
+    const bridgeToken = await fetchBridgeSessionToken(baseUrl);
     const url = `${getCleanBaseUrl(baseUrl)}/open-content`;
     let res;
     try {
       res = await fetch(url, {
         method: 'POST',
-        headers: buildAuthHeaders(idToken),
+        headers: buildAuthHeaders(idToken, bridgeToken),
         body: JSON.stringify({ fileName, content, isBase64: Boolean(isBase64) })
       });
     } catch (_) {
@@ -117,12 +143,13 @@
     if (!idToken) {
       throw new Error('내 구글 계정으로 로그인해야 로컬 파일을 선택할 수 있습니다.');
     }
+    const bridgeToken = await fetchBridgeSessionToken(baseUrl);
     const url = `${getCleanBaseUrl(baseUrl)}/pick-file`;
     let res;
     try {
       res = await fetch(url, {
         method: 'POST',
-        headers: buildAuthHeaders(idToken)
+        headers: buildAuthHeaders(idToken, bridgeToken)
       });
     } catch (_) {
       throw new Error(
@@ -144,6 +171,7 @@
     isLocalProtectedItem,
     guessIconForPath,
     checkHealth,
+    fetchBridgeSessionToken,
     openLocal,
     openContentLocal,
     pickLocalFile

@@ -8,13 +8,15 @@
   const SETTINGS_KEY = 'brainOS_api_settings';
   const THEME_KEY = 'brainOS_theme';
 
+  // 보안: 배포 코드에 개인 Firebase 프로젝트 키/ID를 하드코딩하지 않습니다.
+  // 사용자는 로그인 모달(⚙️ Firebase 설정) 또는 로컬 bridge-config.json에서 본인 프로젝트를 설정합니다.
   const DEFAULT_FIREBASE_CONFIG = {
-    apiKey: 'AIzaSyCuCNfM7l1aInsq_KCFWKQmoyME2tJXCZU',
-    authDomain: 'gen-lang-client-0519883143.firebaseapp.com',
-    projectId: 'gen-lang-client-0519883143',
-    storageBucket: 'gen-lang-client-0519883143.firebasestorage.app',
-    messagingSenderId: '845419336299',
-    appId: '1:845419336299:web:0909e669b1713c052cd72e'
+    apiKey: '',
+    authDomain: '',
+    projectId: '',
+    storageBucket: '',
+    messagingSenderId: '',
+    appId: ''
   };
 
   let activeUserEmail = '';
@@ -32,8 +34,8 @@
   const PARA_ROOTS = [
     { id: 'para-projects', paraRoot: 'project', name: '1. 프로젝트', icon: '🚀', tag: '#프로젝트' },
     { id: 'para-areas', paraRoot: 'area', name: '2. 영역', icon: '🧭', tag: '#영역' },
-    { id: 'para-resources', paraRoot: 'resource', name: '3. 리소스', icon: '📚', tag: '#리소스' },
-    { id: 'para-archives', paraRoot: 'archive', name: '4. 아카이브', icon: '📦', tag: '#아카이브' }
+    { id: 'para-resources', paraRoot: 'resource', name: '3. 자료', icon: '📚', tag: '#자료' },
+    { id: 'para-archives', paraRoot: 'archive', name: '4. 보관', icon: '📦', tag: '#보관' }
   ];
 
   // 이전 버전에서 물리 트리에 자동 생성된 빈 PARA 스텁 폴더만 안전하게 정리 (파일이 들어있는 폴더는 절대 건드리지 않음)
@@ -73,7 +75,42 @@
     }
   }
 
-  function declareParaEntity({ paraType = 'project', name = '', summary = '', archived = false }) {
+  function normalizeParaEntityFields(e) {
+    if (!e || typeof e !== 'object') return e;
+    if (e.paraType === 'archive') {
+      e.paraType = 'project';
+      e.archived = true;
+    }
+    if (!['project', 'area', 'resource'].includes(e.paraType)) {
+      e.paraType = 'project';
+    }
+    e.archived = Boolean(e.archived);
+    e.createdAt = Number(e.createdAt) || Date.now();
+    e.updatedAt = Number(e.updatedAt) || e.createdAt;
+    if (e.archived && !e.archivedAt) e.archivedAt = e.updatedAt;
+    if (!e.archived) e.archivedAt = 0;
+
+    if (e.paraType === 'project') {
+      if (!['active', 'hold', 'completed'].includes(e.status)) {
+        e.status = e.archived ? 'completed' : 'active';
+      }
+      if (e.archived && e.status !== 'completed') e.status = 'completed';
+      e.dueDate = typeof e.dueDate === 'string' ? e.dueDate.trim() : '';
+      const p = Number(e.progress);
+      e.progress = Number.isFinite(p) ? Math.max(0, Math.min(100, Math.round(p))) : (e.archived ? 100 : 0);
+    }
+    return e;
+  }
+
+  function declareParaEntity({
+    paraType = 'project',
+    name = '',
+    summary = '',
+    archived = false,
+    status = '',
+    dueDate = '',
+    progress = 0
+  }) {
     const isArchiveCall = paraType === 'archive';
     const cleanType = ['project', 'area', 'resource'].includes(paraType) ? paraType : 'project';
     const isArchived = Boolean(archived || isArchiveCall);
@@ -84,41 +121,103 @@
       (e) => e.paraType === cleanType && String(e.name || '').trim().toLowerCase() === cleanName.toLowerCase()
     );
     if (dup) {
+      normalizeParaEntityFields(dup);
       if (dup.archived !== isArchived) {
         dup.archived = isArchived;
-        persistParaEntities();
+        dup.archivedAt = isArchived ? Date.now() : 0;
       }
+      if (cleanType === 'project') {
+        if (status && ['active', 'hold', 'completed'].includes(status)) dup.status = status;
+        if (dueDate) dup.dueDate = String(dueDate).trim();
+        if (Number.isFinite(Number(progress)) && Number(progress) > 0) {
+          dup.progress = Math.max(0, Math.min(100, Math.round(Number(progress))));
+        }
+      }
+      dup.updatedAt = Date.now();
+      persistParaEntities();
       return dup;
     }
 
+    const now = Date.now();
     const iconMap = { project: '🚀', area: '🧭', resource: '📚' };
-    const tagMap = { project: '#프로젝트', area: '#영역', resource: '#리소스' };
-    const entity = {
+    const tagMap = { project: '#프로젝트', area: '#영역', resource: '#자료' };
+    const entity = normalizeParaEntityFields({
       id: `para-${cleanType}-${genId()}`,
       type: 'para-entity',
       isVirtual: true,
       paraType: cleanType,
       archived: isArchived,
+      archivedAt: isArchived ? now : 0,
+      status: cleanType === 'project'
+        ? (['active', 'hold', 'completed'].includes(status) ? status : (isArchived ? 'completed' : 'active'))
+        : undefined,
+      dueDate: cleanType === 'project' ? String(dueDate || '').trim() : undefined,
+      progress: cleanType === 'project'
+        ? (isArchived ? 100 : Math.max(0, Math.min(100, Math.round(Number(progress) || 0))))
+        : undefined,
       name: cleanName,
       icon: iconMap[cleanType],
       tag: tagMap[cleanType],
       summary: String(summary || '').trim(),
-      createdAt: Date.now()
-    };
+      createdAt: now,
+      updatedAt: now
+    });
     state.paraEntities.push(entity);
     persistParaEntities();
     return entity;
   }
 
-  function archiveParaEntity(entityId, archived = true) {
+  function updateParaEntity(entityId, patch = {}) {
     const ent = findParaEntity(entityId);
-    if (!ent) return false;
-    if (!['project', 'area', 'resource'].includes(ent.paraType)) {
-      ent.paraType = 'project';
+    if (!ent) return null;
+    if (patch.name !== undefined && String(patch.name).trim()) {
+      ent.name = String(patch.name).trim();
     }
-    ent.archived = Boolean(archived);
+    if (patch.summary !== undefined) {
+      ent.summary = String(patch.summary || '').trim();
+    }
+    if (patch.paraType && ['project', 'area', 'resource'].includes(patch.paraType)) {
+      ent.paraType = patch.paraType;
+    }
+    if (ent.paraType === 'project') {
+      if (patch.status && ['active', 'hold', 'completed'].includes(patch.status)) {
+        ent.status = patch.status;
+      }
+      if (patch.dueDate !== undefined) {
+        ent.dueDate = String(patch.dueDate || '').trim();
+      }
+      if (patch.progress !== undefined && Number.isFinite(Number(patch.progress))) {
+        ent.progress = Math.max(0, Math.min(100, Math.round(Number(patch.progress))));
+      }
+    }
+    if (patch.archived !== undefined) {
+      ent.archived = Boolean(patch.archived);
+      ent.archivedAt = ent.archived ? (ent.archivedAt || Date.now()) : 0;
+      if (ent.paraType === 'project') {
+        if (ent.archived) {
+          ent.status = 'completed';
+          if (ent.progress < 100) ent.progress = 100;
+        } else if (ent.status === 'completed') {
+          ent.status = 'active';
+        }
+      }
+    }
+    ent.updatedAt = Date.now();
+    normalizeParaEntityFields(ent);
     persistParaEntities();
-    return true;
+    return ent;
+  }
+
+  function completeAndArchiveProject(entityId) {
+    return updateParaEntity(entityId, {
+      status: 'completed',
+      progress: 100,
+      archived: true
+    });
+  }
+
+  function archiveParaEntity(entityId, archived = true) {
+    return Boolean(updateParaEntity(entityId, { archived: Boolean(archived) }));
   }
 
   function removeParaEntity(entityId) {
@@ -147,13 +246,7 @@
 
   function getParaEntities(paraType, opts = {}) {
     let list = [...(state.paraEntities || [])];
-    // 레거시 paraType === 'archive' 항목도 큰 틀에서는 project로 귀속하고 archived: true로 정규화
-    list.forEach((e) => {
-      if (e.paraType === 'archive') {
-        e.paraType = 'project';
-        e.archived = true;
-      }
-    });
+    list.forEach((e) => normalizeParaEntityFields(e));
     if (paraType === 'archive') {
       list = list.filter((e) => Boolean(e.archived));
       if (opts.subType) list = list.filter((e) => e.paraType === opts.subType);
@@ -361,8 +454,10 @@
   }
 
   function loadSettings() {
+    const emptyKeys = { gemini: '', openai: '', anthropic: '', grok: '' };
+    const sessionKeys = global.BrainSecurity ? global.BrainSecurity.loadSessionKeys() : emptyKeys;
     const defaults = {
-      keys: { gemini: '', openai: '', anthropic: '', grok: '' },
+      keys: { ...emptyKeys, ...sessionKeys },
       customModels: { gemini: '', openai: '', anthropic: '', grok: '' },
       lastProvider: 'gemini',
       lastModel: '',
@@ -376,17 +471,38 @@
       const parsed = JSON.parse(raw);
       const savedFb = parsed.firebaseConfig || {};
       const mergedFb = {
-        apiKey: String(savedFb.apiKey || '').trim() || DEFAULT_FIREBASE_CONFIG.apiKey,
-        authDomain: String(savedFb.authDomain || '').trim() || DEFAULT_FIREBASE_CONFIG.authDomain,
-        projectId: String(savedFb.projectId || '').trim() || DEFAULT_FIREBASE_CONFIG.projectId,
-        storageBucket: String(savedFb.storageBucket || '').trim() || DEFAULT_FIREBASE_CONFIG.storageBucket,
-        messagingSenderId: String(savedFb.messagingSenderId || '').trim() || DEFAULT_FIREBASE_CONFIG.messagingSenderId,
-        appId: String(savedFb.appId || '').trim() || DEFAULT_FIREBASE_CONFIG.appId
+        apiKey: String(savedFb.apiKey || '').trim(),
+        authDomain: String(savedFb.authDomain || '').trim(),
+        projectId: String(savedFb.projectId || '').trim(),
+        storageBucket: String(savedFb.storageBucket || '').trim(),
+        messagingSenderId: String(savedFb.messagingSenderId || '').trim(),
+        appId: String(savedFb.appId || '').trim()
       };
+
+      // 보안 마이그레이션: 과거 localStorage에 평문 API 키가 남아있다면 세션 메모리로 이전하고 즉시 제거
+      let activeKeys = { ...emptyKeys, ...sessionKeys };
+      const legacyKeys = parsed.keys || {};
+      const hasLegacyPlaintext = Object.values(legacyKeys).some((v) => Boolean(String(v || '').trim()));
+      if (hasLegacyPlaintext) {
+        activeKeys = {
+          gemini: activeKeys.gemini || String(legacyKeys.gemini || '').trim(),
+          openai: activeKeys.openai || String(legacyKeys.openai || '').trim(),
+          anthropic: activeKeys.anthropic || String(legacyKeys.anthropic || '').trim(),
+          grok: activeKeys.grok || String(legacyKeys.grok || '').trim()
+        };
+        if (global.BrainSecurity) {
+          global.BrainSecurity.saveSessionKeys(activeKeys);
+        }
+        try {
+          const scrubbed = { ...parsed, keys: emptyKeys };
+          localStorage.setItem(SETTINGS_KEY, JSON.stringify(scrubbed));
+        } catch (_) {}
+      }
+
       return {
         ...defaults,
         ...parsed,
-        keys: { ...defaults.keys, ...(parsed.keys || {}) },
+        keys: activeKeys,
         customModels: { ...defaults.customModels, ...(parsed.customModels || {}) },
         firebaseConfig: mergedFb
       };
@@ -592,7 +708,15 @@
 
   function persistSettings() {
     try {
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings));
+      // 보안: 평문 AI API 키는 절대 localStorage에 저장하지 않습니다.
+      const safeToPersist = {
+        ...state.settings,
+        keys: { gemini: '', openai: '', anthropic: '', grok: '' }
+      };
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(safeToPersist));
+      if (global.BrainSecurity) {
+        global.BrainSecurity.saveSessionKeys(state.settings.keys);
+      }
     } catch (_) {}
   }
 
@@ -807,6 +931,44 @@
     document.documentElement.setAttribute('data-theme', theme);
   }
 
+  function touchNode(node) {
+    if (!node || typeof node !== 'object') return node;
+    const now = Date.now();
+    if (!node.createdAt) node.createdAt = now;
+    node.updatedAt = now;
+    return node;
+  }
+
+  function searchAll(query, visibilityFilter = null) {
+    const q = String(query || '').trim().toLowerCase();
+    if (!q) return { files: [], paraEntities: [], relations: [] };
+
+    const files = searchNodes(q).filter((n) => (typeof visibilityFilter === 'function' ? visibilityFilter(n) : true));
+    const paraEntities = (state.paraEntities || []).filter((e) => {
+      normalizeParaEntityFields(e);
+      const statusKo = e.status === 'active' ? '진행' : (e.status === 'hold' ? '보류' : (e.status === 'completed' ? '완료' : ''));
+      const typeKo = e.archived ? '보관 아카이브' : (e.paraType === 'project' ? '프로젝트' : (e.paraType === 'area' ? '영역' : '자료 리소스'));
+      const hay = `${e.name || ''} ${e.tag || ''} ${e.summary || ''} ${e.dueDate || ''} ${statusKo} ${typeKo}`.toLowerCase();
+      return hay.includes(q);
+    });
+
+    const relations = [];
+    const seenRel = new Set();
+    (state.relations || []).forEach((rel) => {
+      const s = resolveAnyNode(rel.sourceId);
+      const t = resolveAnyNode(rel.targetId);
+      if (!s || !t) return;
+      if (typeof visibilityFilter === 'function' && (!visibilityFilter(s) || !visibilityFilter(t))) return;
+      const hay = `${rel.label || ''} ${rel.type || ''} ${s.name || ''} ${t.name || ''}`.toLowerCase();
+      if (hay.includes(q) && !seenRel.has(rel.id)) {
+        seenRel.add(rel.id);
+        relations.push({ rel, source: s, target: t });
+      }
+    });
+
+    return { files, paraEntities, relations };
+  }
+
   global.BrainStore = {
     DEFAULT_FIREBASE_CONFIG,
     PARA_ROOTS,
@@ -818,12 +980,16 @@
     findParaEntity,
     resolveAnyNode,
     persistParaEntities,
+    updateParaEntity,
+    completeAndArchiveProject,
     archiveParaEntity,
     removeParaEntity,
     renameParaEntity,
     declareParaEntity,
     getParaEntities,
     getUnassignedNodes,
+    touchNode,
+    searchAll,
     genId,
     regenerateIds,
     persistFS,

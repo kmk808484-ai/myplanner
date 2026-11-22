@@ -1,7 +1,7 @@
 (function () {
   'use strict';
 
-  const { DEFAULT_FIREBASE_CONFIG, state, getActiveUserEmail, switchUser, clearActiveWorkspace, normalizeParaWorkspace, findParaEntity, resolveAnyNode, persistParaEntities, archiveParaEntity, removeParaEntity, renameParaEntity, declareParaEntity, getParaEntities, getUnassignedNodes, genId, regenerateIds, persistFS, persistSettings, persistChat, persistRelations, persistPinnedApps, addRelation, removeRelation, getRelationsForNode, collectAllNodes, getSortMode, setSortMode, getSyncMeta, setSyncMeta, saveStateForUndo, findNodeAndParent, isDescendant, getPathToNode, searchNodes, collectDocsInFolder, getTheme, setTheme } = window.BrainStore;
+  const { DEFAULT_FIREBASE_CONFIG, state, getActiveUserEmail, switchUser, clearActiveWorkspace, normalizeParaWorkspace, findParaEntity, resolveAnyNode, persistParaEntities, archiveParaEntity, removeParaEntity, renameParaEntity, declareParaEntity, updateParaEntity, completeAndArchiveProject, getParaEntities, getUnassignedNodes, touchNode, searchAll, genId, regenerateIds, persistFS, persistSettings, persistChat, persistRelations, persistPinnedApps, addRelation, removeRelation, getRelationsForNode, collectAllNodes, getSortMode, setSortMode, getSyncMeta, setSyncMeta, saveStateForUndo, findNodeAndParent, isDescendant, getPathToNode, searchNodes, collectDocsInFolder, getTheme, setTheme } = window.BrainStore;
   const { PROVIDERS, sendChat } = window.BrainAI;
   const { render: renderMarkdown, escapeHtml } = window.BrainMarkdown;
   const BrainAuth = window.BrainAuth;
@@ -10,6 +10,9 @@
   const BrainLocalFolder = window.BrainLocalFolder;
   const WinManager = window.BrainWindowManager;
   const BrainSheet = window.BrainSpreadsheet;
+  const BrainSecurity = window.BrainSecurity;
+  const BrainBackup = window.BrainBackup;
+  const BrainIcons = window.BrainIcons;
 
   let isEditing = false;
   let isSendingChat = false;
@@ -19,6 +22,8 @@
   let offlineBannerDismissed = false;
   let currentSortMode = getSortMode();
   let isHomeMode = false;
+  let paraDashboard = null;
+  let autoBackupDirty = false;
 
   // Desktop multi-selection & marquee state
   let selectedItemIds = new Set();
@@ -90,17 +95,65 @@
     }, timeout);
   }
 
-  // ================= Theme =================
+  // ================= Theme & Top More Menu =================
+  function closeMoreMenu() {
+    const m = $('os-more-menu');
+    if (m) m.style.display = 'none';
+  }
+
+  function updateThemeMenuLabel(themeName) {
+    const lbl = $('theme-menu-label');
+    if (lbl) lbl.textContent = themeName === 'dark' ? '라이트 모드로 전환' : '다크 모드로 전환';
+  }
+
   function initTheme() {
     const current = getTheme();
     setTheme(current);
-    $('btn-theme').textContent = current === 'dark' ? '☀️' : '🌙';
+    updateThemeMenuLabel(current);
   }
 
-  $('btn-theme').addEventListener('click', () => {
+  $('btn-theme')?.addEventListener('click', () => {
     const next = getTheme() === 'dark' ? 'light' : 'dark';
     setTheme(next);
-    $('btn-theme').textContent = next === 'dark' ? '☀️' : '🌙';
+    updateThemeMenuLabel(next);
+    closeMoreMenu();
+  });
+
+  $('btn-more-menu')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const m = $('os-more-menu');
+    if (!m) return;
+    closeOsNavMenu();
+    m.style.display = m.style.display === 'none' ? 'flex' : 'none';
+  });
+
+  $('btn-more-local-folder')?.addEventListener('click', () => {
+    closeMoreMenu();
+    openLocalFolderModal();
+  });
+
+  $('btn-more-drive-sync')?.addEventListener('click', () => {
+    closeMoreMenu();
+    $('btn-drive-sync')?.click();
+  });
+
+  $('btn-more-local-bridge')?.addEventListener('click', () => {
+    closeMoreMenu();
+    refreshBridgeStatus(true);
+  });
+
+  $('btn-brand-home')?.addEventListener('click', () => {
+    setHomeMode(true);
+    paraDashboard?.setActiveView('home');
+  });
+
+  $('btn-mode-home')?.addEventListener('click', () => {
+    setHomeMode(true);
+    paraDashboard?.setActiveView('home');
+  });
+
+  $('btn-mode-explorer')?.addEventListener('click', () => {
+    setHomeMode(false);
   });
 
   // ================= Panel Toggle & Resizers =================
@@ -108,14 +161,22 @@
     const panel = $(panelId);
     const btn = $(btnId);
     const resizer = $(resizerId);
+    if (!panel || !resizer) return;
     const hidden = panel.style.display === 'none';
     panel.style.display = hidden ? 'flex' : 'none';
     resizer.style.display = hidden ? 'block' : 'none';
-    btn.classList.toggle('active', hidden);
+    if (btn) btn.classList.toggle('active', hidden);
+    closeMoreMenu();
   }
 
-  $('btn-sidebar').addEventListener('click', () => togglePanel('sidebar', 'btn-sidebar', 'resizer-left'));
-  $('btn-right-panel').addEventListener('click', () => togglePanel('right-panel', 'btn-right-panel', 'resizer-right'));
+  $('btn-sidebar')?.addEventListener('click', () => {
+    if (isHomeMode) setHomeMode(false);
+    togglePanel('sidebar', 'btn-sidebar', 'resizer-left');
+  });
+  $('btn-right-panel')?.addEventListener('click', () => {
+    if (isHomeMode) setHomeMode(false);
+    togglePanel('right-panel', 'btn-right-panel', 'resizer-right');
+  });
 
   function initResizer(resizerId, panelId, isLeft) {
     const resizer = $(resizerId);
@@ -176,8 +237,8 @@
   const PARA_TREE_CATS = [
     { type: 'project', num: 1, label: '1. 프로젝트', icon: '🚀' },
     { type: 'area', num: 2, label: '2. 영역', icon: '🧭' },
-    { type: 'resource', num: 3, label: '3. 리소스', icon: '📚' },
-    { type: 'archive', num: 4, label: '4. 아카이브', icon: '📦' }
+    { type: 'resource', num: 3, label: '3. 자료', icon: '📚' },
+    { type: 'archive', num: 4, label: '4. 보관', icon: '📦' }
   ];
 
   function getVirtualFilesForParaEntity(entity) {
@@ -329,8 +390,13 @@
 
         if (entities.length === 0) {
           const emptyRow = document.createElement('li');
-          emptyRow.style.cssText = 'font-size:0.71rem; color:var(--text-muted); padding:3px 10px 5px;';
-          emptyRow.textContent = '선언된 항목 없음 (＋로 선언)';
+          emptyRow.className = 'para-tree-empty-row';
+          emptyRow.innerHTML = `<span>항목 없음</span><button type="button" class="sb-empty-cta">· 만들기</button>`;
+          emptyRow.querySelector('button').addEventListener('click', (e) => {
+            e.stopPropagation();
+            switchRightTab('relations');
+            if (typeof openDeclareForm === 'function') openDeclareForm(cat.type);
+          });
           ul.appendChild(emptyRow);
         } else {
           entities.forEach((ent, idx) => {
@@ -343,7 +409,7 @@
       elParaTreeRoot.appendChild(li);
     });
 
-    // 4. 아카이브: 내부에도 프로젝트(4.1) · 영역(4.2) · 리소스(4.3)로 따로 분류하여 큰 틀의 소속 유지
+    // 4. 보관 (Archives): 프로젝트(4.1) · 영역(4.2) · 자료(4.3)로 소속 유지
     const archivedAll = getParaEntities('archive');
     const isArchCollapsed = paraCollapsedCats.has('archive');
     const archLi = document.createElement('li');
@@ -353,15 +419,22 @@
     archHead.className = 'para-cat-head';
     archHead.innerHTML =
       `<div class="para-cat-left">` +
-      `  <span style="font-size:0.65rem; width:10px;">${isArchCollapsed ? '▶' : '▼'}</span>` +
+      `  <span class="sb-caret-mini">${isArchCollapsed ? '▶' : '▼'}</span>` +
       `  <span>📦</span>` +
-      `  <span>4. 아카이브</span>` +
+      `  <span>4. 보관</span>` +
       `  <span class="para-cat-count">(${archivedAll.length})</span>` +
-      `</div>`;
-    archHead.addEventListener('click', () => {
+      `</div>` +
+      `<button type="button" class="para-cat-add" title="보관 항목 바로 추가">＋</button>`;
+    archHead.addEventListener('click', (e) => {
+      if (e.target.closest('.para-cat-add')) return;
       if (isArchCollapsed) paraCollapsedCats.delete('archive');
       else paraCollapsedCats.add('archive');
       renderParaTree();
+    });
+    archHead.querySelector('.para-cat-add').addEventListener('click', (e) => {
+      e.stopPropagation();
+      switchRightTab('relations');
+      if (typeof openDeclareForm === 'function') openDeclareForm('archive');
     });
     archLi.appendChild(archHead);
 
@@ -371,7 +444,7 @@
       const subDefs = [
         { subType: 'project', subNum: '4.1', label: '프로젝트', icon: '🚀' },
         { subType: 'area', subNum: '4.2', label: '영역', icon: '🧭' },
-        { subType: 'resource', subNum: '4.3', label: '리소스', icon: '📚' }
+        { subType: 'resource', subNum: '4.3', label: '자료', icon: '📚' }
       ];
 
       subDefs.forEach((sd) => {
@@ -385,7 +458,7 @@
         subHead.className = 'para-archive-subhead';
         subHead.innerHTML =
           `<div class="para-cat-left">` +
-          `  <span style="font-size:0.6rem; width:9px;">${subCollapsed ? '▶' : '▼'}</span>` +
+          `  <span class="sb-caret-mini">${subCollapsed ? '▶' : '▼'}</span>` +
           `  <span class="tree-num-prefix">${sd.subNum}</span>` +
           `  <span>${sd.icon} ${sd.label}</span>` +
           `  <span class="para-cat-count">(${subItems.length})</span>` +
@@ -402,8 +475,8 @@
           subUl.className = 'para-archive-sublist';
           if (subItems.length === 0) {
             const emptySub = document.createElement('li');
-            emptySub.style.cssText = 'font-size:0.68rem; color:var(--text-muted); padding:2px 8px 4px;';
-            emptySub.textContent = '아카이브된 항목 없음';
+            emptySub.className = 'para-tree-empty-row';
+            emptySub.textContent = '보관된 항목 없음';
             subUl.appendChild(emptySub);
           } else {
             subItems.forEach((ent, idx) => {
@@ -420,15 +493,14 @@
     }
     elParaTreeRoot.appendChild(archLi);
 
-    // 미분류(지정필요) 바로가기 — 3개 영역(프로젝트·영역·리소스) 중 하나만 충족해도 즉시 해제됨
+    // 수신함(미분류) 바로가기 — 프로젝트·영역·자료 중 하나만 연결해도 자동 정리
     const unassigned = getUnassignedNodes(isItemVisible);
     const unRow = document.createElement('li');
     const isUnActive = activeParaView && activeParaView.mode === 'unassigned' && !searchQuery;
-    unRow.className = 'para-entity-row' + (isUnActive ? ' active' : '');
-    unRow.style.marginTop = '4px';
+    unRow.className = 'para-entity-row para-inbox-shortcut' + (isUnActive ? ' active' : '');
     unRow.innerHTML =
-      `<span>⚠️</span>` +
-      `<span class="para-entity-name">미지정 (지정필요)</span>` +
+      `<span>📥</span>` +
+      `<span class="para-entity-name">수신함 (미분류)</span>` +
       `<span class="para-entity-meta"><span class="para-entity-badge">${unassigned.length}</span></span>`;
     unRow.addEventListener('click', () => {
       clearSearch(false);
@@ -477,6 +549,7 @@
 
   function saveAndRender(options = {}) {
     persistFS(options);
+    autoBackupDirty = true;
     renderParaTree();
     renderTree(state.fileSystem, elTreeRoot, true);
     if (searchQuery) renderSearchResults(searchQuery);
@@ -484,6 +557,7 @@
     else openFolder(state.currentFolder);
     renderContextChips();
     if (typeof renderRelationsDbPanel === 'function') renderRelationsDbPanel();
+    if (isHomeMode && paraDashboard) paraDashboard.renderAll();
     if (!options.skipDriveSync) {
       scheduleDriveSync();
     }
@@ -494,6 +568,18 @@
     const collator = new Intl.Collator('ko', { numeric: true, sensitivity: 'base' });
     return [...(items || [])].sort((a, b) => {
       if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
+      if (mode === 'updated-desc') {
+        const tA = Number(a.updatedAt || a.createdAt || 0);
+        const tB = Number(b.updatedAt || b.createdAt || 0);
+        if (tB !== tA) return tB - tA;
+        return collator.compare(String(a.name || ''), String(b.name || ''));
+      }
+      if (mode === 'created-desc') {
+        const tA = Number(a.createdAt || a.updatedAt || 0);
+        const tB = Number(b.createdAt || b.updatedAt || 0);
+        if (tB !== tA) return tB - tA;
+        return collator.compare(String(a.name || ''), String(b.name || ''));
+      }
       if (mode === 'name-asc') {
         return collator.compare(String(a.name || ''), String(b.name || ''));
       }
@@ -999,6 +1085,125 @@
     renderItemsGrid(folder.children || []);
   }
 
+  const elGlobalSearchPopover = $('global-search-popover');
+
+  function closeGlobalSearchPopover() {
+    if (elGlobalSearchPopover) elGlobalSearchPopover.style.display = 'none';
+  }
+
+  function renderGlobalSearchPopover(query) {
+    if (!elGlobalSearchPopover) return;
+    const q = String(query || '').trim();
+    if (!q) {
+      closeGlobalSearchPopover();
+      return;
+    }
+
+    const res = searchAll(q, isItemVisible) || {};
+    const paraList = res.paraEntities || [];
+    const fileList = res.files || [];
+    const relList = res.relations || [];
+    const totalHits = paraList.length + fileList.length + relList.length;
+    const paraLabelMap = { project: '프로젝트', area: '영역', resource: '자료', archive: '보관' };
+    const relTypeMap = { project: '프로젝트', area: '영역', resource: '자료', parent: '상하', related: '연관', reference: '참조' };
+
+    let html = '';
+    if (paraList.length > 0) {
+      html += `<div class="sb-sp-section"><div class="sb-sp-title">PARA 항목 (${paraList.length})</div>`;
+      paraList.slice(0, 6).forEach((ent) => {
+        const badge = ent.archived ? '보관' : (paraLabelMap[ent.paraType] || 'PARA');
+        html +=
+          `<button type="button" class="sb-sp-row" data-sp-kind="para" data-sp-id="${escapeHtml(ent.id)}">` +
+          `  <span class="sb-sp-main">${escapeHtml(ent.name)}</span>` +
+          `  <span class="sb-sp-badge">${escapeHtml(badge)}</span>` +
+          `</button>`;
+      });
+      html += `</div>`;
+    }
+
+    if (fileList.length > 0) {
+      html += `<div class="sb-sp-section"><div class="sb-sp-title">메모 · 파일 (${fileList.length})</div>`;
+      fileList.slice(0, 8).forEach((n) => {
+        const tag = n.type === 'folder' ? '폴더' : (n.tag ? n.tag.split(/\s+/)[0] : '문서');
+        html +=
+          `<button type="button" class="sb-sp-row" data-sp-kind="node" data-sp-id="${escapeHtml(n.id)}">` +
+          `  <span class="sb-sp-main">${escapeHtml(n.name)}</span>` +
+          `  <span class="sb-sp-badge">${escapeHtml(tag)}</span>` +
+          `</button>`;
+      });
+      html += `</div>`;
+    }
+
+    if (relList.length > 0) {
+      html += `<div class="sb-sp-section"><div class="sb-sp-title">연결 관계 (${relList.length})</div>`;
+      relList.slice(0, 5).forEach(({ rel, source, target }) => {
+        const relLabel = rel.label || relTypeMap[rel.type] || '연결';
+        html +=
+          `<button type="button" class="sb-sp-row" data-sp-kind="rel" data-sp-id="${escapeHtml(source.id)}">` +
+          `  <span class="sb-sp-main">${escapeHtml(source.name)} ↔ ${escapeHtml(target.name)}</span>` +
+          `  <span class="sb-sp-badge">${escapeHtml(relLabel)}</span>` +
+          `</button>`;
+      });
+      html += `</div>`;
+    }
+
+    if (totalHits === 0) {
+      html += `<div class="sb-sp-empty">"${escapeHtml(q)}"에 해당하는 메모 · 파일 · 관계 · PARA가 없습니다.</div>`;
+    }
+
+    html +=
+      `<div class="sb-sp-foot">` +
+      `  <button type="button" class="sb-sp-quick-save" data-sp-kind="quick-memo">` +
+      `    <span>＋ "${escapeHtml(q)}" 수신함에 빠른 메모로 저장</span>` +
+      `    <kbd>Ctrl+Enter</kbd>` +
+      `  </button>` +
+      `</div>`;
+
+    elGlobalSearchPopover.innerHTML = html;
+    elGlobalSearchPopover.style.display = 'block';
+
+    elGlobalSearchPopover.querySelectorAll('.sb-sp-row, .sb-sp-quick-save').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const kind = btn.dataset.spKind;
+        const id = btn.dataset.spId;
+        if (kind === 'quick-memo') {
+          if (paraDashboard) {
+            paraDashboard.captureQuickMemo({ title: q, body: q });
+          }
+          clearSearch(false);
+          closeGlobalSearchPopover();
+          return;
+        }
+        closeGlobalSearchPopover();
+        if (kind === 'para') {
+          const ent = findParaEntity(id);
+          if (!ent) return;
+          if (isHomeMode && paraDashboard) {
+            paraDashboard.openProjectModal(ent);
+          } else {
+            openParaVirtualView({ mode: 'entity', entityId: ent.id });
+          }
+        } else if (kind === 'node') {
+          const found = findNodeAndParent(id)?.node;
+          if (!found) return;
+          if (found.type === 'folder') {
+            setHomeMode(false);
+            openFolder(found);
+          } else {
+            launchItemDirectly(found);
+          }
+        } else if (kind === 'rel') {
+          const found = resolveAnyNode(id);
+          if (!found) return;
+          setHomeMode(false);
+          navigateToNode(found);
+          switchRightTab('relations');
+        }
+      });
+    });
+  }
+
   function renderSearchResults(query) {
     const results = searchNodes(query).filter((item) => isItemVisible(item));
     renderBreadcrumb(state.currentFolder);
@@ -1009,14 +1214,36 @@
     searchQuery = '';
     elGlobalSearch.value = '';
     elBtnClearSearch.style.display = 'none';
-    if (rerender) openFolder(state.currentFolder);
+    closeGlobalSearchPopover();
+    if (rerender && !isHomeMode) openFolder(state.currentFolder);
   }
 
   elGlobalSearch.addEventListener('input', (e) => {
     searchQuery = e.target.value.trim();
     elBtnClearSearch.style.display = searchQuery ? 'inline-block' : 'none';
-    if (searchQuery) renderSearchResults(searchQuery);
-    else openFolder(state.currentFolder);
+    renderGlobalSearchPopover(searchQuery);
+    if (!isHomeMode) {
+      if (searchQuery) renderSearchResults(searchQuery);
+      else openFolder(state.currentFolder);
+    }
+  });
+
+  elGlobalSearch.addEventListener('focus', () => {
+    if (searchQuery) renderGlobalSearchPopover(searchQuery);
+  });
+
+  elGlobalSearch.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      closeGlobalSearchPopover();
+      elGlobalSearch.blur();
+    } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      const q = elGlobalSearch.value.trim();
+      if (q && paraDashboard) {
+        e.preventDefault();
+        paraDashboard.captureQuickMemo({ title: q, body: q });
+        clearSearch(false);
+      }
+    }
   });
 
   elBtnClearSearch.addEventListener('click', () => clearSearch(true));
@@ -1054,6 +1281,7 @@
     const parentSegs = getRelativeFolderPathForItem(item.id);
     saveStateForUndo();
     item.name = trimmed;
+    touchNode(item);
     if (item.driveFile) item.driveFile.name = trimmed;
     saveAndRender();
     if (state.selectedItem && state.selectedItem.id === item.id) {
@@ -1188,7 +1416,7 @@
     if (type === 'sheet') {
       const newName = getUniqueNameInFolder(state.currentFolder, '새 스프레드시트', '.xlsx');
       const emptyWb = BrainSheet.createEmptyWorkbook('Sheet1');
-      const newItem = {
+      const newItem = touchNode({
         id: genId(),
         type: 'doc',
         name: newName,
@@ -1197,7 +1425,7 @@
         summary: BrainSheet.workbookToMarkdownSummary(emptyWb),
         link: '',
         sheetData: emptyWb
-      };
+      }, { isNew: true });
       if (!state.currentFolder.children) state.currentFolder.children = [];
       state.currentFolder.children.push(newItem);
       if (activeVirtualEnt) {
@@ -1222,7 +1450,7 @@
     const newName = type === 'folder'
       ? getUniqueNameInFolder(state.currentFolder, '새 폴더')
       : getUniqueNameInFolder(state.currentFolder, '새 메모', '.md');
-    const newItem = {
+    const newItem = touchNode({
       id: genId(),
       type,
       name: newName,
@@ -1231,7 +1459,7 @@
       summary: '',
       link: '',
       children: type === 'folder' ? [] : undefined
-    };
+    }, { isNew: true });
     if (!state.currentFolder.children) state.currentFolder.children = [];
     state.currentFolder.children.push(newItem);
     if (type !== 'folder' && activeVirtualEnt) {
@@ -1986,6 +2214,7 @@
     state.selectedItem.link = linkVal;
     state.selectedItem.isLocalPrivate = isProtected;
     state.selectedItem.summary = $('edit-summary').value;
+    touchNode(state.selectedItem);
     saveAndRender();
     selectItem(state.selectedItem);
     syncOpenWindowsForItem(state.selectedItem);
@@ -2589,8 +2818,133 @@
     }
   });
 
-  // ================= Settings Modal & Export/Import =================
+  // ================= Settings Modal, Security Vault & Auto-Backup =================
+  function buildFullBackupPayload() {
+    const exportFs = isOwnerAuthenticated() ? state.fileSystem : stripLocalItemsForExport(state.fileSystem);
+    return {
+      exportedAt: new Date().toISOString(),
+      version: '7.0',
+      fileSystem: exportFs,
+      paraEntities: state.paraEntities || [],
+      relations: state.relations || [],
+      pinnedAppIds: state.pinnedAppIds || [],
+      dfpState: typeof loadDfpState === 'function' ? loadDfpState() : null,
+      chatHistory: state.chatHistory || []
+    };
+  }
+
+  async function applyBackupPayload(parsed, { skipPreImportSnapshot = false, reasonLabel = '가져오기 직전 안전 스냅샷' } = {}) {
+    const fs = parsed?.fileSystem || (parsed?.id === 'root' ? parsed : null);
+    if (!fs || !fs.id) throw new Error('올바른 세컨드 브레인 백업 파일이 아닙니다.');
+
+    if (!skipPreImportSnapshot && BrainBackup) {
+      await BrainBackup.saveSnapshot({
+        kind: 'pre-import',
+        label: reasonLabel,
+        userEmail: getActiveUserEmail() || 'guest',
+        payload: buildFullBackupPayload()
+      });
+    }
+
+    saveStateForUndo();
+    state.fileSystem = fs;
+    state.currentFolder = state.fileSystem;
+    state.selectedItem = null;
+    if (Array.isArray(parsed.paraEntities)) {
+      state.paraEntities = parsed.paraEntities;
+      persistParaEntities();
+    }
+    if (Array.isArray(parsed.relations)) {
+      state.relations = parsed.relations;
+      persistRelations();
+    }
+    if (Array.isArray(parsed.pinnedAppIds)) {
+      state.pinnedAppIds = parsed.pinnedAppIds;
+      persistPinnedApps();
+    }
+    if (parsed.dfpState && typeof parsed.dfpState === 'object' && typeof saveDfpState === 'function') {
+      saveDfpState(parsed.dfpState);
+    }
+    if (Array.isArray(parsed.chatHistory)) {
+      state.chatHistory = parsed.chatHistory;
+      persistChat();
+      renderChatMessages();
+    }
+    normalizeParaWorkspace();
+    saveAndRender();
+    if (typeof refreshHomeDashboard === 'function') refreshHomeDashboard();
+  }
+
+  function updateVaultModalUI() {
+    const modeSel = $('key-storage-mode');
+    const passRow = $('sb-vault-pass-row');
+    const statusEl = $('sb-vault-status-text');
+    const unlockBtn = $('btn-unlock-vault');
+    const clearBtn = $('btn-clear-vault');
+    if (!modeSel || !passRow || !statusEl || !BrainSecurity) return;
+
+    const mode = modeSel.value || BrainSecurity.getKeyStorageMode();
+    const hasVault = BrainSecurity.hasEncryptedVault();
+    const locked = BrainSecurity.isVaultLocked();
+    const subtleOk = BrainSecurity.isCryptoSubtleAvailable();
+
+    passRow.style.display = (mode === 'vault' || hasVault) ? 'flex' : 'none';
+    if (unlockBtn) unlockBtn.style.display = hasVault ? 'inline-flex' : 'none';
+    if (clearBtn) clearBtn.style.display = hasVault ? 'inline-flex' : 'none';
+
+    if (!subtleOk && mode === 'vault') {
+      statusEl.textContent = '⚠️ file:// 등 비보안 출처에서는 브라우저 Web Crypto 암호화가 제한되어 세션 전용으로 동작합니다.';
+    } else if (hasVault && locked) {
+      statusEl.textContent = '🔒 암호화 금고가 잠겨 있습니다. 비밀번호를 입력해 [금고 해제]를 누르면 키가 복원됩니다.';
+    } else if (hasVault) {
+      statusEl.textContent = '🔓 암호화 금고 해제됨 · 저장 시 AES-256-GCM으로 암호화되어 보관됩니다.';
+    } else {
+      statusEl.textContent = '현재 세션 메모리 전용 모드입니다. (localStorage에 평문 키를 남기지 않음)';
+    }
+  }
+
+  async function renderBackupSnapshotList() {
+    const listEl = $('backup-snapshot-list');
+    if (!listEl || !BrainBackup) return;
+    const snaps = await BrainBackup.listSnapshots(getActiveUserEmail() || 'guest');
+    if (!snaps || snaps.length === 0) {
+      listEl.innerHTML = `<div class="sb-snap-empty">저장된 백업 스냅샷이 아직 없습니다. [스냅샷 저장] 또는 JSON 가져오기 시 자동 생성됩니다.</div>`;
+      return;
+    }
+    const kindMap = { 'pre-import': '가져오기 전', manual: '수동', auto: '자동' };
+    listEl.innerHTML = snaps.slice(0, 8).map((s) => {
+      const dt = new Date(s.createdAt).toLocaleString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+      const kindCls = s.kind === 'pre-import' ? 'is-pre' : (s.kind === 'manual' ? 'is-manual' : 'is-auto');
+      return (
+        `<div class="sb-snap-row">` +
+        `  <span class="sb-snap-pill ${kindCls}">${kindMap[s.kind] || '자동'}</span>` +
+        `  <span class="sb-snap-label">${escapeHtml(s.label || '스냅샷')}</span>` +
+        `  <span class="sb-snap-time">${dt}</span>` +
+        `  <button type="button" class="sb-snap-restore" data-snap-id="${escapeHtml(s.id)}">복원</button>` +
+        `</div>`
+      );
+    }).join('');
+
+    listEl.querySelectorAll('.sb-snap-restore').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const snap = await BrainBackup.getSnapshot(btn.dataset.snapId);
+        if (!snap?.payload) {
+          showToast('스냅샷을 불러올 수 없습니다.');
+          return;
+        }
+        try {
+          await applyBackupPayload(snap.payload, { reasonLabel: '스냅샷 복원 직전 자동 백업' });
+          await renderBackupSnapshotList();
+          showToast('↩️ 선택한 스냅샷 시점으로 복원되었습니다.');
+        } catch (err) {
+          showToast(`복원 실패: ${err.message}`);
+        }
+      });
+    });
+  }
+
   function openSettingsModal() {
+    closeMoreMenu();
     $('key-gemini').value = state.settings.keys.gemini || '';
     $('key-openai').value = state.settings.keys.openai || '';
     $('key-anthropic').value = state.settings.keys.anthropic || '';
@@ -2602,12 +2956,67 @@
     $('custom-model-grok').value = state.settings.customModels.grok || '';
     $('local-bridge-url').value = state.settings.localBridgeUrl || LocalBridge.DEFAULT_URL;
 
+    if ($('key-storage-mode') && BrainSecurity) {
+      $('key-storage-mode').value = BrainSecurity.hasEncryptedVault() ? 'vault' : BrainSecurity.getKeyStorageMode();
+    }
+    if ($('key-vault-passphrase')) $('key-vault-passphrase').value = '';
+    updateVaultModalUI();
+    renderBackupSnapshotList();
+
     elSettingsModal.style.display = 'flex';
   }
 
   function closeSettingsModal() {
     elSettingsModal.style.display = 'none';
   }
+
+  $('key-storage-mode')?.addEventListener('change', updateVaultModalUI);
+
+  $('btn-unlock-vault')?.addEventListener('click', async () => {
+    if (!BrainSecurity) return;
+    const pass = String($('key-vault-passphrase')?.value || '');
+    if (pass.length < 4) {
+      showToast('금고 비밀번호(4자 이상)를 입력해 주세요.');
+      $('key-vault-passphrase')?.focus();
+      return;
+    }
+    try {
+      const keys = await BrainSecurity.unlockEncryptedVault(pass);
+      state.settings.keys = { ...state.settings.keys, ...keys };
+      $('key-gemini').value = state.settings.keys.gemini || '';
+      $('key-openai').value = state.settings.keys.openai || '';
+      $('key-anthropic').value = state.settings.keys.anthropic || '';
+      $('key-grok').value = state.settings.keys.grok || '';
+      updateVaultModalUI();
+      updateApiStatusSummary();
+      if (isHomeMode && paraDashboard) paraDashboard.renderAll();
+      showToast('🔓 암호화 금고가 해제되어 세션에 키가 복원되었습니다.');
+    } catch (err) {
+      showToast(`⚠️ ${err.message}`);
+    }
+  });
+
+  $('btn-clear-vault')?.addEventListener('click', () => {
+    if (!BrainSecurity) return;
+    BrainSecurity.clearEncryptedVault();
+    if ($('key-storage-mode')) $('key-storage-mode').value = 'session';
+    if ($('key-vault-passphrase')) $('key-vault-passphrase').value = '';
+    updateVaultModalUI();
+    showToast('🧹 암호화 금고를 삭제하고 세션 전용 모드로 전환했습니다.');
+  });
+
+  $('btn-save-snapshot-now')?.addEventListener('click', async () => {
+    if (!BrainBackup) return;
+    await BrainBackup.saveSnapshot({
+      kind: 'manual',
+      label: '수동 백업 스냅샷',
+      userEmail: getActiveUserEmail() || 'guest',
+      payload: buildFullBackupPayload()
+    });
+    autoBackupDirty = false;
+    await renderBackupSnapshotList();
+    showToast('💾 현재 상태의 백업 스냅샷이 저장되었습니다.');
+  });
 
   $('btn-settings').addEventListener('click', openSettingsModal);
   $('btn-close-settings').addEventListener('click', closeSettingsModal);
@@ -2616,7 +3025,7 @@
     if (e.target === elSettingsModal) closeSettingsModal();
   });
 
-  $('btn-save-settings').addEventListener('click', () => {
+  $('btn-save-settings').addEventListener('click', async () => {
     state.settings.keys.gemini = $('key-gemini').value.trim();
     state.settings.keys.openai = $('key-openai').value.trim();
     state.settings.keys.anthropic = $('key-anthropic').value.trim();
@@ -2628,22 +3037,43 @@
     state.settings.customModels.grok = $('custom-model-grok').value.trim();
     state.settings.localBridgeUrl = $('local-bridge-url').value.trim() || LocalBridge.DEFAULT_URL;
 
+    const storageMode = $('key-storage-mode')?.value || 'session';
+    const hasAnyKey = Object.values(state.settings.keys).some((v) => Boolean(v));
+    if (!isGuestMode && BrainSecurity) {
+      BrainSecurity.saveSessionKeys(state.settings.keys);
+      if (storageMode === 'vault' && hasAnyKey) {
+        const pass = String($('key-vault-passphrase')?.value || '');
+        if (pass.length >= 4) {
+          try {
+            await BrainSecurity.saveEncryptedVault(state.settings.keys, pass);
+          } catch (err) {
+            showToast(`⚠️ 암호화 금고 저장 실패(세션에만 유지됨): ${err.message}`);
+          }
+        } else if (!BrainSecurity.hasEncryptedVault()) {
+          showToast('⚠️ 암호화 금고 저장을 위해 4자 이상 비밀번호를 입력해 주세요. (현재 세션에만 저장됨)');
+        }
+      } else if (storageMode === 'session') {
+        BrainSecurity.setKeyStorageMode('session');
+      }
+    }
+
     persistSettings();
     populateModels(elChatProvider.value);
     updateApiStatusSummary();
     refreshBridgeStatus(false);
+    if (isHomeMode && paraDashboard) paraDashboard.renderAll();
     closeSettingsModal();
-    showToast(isGuestMode ? '✅ 설정이 브라우저에 저장되었습니다.' : '✅ API 설정이 브라우저에 저장되었습니다.');
+    showToast(
+      isGuestMode
+        ? '✅ 설정이 저장되었습니다.'
+        : (storageMode === 'vault' && BrainSecurity?.hasEncryptedVault()
+          ? '🔐 API 키가 AES-256-GCM 암호화 금고에 안전하게 저장되었습니다.'
+          : '🔒 API 키가 현재 세션 메모리에 안전하게 저장되었습니다. (평문 localStorage 미저장)')
+    );
   });
 
   $('btn-export-json').addEventListener('click', () => {
-    const exportFs = isOwnerAuthenticated() ? state.fileSystem : stripLocalItemsForExport(state.fileSystem);
-    const payload = {
-      exportedAt: new Date().toISOString(),
-      version: '6.0',
-      fileSystem: exportFs,
-      chatHistory: state.chatHistory
-    };
+    const payload = buildFullBackupPayload();
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -2651,7 +3081,7 @@
     a.download = `second-brain-backup-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     URL.revokeObjectURL(url);
-    showToast('⬇️ JSON 백업 파일이 다운로드되었습니다.');
+    showToast('⬇️ 전체 백업 JSON 파일(파일·PARA·관계·일정 포함, API 키 제외)이 다운로드되었습니다.');
   });
 
   $('btn-import-json').addEventListener('click', () => $('import-file-input').click());
@@ -2659,23 +3089,13 @@
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       try {
         const parsed = JSON.parse(String(reader.result));
-        const fs = parsed.fileSystem || (parsed.id === 'root' ? parsed : null);
-        if (!fs || !fs.id) throw new Error('올바른 세컨드 브레인 백업 파일이 아닙니다.');
-        saveStateForUndo();
-        state.fileSystem = fs;
-        state.currentFolder = state.fileSystem;
-        state.selectedItem = null;
-        if (Array.isArray(parsed.chatHistory)) {
-          state.chatHistory = parsed.chatHistory;
-          persistChat();
-          renderChatMessages();
-        }
-        saveAndRender();
+        await applyBackupPayload(parsed, { reasonLabel: `JSON 가져오기 전 (${file.name})` });
+        await renderBackupSnapshotList();
         closeSettingsModal();
-        showToast('⬆️ 데이터를 성공적으로 복원했습니다.');
+        showToast('⬆️ 가져오기 전 안전 스냅샷을 저장하고 데이터를 복원했습니다.');
       } catch (err) {
         showToast(`복원 실패: ${err.message}`);
       }
@@ -2782,6 +3202,9 @@
   }
 
   function showLoginScreen(statusText = '', errorMsg = '') {
+    closeMoreMenu();
+    closeOsNavMenu();
+    closeGlobalSearchPopover();
     applyGuestModeUI(false);
     if (driveSyncTimer) {
       clearTimeout(driveSyncTimer);
@@ -2964,12 +3387,13 @@
     const textEl = $('auth-btn-text');
     if (!btn || !iconEl || !textEl) return;
 
+    const userSvg = BrainIcons ? BrainIcons.svg('user', 15) : '👤';
     const user = BrainAuth.getUser();
     const unlocked = isOwnerAuthenticated();
 
     if (isGuestMode) {
       btn.classList.remove('active');
-      iconEl.textContent = '👤';
+      iconEl.innerHTML = userSvg;
       textEl.textContent = '게스트 (오프라인)';
       btn.title = '오프라인 게스트 모드 — 클릭하여 Google 로그인 설정';
       return;
@@ -2979,17 +3403,17 @@
       btn.classList.add('active');
       iconEl.innerHTML = user.picture
         ? `<img src="${escapeHtml(user.picture)}" alt="" class="auth-avatar-mini" referrerpolicy="no-referrer">`
-        : '🔓';
+        : userSvg;
       textEl.textContent = user.email.split('@')[0];
       btn.title = `인증됨 (${user.email}) — 클릭하여 로그아웃/잠금`;
     } else if (user) {
       btn.classList.remove('active');
-      iconEl.textContent = '🚫';
+      iconEl.innerHTML = userSvg;
       textEl.textContent = '권한 없음';
       btn.title = `${user.email} 계정은 허용된 소유자 이메일과 다릅니다.`;
     } else {
       btn.classList.remove('active');
-      iconEl.textContent = '🔒';
+      iconEl.innerHTML = userSvg;
       textEl.textContent = 'Google 로그인';
       btn.title = '내 구글 계정으로 로그인하여 저장한 로컬 항목 보기';
     }
@@ -3249,8 +3673,10 @@
     isBridgeConnected = ok;
     const dot = $('bridge-status-dot');
     const text = $('bridge-status-text');
+    const moreBadge = $('more-bridge-badge');
     if (dot) dot.classList.toggle('connected', ok);
     if (text) text.textContent = ok ? '로컬 연결됨' : '로컬 미연결';
+    if (moreBadge) moreBadge.textContent = ok ? '연결됨' : '미연결';
 
     // bridge-config.json에 설정된 firebaseConfig가 있고 브라우저에 아직 없으면 자동 동기화
     if (ok && health.firebaseConfig && BrainAuth.isConfigComplete(health.firebaseConfig) && !BrainAuth.isConfigComplete(state.settings.firebaseConfig)) {
@@ -3815,6 +4241,7 @@
     const btn = $('btn-local-folder');
     const dot = $('local-folder-dot');
     const txt = $('local-folder-text');
+    const moreBadge = $('more-local-folder-badge');
     if (btn && dot && txt) {
       dot.classList.remove('connected', 'pending');
       btn.classList.toggle('active', st.connected);
@@ -3823,17 +4250,21 @@
         const shortName = st.folderName.length > 14 ? st.folderName.slice(0, 14) + '…' : st.folderName;
         txt.textContent = `📂 ${shortName}`;
         btn.title = `로컬 폴더 자동 저장 연결됨: ${st.folderPath || st.folderName}`;
+        if (moreBadge) moreBadge.textContent = shortName;
       } else if (st.hasSavedHandle) {
         dot.classList.add('pending');
         txt.textContent = '로컬 폴더 재연결';
         btn.title = `이전에 연결한 로컬 폴더("${st.savedFolderName}")에 다시 연결하려면 클릭하세요.`;
+        if (moreBadge) moreBadge.textContent = '재연결 필요';
       } else if (st.autoDownload) {
         dot.classList.add('pending');
         txt.textContent = '자동 다운로드 ON';
         btn.title = '오프라인 파일 생성/저장 시 PC로 자동 다운로드됩니다.';
+        if (moreBadge) moreBadge.textContent = '자동다운';
       } else {
         txt.textContent = '로컬 폴더';
         btn.title = '클릭하여 오프라인 파일을 저장할 PC 로컬 폴더를 연결하세요.';
+        if (moreBadge) moreBadge.textContent = '미연결';
       }
     }
 
@@ -4092,6 +4523,7 @@
     const btn = $('btn-drive-sync');
     const dot = $('drive-status-dot');
     const text = $('drive-status-text');
+    const moreBadge = $('more-drive-badge');
     if (!btn || !dot || !text) return;
 
     dot.classList.remove('synced', 'syncing', 'error');
@@ -4102,12 +4534,14 @@
       dot.classList.add('syncing');
       text.textContent = customLabel || '동기화 중...';
       btn.title = 'Google Drive (SecondBrainOS) 동기화 진행 중...';
+      if (moreBadge) moreBadge.textContent = '동기화 중';
       return;
     }
 
     if (!unlocked) {
       text.textContent = customLabel || '드라이브 미연결';
       btn.title = 'Google 로그인 후 내 드라이브(SecondBrainOS 폴더)에 자동 동기화됩니다.';
+      if (moreBadge) moreBadge.textContent = '미연결';
       return;
     }
 
@@ -4115,6 +4549,7 @@
       dot.classList.add('error');
       text.textContent = customLabel || '드라이브 재연결';
       btn.title = 'Google Drive 토큰이 만료되었거나 연결되지 않았습니다. 클릭하여 재연결하세요.';
+      if (moreBadge) moreBadge.textContent = '재연결 필요';
       return;
     }
 
@@ -4122,6 +4557,7 @@
       dot.classList.add('error');
       text.textContent = customLabel || '동기화 오류';
       btn.title = '동기화 중 오류가 발생했습니다. 클릭하여 다시 시도하세요.';
+      if (moreBadge) moreBadge.textContent = '오류';
       return;
     }
 
@@ -4131,6 +4567,7 @@
       ? new Date(meta.lastSyncedAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })
       : '';
     text.textContent = customLabel || '드라이브 연결됨';
+    if (moreBadge) moreBadge.textContent = timeStr ? `동기화 ${timeStr}` : '연결됨';
     btn.title = timeStr
       ? `내 드라이브 / SecondBrainOS 동기화됨 (${timeStr}) — 클릭하여 수동 동기화`
       : '내 드라이브 / SecondBrainOS 연결됨 — 클릭하여 수동 동기화';
@@ -4708,6 +5145,7 @@
         if (newVal === (item.summary || '') && silent) return;
         saveStateForUndo();
         item.summary = newVal;
+        touchNode(item);
         saveAndRender();
         scheduleDocFileSyncToDrive(item, true);
         scheduleItemSyncToLocalFolder(item, !silent, { allowAutoDownload: !silent });
@@ -5539,6 +5977,7 @@
       onAutoSave(updatedWb, mdSummary) {
         item.sheetData = updatedWb;
         item.summary = mdSummary;
+        touchNode(item);
         persistFS();
         scheduleItemSyncToLocalFolder(item, false);
         if (state.selectedItem && state.selectedItem.id === item.id) {
@@ -5549,6 +5988,7 @@
         saveStateForUndo();
         item.sheetData = updatedWb;
         item.summary = mdSummary;
+        touchNode(item);
         saveAndRender();
         if (state.selectedItem && state.selectedItem.id === item.id) {
           $('p-summary').innerHTML = renderMarkdown(item.summary);
@@ -5636,7 +6076,7 @@
     } catch (_) {}
     onAuthStateChanged();
     renderAuthModalContent();
-    showToast('✅ 기본 Firebase 프로젝트(gen-lang-client-0519883143)로 복원되었습니다.');
+    showToast('🧹 Firebase 설정이 초기화되었습니다. 본인 Firebase 프로젝트 정보를 입력해 주세요.');
   });
 
   $('btn-auth-drive-sync').addEventListener('click', () => {
@@ -6148,7 +6588,7 @@
 
       const badge = document.createElement('span');
       badge.className = 'reldb-rel-badge type-unassigned';
-      badge.textContent = '⚠️ 지정필요';
+      badge.textContent = '📥 미분류';
 
       mainLine.appendChild(btn);
       mainLine.appendChild(badge);
@@ -6159,9 +6599,9 @@
       quickWrap.className = 'reldb-quick-assign';
 
       [
-        { mode: 'project', label: '＋🚀 프로젝트' },
-        { mode: 'area', label: '＋🧭 영역' },
-        { mode: 'resource', label: '＋📚 리소스' }
+        { mode: 'project', label: '＋ 프로젝트' },
+        { mode: 'area', label: '＋ 영역' },
+        { mode: 'resource', label: '＋ 자료' }
       ].forEach(({ mode, label }) => {
         const qBtn = document.createElement('button');
         qBtn.type = 'button';
@@ -6183,13 +6623,51 @@
 
     bodyEl.innerHTML = '';
 
-    // 지정필요 전용 필터 뷰
+    // 수신함(미분류) 전용 필터 뷰
     if (reldbFilterType === 'unassigned') {
       if (filteredUnassigned.length === 0) {
-        bodyEl.innerHTML = `<div class="reldb-empty-card-msg">🎉 지정이 필요한 미분류 파일이 없습니다!</div>`;
+        bodyEl.innerHTML = `<div class="reldb-empty-card-msg">미분류 파일이 없습니다.</div>`;
         return;
       }
       filteredUnassigned.forEach((n) => bodyEl.appendChild(mkUnassignedRow(n)));
+      return;
+    }
+
+    // 보관(Archives) 전용 필터 뷰
+    if (reldbFilterType === 'archive') {
+      const archivedEntities = getParaEntities('archive').filter((e) => {
+        if (!q) return true;
+        return `${e.name || ''} ${e.tag || ''}`.toLowerCase().includes(q);
+      });
+      if (archivedEntities.length === 0) {
+        bodyEl.innerHTML = `<div class="reldb-empty-card-msg">보관된 PARA 항목이 없습니다. 상단 [＋ 보관] 또는 프로젝트 완료 시 여기에 보관됩니다.</div>`;
+        return;
+      }
+      const pTypeLabel = { project: '프로젝트', area: '영역', resource: '자료' };
+      archivedEntities.forEach((ent) => {
+        const row = document.createElement('div');
+        row.className = 'reldb-table-row';
+        row.innerHTML =
+          `<div class="reldb-row-main">` +
+          `  <button type="button" class="reldb-node-btn" data-arch-open="1">${escapeHtml(ent.icon || '📦')} ${escapeHtml(ent.name)}</button>` +
+          `  <span class="reldb-rel-badge type-archive">보관 · ${escapeHtml(pTypeLabel[ent.paraType] || '항목')}</span>` +
+          `</div>` +
+          `<div class="reldb-row-meta">` +
+          `  <span>연결 ${getVirtualFilesForParaEntity(ent).length}건</span>` +
+          `  <button type="button" class="reldb-quick-btn" data-arch-restore="1">↩️ 복원</button>` +
+          `</div>`;
+        row.querySelector('[data-arch-open]')?.addEventListener('click', () => {
+          openParaVirtualView({ mode: 'entity', entityId: ent.id });
+        });
+        row.querySelector('[data-arch-restore]')?.addEventListener('click', () => {
+          if (archiveParaEntity(ent.id, false)) {
+            saveAndRender();
+            if (typeof refreshHomeDashboard === 'function') refreshHomeDashboard();
+            showToast(`↩️ "${ent.name}"을(를) 활성 목록으로 복원했습니다.`);
+          }
+        });
+        bodyEl.appendChild(row);
+      });
       return;
     }
 
@@ -6201,14 +6679,15 @@
     });
 
     if (filtered.length === 0 && !(reldbFilterType === 'all' && filteredUnassigned.length > 0)) {
-      bodyEl.innerHTML = `<div class="reldb-empty-card-msg">${validRels.length === 0 ? '아직 등록된 연결 관계가 없습니다.<br>상단 <b>🌱 PARA 선언</b>으로 프로젝트·영역·리소스를 만든 뒤 연결해 보세요.' : '필터 조건에 맞는 연결이 없습니다.'}</div>`;
+      bodyEl.innerHTML = `<div class="reldb-empty-card-msg">${validRels.length === 0 ? '아직 등록된 연결 관계가 없습니다.<br>상단 <b>PARA 선언</b>으로 프로젝트·영역·자료·보관을 만든 뒤 연결해 보세요.' : '필터 조건에 맞는 연결이 없습니다.'}</div>`;
       return;
     }
 
     const typeInfo = {
       project: { text: '🚀 프로젝트', cls: 'type-project' },
       area: { text: '🧭 영역', cls: 'type-area' },
-      resource: { text: '📚 리소스', cls: 'type-resource' },
+      resource: { text: '📚 자료', cls: 'type-resource' },
+      archive: { text: '📦 보관', cls: 'type-archive' },
       parent: { text: '상위 → 하위', cls: 'type-parent' },
       related: { text: '↔ 일반연관', cls: 'type-related' },
       reference: { text: '📎 참조 →', cls: 'type-reference' }
@@ -6402,10 +6881,10 @@
   function openDeclareForm(paraType) {
     pendingDeclareType = paraType;
     const phMap = {
-      project: '새 프로젝트 이름 (🧭 PARA 트리에 가상 선언)...',
-      area: '새 영역 이름 (🧭 PARA 트리에 가상 선언)...',
-      resource: '새 리소스 이름 (🧭 PARA 트리에 가상 선언)...',
-      archive: '새 아카이브 이름 (🧭 PARA 트리에 가상 선언)...'
+      project: '새 프로젝트 이름 (PARA 트리에 추가)...',
+      area: '새 영역 이름 (PARA 트리에 추가)...',
+      resource: '새 자료 이름 (PARA 트리에 추가)...',
+      archive: '새 보관 항목 이름 (보관함에 추가)...'
     };
     if (elDeclareInput) {
       elDeclareInput.value = '';
@@ -6431,16 +6910,17 @@
     saveStateForUndo();
     const created = declareParaEntity({ paraType: pendingDeclareType, name });
     if (created) {
-      const rootNameMap = { project: '1. 프로젝트', area: '2. 영역', resource: '3. 리소스', archive: '4. 아카이브' };
+      const rootNameMap = { project: '1. 프로젝트', area: '2. 영역', resource: '3. 자료', archive: '4. 보관' };
       const iconMap = { project: '🚀', area: '🧭', resource: '📚', archive: '📦' };
-      // 현재 파일이 선택된 상태라면 자연스럽게 방금 선언한 프로젝트/영역/리소스와 연결
+      // 현재 파일이 선택된 상태라면 방금 선언한 PARA 항목과 연결
       if (state.selectedItem && state.selectedItem.id !== 'root' && state.selectedItem.id !== created.id) {
-        addRelation({ sourceId: state.selectedItem.id, targetId: created.id, type: pendingDeclareType, label: '' });
+        addRelation({ sourceId: state.selectedItem.id, targetId: created.id, type: pendingDeclareType === 'archive' ? created.paraType : pendingDeclareType, label: '' });
       }
       saveAndRender();
       if (state.selectedItem) renderDetailRelations(state.selectedItem);
       renderRelationsDbPanel();
-      showToast(`${iconMap[pendingDeclareType]} "${created.name}" 선언 완료! (🧭 PARA 트리 › ${rootNameMap[pendingDeclareType]})`);
+      if (typeof refreshHomeDashboard === 'function') refreshHomeDashboard();
+      showToast(`${iconMap[pendingDeclareType]} "${created.name}" 추가 완료! (${rootNameMap[pendingDeclareType]})`);
       closeDeclareForm();
     }
   }
@@ -6448,6 +6928,7 @@
   $('btn-declare-project')?.addEventListener('click', () => openDeclareForm('project'));
   $('btn-declare-area')?.addEventListener('click', () => openDeclareForm('area'));
   $('btn-declare-resource')?.addEventListener('click', () => openDeclareForm('resource'));
+  $('btn-declare-archive')?.addEventListener('click', () => openDeclareForm('archive'));
   $('btn-declare-confirm')?.addEventListener('click', commitDeclareForm);
   $('btn-declare-cancel')?.addEventListener('click', closeDeclareForm);
   elDeclareInput?.addEventListener('keydown', (e) => {
@@ -7326,10 +7807,13 @@
   function updateHomeClock() {
     const clockEl = $('home-clock');
     const dateEl = $('home-date');
-    if (!clockEl || !dateEl) return;
     const now = new Date();
-    clockEl.textContent = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-    dateEl.textContent = now.toLocaleDateString('ko-KR', { month: 'long', day: 'numeric', weekday: 'long' });
+    if (clockEl) {
+      clockEl.textContent = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    }
+    if (dateEl) {
+      dateEl.textContent = now.toLocaleDateString('ko-KR', { month: 'long', day: 'numeric', weekday: 'long' });
+    }
   }
 
   function getAppTileVisual(item) {
@@ -7406,28 +7890,110 @@
     if (menu) menu.style.display = 'none';
   }
 
+  function launchBuiltinApp(app) {
+    if (app === 'explorer') {
+      setHomeMode(false);
+    } else if (app === 'markdown') {
+      createNew('doc');
+    } else if (app === 'spreadsheet' || app === 'origin') {
+      createNew('sheet');
+    } else if (app === 'relation-map') {
+      openRelationMapWindow();
+    } else if (app === 'ai-chat') {
+      setHomeMode(false);
+      switchRightTab('chat');
+    }
+  }
+
+  function openScheduleModal() {
+    const modal = $('dfp-schedule-modal');
+    if (!modal) return;
+    if ($('dfp-sched-date') && !$('dfp-sched-date').value) $('dfp-sched-date').value = getTodayYMD();
+    if ($('dfp-sched-time-once') && !$('dfp-sched-time-once').value) $('dfp-sched-time-once').value = '09:00';
+    if ($('dfp-sched-time-rec') && !$('dfp-sched-time-rec').value) $('dfp-sched-time-rec').value = '09:00';
+    updateScheduleReversePreview();
+    renderScheduleModalList();
+    modal.style.display = 'flex';
+  }
+
+  function openPinAppModal() {
+    if ($('pin-app-search')) $('pin-app-search').value = '';
+    renderPinAppPicker('');
+    if (elPinAppModal) elPinAppModal.style.display = 'flex';
+    $('pin-app-search')?.focus();
+  }
+
+  function ensureParaDashboardMounted() {
+    if (paraDashboard || !window.BrainParaDashboard) return paraDashboard;
+    paraDashboard = window.BrainParaDashboard.mountParaDashboard({
+      loadDfpState,
+      saveDfpState,
+      getTodayYMD,
+      getOrCreateDailyMemoFolder,
+      getUniqueNameInFolder,
+      isItemVisible,
+      isSpreadsheetItem,
+      computeNextScheduleInstance,
+      formatHHMM,
+      renderDfpTrafficLight,
+      saveAndRender,
+      showToast,
+      setHomeMode,
+      createNew,
+      openScheduleModal,
+      openSettingsModal,
+      openPinAppModal,
+      launchBuiltinApp,
+      launchItemDirectly,
+      navigateToNode,
+      openParaVirtualView,
+      openPhysicalFolder(folder) {
+        clearSearch(false);
+        setHomeMode(false);
+        openFolder(folder);
+      },
+      syncDocAfterSave(doc) {
+        if (!doc) return;
+        touchNode(doc);
+        scheduleDocFileSyncToDrive(doc, true);
+        scheduleItemSyncToLocalFolder(doc, false, { allowAutoDownload: false });
+      },
+      getSidebarStatusText() {
+        if (isGuestMode) {
+          const lf = BrainLocalFolder?.getStatus();
+          return lf?.connected ? `오프라인 · ${lf.folderName}` : '오프라인 게스트 모드';
+        }
+        if (BrainSecurity?.isVaultLocked()) return 'API 금고 잠김 · 해제하기';
+        const configured = Object.keys(PROVIDERS).filter((id) => Boolean(state.settings.keys[id]?.trim()));
+        if (configured.length === 0) return 'API 키를 설정해 주세요';
+        return `AI 연결됨 · ${configured.map((id) => PROVIDERS[id].label).join(', ')}`;
+      }
+    });
+    return paraDashboard;
+  }
+
   function setHomeMode(enable) {
     isHomeMode = Boolean(enable);
-    if (elHomeScreen) elHomeScreen.style.display = isHomeMode ? 'block' : 'none';
+    if (elHomeScreen) elHomeScreen.style.display = isHomeMode ? 'flex' : 'none';
     if (elAppBody) elAppBody.style.display = isHomeMode ? 'none' : 'flex';
-    if (elBtnHomeMode) {
-      $('home-mode-icon').textContent = isHomeMode ? '🏠' : '🗂️';
-      $('home-mode-text').textContent = isHomeMode ? '대시보드' : '탐색기';
-    }
+    $('btn-mode-home')?.classList.toggle('active', isHomeMode);
+    $('btn-mode-explorer')?.classList.toggle('active', !isHomeMode);
     document.querySelectorAll('#os-nav-menu .os-nav-item[data-nav]').forEach((btn) => {
       const nav = btn.dataset.nav;
       btn.classList.toggle('active', (nav === 'dashboard' && isHomeMode) || (nav === 'explorer' && !isHomeMode));
     });
     if (isHomeMode) {
+      ensureParaDashboardMounted();
       updateHomeClock();
       renderHomePinnedApps();
       refreshHomeDashboard();
     }
   }
 
-  // 좌측 상단 드롭다운 메뉴 (대시보드 · 탐색기 · 앱)
+  // 좌측 상단 앱 드롭다운 메뉴 (대시보드 · 탐색기 · 앱)
   elBtnHomeMode?.addEventListener('click', (e) => {
     e.stopPropagation();
+    closeMoreMenu();
     const menu = $('os-nav-menu');
     if (!menu) {
       setHomeMode(!isHomeMode);
@@ -7467,6 +8033,12 @@
     if (!e.target.closest('#os-nav-dropdown-wrap')) {
       closeOsNavMenu();
     }
+    if (!e.target.closest('#sb-more-wrap')) {
+      closeMoreMenu();
+    }
+    if (!e.target.closest('#global-search-wrap')) {
+      closeGlobalSearchPopover();
+    }
     if (!e.target.closest('#dfp-composer-para-wrap')) {
       const pop = $('dfp-composer-para-popover');
       if (pop) pop.style.display = 'none';
@@ -7480,19 +8052,7 @@
     const tile = e.target.closest('.home-app-tile');
     if (!tile) return;
     closeOsNavMenu();
-    const app = tile.dataset.builtin;
-    if (app === 'explorer') {
-      setHomeMode(false);
-    } else if (app === 'markdown') {
-      createNew('doc');
-    } else if (app === 'spreadsheet' || app === 'origin') {
-      createNew('sheet');
-    } else if (app === 'relation-map') {
-      openRelationMapWindow();
-    } else if (app === 'ai-chat') {
-      setHomeMode(false);
-      switchRightTab('chat');
-    }
+    launchBuiltinApp(tile.dataset.builtin);
   });
 
   // ================= Home Dashboard: Daily Focus Planner + Reverse Schedule + Daily MD Memo Bin =================
@@ -8207,8 +8767,11 @@
       if (headline) headline.textContent = '예정된 일정 없음';
       if (progress) { progress.style.width = '100%'; progress.style.background = '#10b981'; }
       if (timeline) timeline.textContent = '';
-      if (headerBadge) headerBadge.textContent = '없음';
-      if (departBtn) departBtn.style.display = 'none';
+      if (headerBadge) headerBadge.textContent = '일정 없음';
+      if (departBtn) {
+        departBtn.classList.add('is-hidden');
+        departBtn.style.display = 'none';
+      }
       return;
     }
 
@@ -8221,7 +8784,8 @@
       headerBadge.textContent = `${next.sched.title} · ${formatHHMM(departTime)} 출발`;
     }
     if (departBtn) {
-      departBtn.style.display = 'block';
+      departBtn.classList.remove('is-hidden');
+      departBtn.style.display = 'inline-flex';
       departBtn.onclick = () => {
         const cur = loadDfpState();
         const target = cur.schedules.find((s) => s.id === next.sched.id);
@@ -8229,7 +8793,8 @@
           if (!Array.isArray(target.completedInstances)) target.completedInstances = [];
           target.completedInstances.push(next.instKey);
           saveDfpState(cur);
-          renderDfpTrafficLight();
+          if (paraDashboard) paraDashboard.renderAll();
+          else renderDfpTrafficLight();
         }
       };
     }
@@ -8318,17 +8883,20 @@
         cur.schedules.splice(idx, 1);
         saveDfpState(cur);
         renderScheduleModalList();
-        renderDfpTrafficLight();
+        if (isHomeMode && paraDashboard) paraDashboard.renderAll();
+        else renderDfpTrafficLight();
       });
       listEl.appendChild(row);
     });
   }
 
   function refreshHomeDashboard() {
-    populateDashboardParaSelect();
-    renderDfpTrafficLight();
-    renderDfpTodos();
-    renderDailyMemoBin();
+    ensureParaDashboardMounted();
+    if (paraDashboard) {
+      paraDashboard.renderAll();
+    } else {
+      renderDfpTrafficLight();
+    }
   }
 
   // Dashboard Event Listeners
@@ -8472,16 +9040,7 @@
   });
 
   // Schedule Modal Events
-  $('dfp-open-schedule-btn')?.addEventListener('click', () => {
-    const modal = $('dfp-schedule-modal');
-    if (!modal) return;
-    if ($('dfp-sched-date') && !$('dfp-sched-date').value) $('dfp-sched-date').value = getTodayYMD();
-    if ($('dfp-sched-time-once') && !$('dfp-sched-time-once').value) $('dfp-sched-time-once').value = '09:00';
-    if ($('dfp-sched-time-rec') && !$('dfp-sched-time-rec').value) $('dfp-sched-time-rec').value = '09:00';
-    updateScheduleReversePreview();
-    renderScheduleModalList();
-    modal.style.display = 'flex';
-  });
+  $('dfp-open-schedule-btn')?.addEventListener('click', openScheduleModal);
   $('dfp-close-schedule-modal')?.addEventListener('click', () => {
     if ($('dfp-schedule-modal')) $('dfp-schedule-modal').style.display = 'none';
   });
@@ -8531,6 +9090,7 @@
     saveDfpState(cur);
     renderScheduleModalList();
     renderDfpTrafficLight();
+    if (isHomeMode && paraDashboard) paraDashboard.renderAll();
     showToast('📅 일정이 등록되고 역산 신호등에 반영되었습니다.');
   });
 
@@ -8586,12 +9146,7 @@
     });
   }
 
-  $('btn-home-add-app')?.addEventListener('click', () => {
-    $('pin-app-search').value = '';
-    renderPinAppPicker('');
-    elPinAppModal.style.display = 'flex';
-    $('pin-app-search').focus();
-  });
+  $('btn-home-add-app')?.addEventListener('click', openPinAppModal);
   $('btn-close-pin-modal')?.addEventListener('click', () => { elPinAppModal.style.display = 'none'; });
   $('btn-cancel-pin-modal')?.addEventListener('click', () => { elPinAppModal.style.display = 'none'; });
   elPinAppModal?.addEventListener('click', (e) => { if (e.target === elPinAppModal) elPinAppModal.style.display = 'none'; });
@@ -8608,9 +9163,23 @@
     updateLoginClock();
     if (isHomeMode) {
       updateHomeClock();
-      renderDfpTrafficLight();
+      if (paraDashboard) paraDashboard.refreshTrafficLightVisuals();
+      else renderDfpTrafficLight();
     }
   }, 15000);
+
+  // 5분 주기 자동 백업 스냅샷 (변경 발생 시 IndexedDB에 롤링 저장)
+  setInterval(() => {
+    if (!autoBackupDirty || !BrainBackup) return;
+    if (elOsWindow?.classList.contains('os-locked')) return;
+    autoBackupDirty = false;
+    BrainBackup.saveSnapshot({
+      kind: 'auto',
+      label: '정기 자동 백업',
+      userEmail: getActiveUserEmail() || 'guest',
+      payload: buildFullBackupPayload()
+    }).catch(() => {});
+  }, 5 * 60 * 1000);
 
   // 온라인(http/https) 환경일 때만 웹 폰트 비동기 로드 (오프라인/file:// 즉시 실행 보장)
   if (!BrainAuth.isFileProtocol() && navigator.onLine !== false) {
