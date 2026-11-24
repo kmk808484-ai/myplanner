@@ -65,7 +65,12 @@
 
   function mountParaDashboard(hooks) {
     const Store = global.BrainStore;
-    let activeView = 'home'; // 'home' | 'inbox' | 'project' | 'area' | 'resource' | 'archive' | 'review'
+    const projectWorkspace = global.BrainProjectWorkspace
+      ? global.BrainProjectWorkspace.createProjectWorkspace(hooks)
+      : null;
+
+    let activeView = 'home'; // 'home' | 'inbox' | 'project' | 'project-detail' | 'area' | 'resource' | 'archive' | 'review'
+    let activeProjectId = null;
     let inboxTab = 'all';    // 'all' | 'memos' | 'files' | 'tasks' | 'done'
     let projectFilter = 'all'; // 'all' | 'active' | 'hold'
     let archiveFilter = 'all'; // 'all' | 'project' | 'area' | 'resource'
@@ -74,8 +79,44 @@
     let lifeUserToggled = false;
     let sidebarAppsOpen = false;
     let openClassifyPopover = null; // { itemId, paraType }
+    let inlineSubTargetId = null;
+    const expandedDashIds = new Set();
 
     const $ = (id) => document.getElementById(id);
+
+    function openProjectDetail(projectId, initialTab = 'cards') {
+      if (!projectId || !Store.findParaEntity(projectId)) return;
+      activeProjectId = projectId;
+      activeView = 'project-detail';
+      if (projectWorkspace && initialTab) projectWorkspace.setDetailTab(initialTab);
+      renderAll();
+    }
+
+    function deleteCardNode(doc) {
+      if (!doc || doc.id === 'root') return false;
+      const found = Store.findNodeAndParent(doc.id);
+      if (!found || !found.parent || !Array.isArray(found.parent.children)) return false;
+      Store.saveStateForUndo();
+      found.parent.children = found.parent.children.filter((c) => c.id !== doc.id);
+      Store.state.relations = (Store.state.relations || []).filter((r) => r.sourceId !== doc.id && r.targetId !== doc.id);
+      Store.persistRelations();
+      hooks.saveAndRender();
+      renderAll();
+      return true;
+    }
+
+    function getTodayCoreCards() {
+      return getAllVisibleDocs()
+        .filter((d) => Boolean(d.isTodayCore) && !d.completed)
+        .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+    }
+
+    function getDoneCoreTodayCount() {
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+      const t0 = todayStart.getTime();
+      return getAllVisibleDocs().filter((d) => d.completed && Number(d.completedAt || 0) >= t0 && (d.isTodayCore || Store.getCardRole(d) === 'T')).length;
+    }
 
     // ---- Data Helpers ----
     function getAllVisibleDocs() {
@@ -283,7 +324,7 @@
         (entities.length > 0
           ? entities.map((e) =>
               `<button type="button" class="sb-qcp-item" data-eid="${esc(e.id)}">` +
-              `  ${svg(paraType, 14)}` +
+              `  <span class="sb-code-pill-xs">${esc(Store.getParaCode(e))}</span>` +
               `  <span>${esc(e.name)}</span>` +
               `</button>`
             ).join('')
@@ -346,8 +387,19 @@
       }
     }
 
-    // ---- Quick Memo Capture (Auto-routes to Inbox when no PARA picked) ----
-    function captureQuickMemo({ title = '', body = '', addToTodo = false, paraType = '', paraId = '' }) {
+    // ---- Quick Memo Capture (Unified MD Card: Inbox / Core / Sub-Card) ----
+    function captureQuickMemo({
+      title = '',
+      body = '',
+      addToTodo = false,
+      isTodayCore = false,
+      cardRole = '',
+      coreTime = '',
+      customTags = [],
+      paraType = '',
+      paraId = '',
+      parentDoc = null
+    }) {
       const rawTitle = String(title || '').trim();
       const rawBody = String(body || '').trim();
       if (!rawTitle && !rawBody) return null;
@@ -361,12 +413,27 @@
         .trim() || '메모';
       const fileName = hooks.getUniqueNameInFolder(inboxFolder, firstLine, '.md');
       const now = Date.now();
+      const coreFlag = Boolean(isTodayCore || addToTodo);
+      const roleVal = ['T', 'S', 'R'].includes(cardRole) ? cardRole : (coreFlag ? 'T' : 'S');
+      const cleanTags = Array.isArray(customTags)
+        ? customTags.map((t) => String(t).trim().replace(/^#+/, '')).filter(Boolean)
+        : String(customTags || '').split(/[,\s]+/).map((t) => t.trim().replace(/^#+/, '')).filter(Boolean);
+
       const newDoc = {
         id: Store.genId(),
         type: 'doc',
         name: fileName,
-        icon: '📝',
-        tag: paraId ? `#메모 #${todayStr}` : `#수신함 #${todayStr}`,
+        icon: roleVal === 'T' ? '☑️' : (roleVal === 'R' ? '📦' : '📝'),
+        tag: cleanTags.length
+          ? cleanTags.map((t) => `#${t}`).join(' ')
+          : (paraId ? `#메모 #${todayStr}` : `#수신함 #${todayStr}`),
+        customTags: cleanTags,
+        cardRole: roleVal,
+        cardKind: roleVal === 'T' ? 'task' : (roleVal === 'R' ? 'deliverable' : 'note'),
+        isTodayCore: coreFlag,
+        coreTime: String(coreTime || '').trim(),
+        completed: false,
+        parentCardId: parentDoc ? parentDoc.id : '',
         summary: rawBody ? (rawTitle ? `# ${rawTitle}\n\n${rawBody}` : rawBody) : `# ${firstLine}`,
         link: '',
         dailyDate: todayStr,
@@ -378,24 +445,20 @@
       if (paraType && paraId && Store.findParaEntity(paraId)) {
         Store.addRelation({ sourceId: newDoc.id, targetId: paraId, type: paraType });
       }
-
-      if (addToTodo) {
-        const dfp = hooks.loadDfpState();
-        if (dfp.top3.length < 3) {
-          dfp.top3.push({ id: `t-${Store.genId()}`, title: firstLine, docId: newDoc.id, time: '' });
-        } else {
-          dfp.backlog.unshift({ id: `t-${Store.genId()}`, title: firstLine, docId: newDoc.id });
-        }
-        hooks.saveDfpState(dfp);
+      if (parentDoc) {
+        Store.linkSubCard(parentDoc, newDoc, { inheritPara: true });
+        expandedDashIds.add(parentDoc.id);
       }
 
       hooks.saveAndRender();
       hooks.syncDocAfterSave(newDoc);
       renderAll();
       hooks.showToast(
-        paraId
-          ? `저장됨: ${fileName}`
-          : `수신함(Inbox)에 자동 저장됨: ${fileName}`
+        parentDoc
+          ? `↳ 하위 카드 저장됨: ${firstLine}`
+          : (coreFlag
+            ? `★ 오늘의 핵심 + 수신함에 저장됨: ${firstLine}`
+            : (paraId ? `저장됨: ${fileName}` : `수신함(Inbox)에 자동 저장됨: ${fileName}`))
       );
       return newDoc;
     }
@@ -489,8 +552,9 @@
           $('sb-sidebar-empty-proj')?.addEventListener('click', () => openProjectModal(null, 'project'));
         } else {
           miniTreeEl.innerHTML = allMini.map((ent) => `
-            <button type="button" class="sb-mini-tree-row" data-open-ent="${esc(ent.id)}" title="${esc(ent.name)}">
+            <button type="button" class="sb-mini-tree-row${activeView === 'project-detail' && activeProjectId === ent.id ? ' active' : ''}" data-open-ent="${esc(ent.id)}" title="${esc(Store.getParaCode(ent))} ${esc(ent.name)}">
               <span class="sb-dot-ind type-${ent.paraType}"></span>
+              <span class="sb-mini-tree-code">${esc(Store.getParaCode(ent))}</span>
               <span class="sb-mini-tree-name">${esc(ent.name)}</span>
               <span class="sb-mini-tree-cnt">${getLinkedCount(ent.id)}</span>
             </button>
@@ -498,7 +562,10 @@
           miniTreeEl.querySelectorAll('[data-open-ent]').forEach((b) => {
             b.addEventListener('click', () => {
               const ent = Store.findParaEntity(b.dataset.openEnt);
-              if (ent) {
+              if (!ent) return;
+              if (ent.paraType === 'project') {
+                openProjectDetail(ent.id, 'cards');
+              } else {
                 hooks.setHomeMode(false);
                 hooks.openParaVirtualView({ mode: 'entity', entityId: ent.id });
               }
@@ -571,7 +638,7 @@
       const projects = getActiveProjects();
       const dfp = hooks.loadDfpState();
       const todayStr = hooks.getTodayYMD();
-      const doneToday = Math.min(3, Number(dfp.completedDates?.[todayStr] || 0));
+      const doneToday = Math.min(3, getDoneCoreTodayCount() + Number(dfp.completedDates?.[todayStr] || 0));
       const inbox = getUnifiedInboxData();
       const recentDocs = getAllVisibleDocs()
         .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0))
@@ -687,12 +754,19 @@
               <div class="sb-inbox-sub">분류되지 않은 항목 · ${inbox.totalCount}건</div>
 
               <div class="sb-quick-composer${showInlineComposer ? '' : ' is-hidden'}" id="sb-inline-composer">
-                <input type="text" id="sb-qm-title" class="sb-field-input" placeholder="제목 (비워두면 첫 줄 사용)">
+                <div class="sb-qm-top-row">
+                  <input type="text" id="sb-qm-title" class="sb-field-input" placeholder="제목 (비워두면 첫 줄 사용)">
+                  <select id="sb-qm-role" class="sb-field-select" title="자료형태">
+                    <option value="T">T 할일</option>
+                    <option value="S" selected>S 자료</option>
+                    <option value="R">R 산출물</option>
+                  </select>
+                </div>
                 <textarea id="sb-qm-body" rows="3" class="sb-field-textarea" placeholder="빠르게 기록하세요... PARA를 고르지 않으면 자동으로 수신함에 쌓입니다 (Ctrl+Enter)"></textarea>
                 <div class="sb-qm-foot">
                   <label class="sb-check-inline">
                     <input type="checkbox" id="sb-qm-todo">
-                    <span>오늘 할 일에도 추가</span>
+                    <span>★ 오늘의 핵심에 올리기</span>
                   </label>
                   <button type="button" class="sb-btn-primary-sm" id="sb-qm-save">저장</button>
                 </div>
@@ -803,7 +877,7 @@
       // Fill Projects Table
       renderProjectsTableInto($('sb-home-projects-body'), projects.slice(0, 6), true);
 
-      // Fill Top 3
+      // Fill Top 3 (Unified Inbox/Project MD Cards with isTodayCore: true)
       renderHomeTop3Into($('sb-home-top3-list'), dfp);
       $('sb-top3-quick-form')?.addEventListener('submit', (e) => {
         e.preventDefault();
@@ -811,14 +885,16 @@
         const timeInp = $('sb-top3-quick-time');
         const title = String(inp?.value || '').trim();
         if (!title) return;
-        const cur = hooks.loadDfpState();
-        const item = { id: `t-${Store.genId()}`, title, time: String(timeInp?.value || '').trim() };
-        if (cur.top3.length < 3) cur.top3.push(item);
-        else cur.backlog.unshift(item);
-        hooks.saveDfpState(cur);
+        const coreTime = String(timeInp?.value || '').trim();
         if (inp) inp.value = '';
         if (timeInp) timeInp.value = '';
-        renderAll();
+        captureQuickMemo({
+          title,
+          body: `# ${title}\n\n`,
+          cardRole: 'T',
+          isTodayCore: true,
+          coreTime
+        });
       });
 
       // Fill Quick Memo Composer
@@ -830,12 +906,15 @@
       const doQuickSave = () => {
         const title = $('sb-qm-title')?.value || '';
         const body = $('sb-qm-body')?.value || '';
+        const role = $('sb-qm-role')?.value || 'S';
+        const isCore = Boolean($('sb-qm-todo')?.checked);
         if (!String(title).trim() && !String(body).trim()) return;
         showInlineComposer = false;
         captureQuickMemo({
           title,
           body,
-          addToTodo: Boolean($('sb-qm-todo')?.checked)
+          cardRole: isCore && role === 'S' ? 'T' : role,
+          isTodayCore: isCore
         });
       };
       $('sb-qm-save')?.addEventListener('click', doQuickSave);
@@ -885,19 +964,21 @@
             const statusText = isHold ? '보류' : '진행';
             const prog = Math.max(0, Math.min(100, Number(p.progress || 0)));
             const linkedCnt = getLinkedCount(p.id);
+            const code = Store.getParaCode(p);
             return `
               <div class="sb-proj-row" data-pid="${esc(p.id)}">
-                <button type="button" class="sb-proj-name-btn" data-pact="edit" title="클릭하여 편집 · 연결 자료 ${linkedCnt}건">
+                <button type="button" class="sb-proj-name-btn" data-pact="detail" title="클릭하여 프로젝트 내부 구성·간트차트·리스크 보기 (${linkedCnt}건)">
                   <span class="sb-proj-dot ${isHold ? 'is-hold' : 'is-active'}"></span>
+                  <span class="sb-code-pill-xs">${esc(code)}</span>
                   <span class="sb-proj-name">${esc(p.name)}</span>
-                  ${!compact && linkedCnt > 0 ? `<span class="sb-proj-linked-mini">${linkedCnt}</span>` : ''}
+                  ${linkedCnt > 0 ? `<span class="sb-proj-linked-mini">${linkedCnt}</span>` : ''}
                 </button>
                 <div class="sb-proj-prog-cell" data-pact="step-prog" title="클릭하여 진행도 +10% 조절">
                   <div class="sb-prog-track"><div class="sb-prog-fill" style="width:${prog}%"></div></div>
                   <span class="sb-prog-pct">${prog}%</span>
                 </div>
                 <div>
-                  <button type="button" class="sb-dday-pill${dday.urgent ? ' is-urgent' : ''}${dday.days === null ? ' is-empty' : ''}" data-pact="edit" title="마감일 설정">${esc(dday.text)}</button>
+                  <button type="button" class="sb-dday-pill${dday.urgent ? ' is-urgent' : ''}${dday.days === null ? ' is-empty' : ''}" data-pact="edit" title="마감일·속성 편집">${esc(dday.text)}</button>
                 </div>
                 <div>
                   <button type="button" class="sb-status-pill ${isHold ? 'is-hold' : 'is-active'}" data-pact="toggle-status" title="클릭하여 진행/보류 전환">${statusText}</button>
@@ -916,6 +997,9 @@
         const ent = Store.findParaEntity(pid);
         if (!ent) return;
 
+        row.querySelector('[data-pact="detail"]')?.addEventListener('click', () => {
+          openProjectDetail(ent.id, 'cards');
+        });
         row.querySelectorAll('[data-pact="edit"]').forEach((b) => {
           b.addEventListener('click', () => openProjectModal(ent, 'project'));
         });
@@ -940,36 +1024,239 @@
       });
     }
 
+    // Shared recursive sub-card renderer for Dashboard Top 3 & Inbox
+    function renderSubCardsTreeHtml(parentDocId, depth = 1, visited = new Set()) {
+      if (visited.has(parentDocId) || depth > 4) return '';
+      const nextVis = new Set(visited);
+      nextVis.add(parentDocId);
+      const kids = Store.getSubCards(parentDocId, hooks.isItemVisible);
+      if (kids.length === 0) return '';
+
+      return kids.map((child) => {
+        const subKids = Store.getSubCards(child.id, hooks.isItemVisible);
+        const hasSub = subKids.length > 0;
+        const isExp = expandedDashIds.has(child.id);
+        const role = Store.getCardRole(child);
+        const cleanTitle = String(child.name || '').replace(/\.md$/i, '');
+        return `
+          <div class="sb-dash-subcard-row${child.completed ? ' is-done' : ''}" data-subdoc-id="${esc(child.id)}" style="padding-left:${depth * 18}px">
+            <span class="sb-sub-arrow">↳</span>
+            ${hasSub
+              ? `<button type="button" class="sb-tree-toggle sb-tree-toggle-xs" data-sact="toggle-sub" title="${isExp ? '하위 접기' : '하위 펼치기'}">${isExp ? '−' : '+'}</button>`
+              : ''}
+            <button type="button" class="sb-checkbox-box sb-checkbox-xs${child.completed ? ' is-checked' : ''}" data-sact="complete" title="${child.completed ? '완료 취소' : '완료 처리'}">${child.completed ? svg('check', 10) : ''}</button>
+            <span class="sb-role-pill-xs is-role-${role.toLowerCase()}" data-sact="cycle-role" title="클릭하여 자료형태 변경">${role}</span>
+            <button type="button" class="sb-subcard-title" data-sact="open">${esc(cleanTitle)}</button>
+            <div class="sb-subcard-acts">
+              <button type="button" class="sb-mini-icon-act${child.isTodayCore ? ' is-star-on' : ''}" data-sact="toggle-core" title="오늘의 핵심 토글">${child.isTodayCore ? '★' : '☆'}</button>
+              <button type="button" class="sb-mini-icon-act" data-sact="add-sub" title="하위 카드 추가">+</button>
+              <button type="button" class="sb-mini-icon-act is-del" data-sact="del" title="카드 삭제">✕</button>
+            </div>
+          </div>
+          ${inlineSubTargetId === child.id ? renderInlineDashSubFormHtml(child.id, depth + 1) : ''}
+          ${hasSub && isExp ? renderSubCardsTreeHtml(child.id, depth + 1, nextVis) : ''}
+        `;
+      }).join('');
+    }
+
+    function renderInlineDashSubFormHtml(parentId, depth = 1) {
+      return `
+        <form class="sb-inline-sub-form sb-inline-sub-compact" data-dash-sub-parent="${esc(parentId)}" style="margin-left:${depth * 18}px">
+          <span class="sb-sub-arrow">↳</span>
+          <input type="text" class="sb-field-input sb-sub-title-inp" placeholder="하위 카드 제목..." required>
+          <select class="sb-field-select sb-sub-role-sel">
+            <option value="T">T</option>
+            <option value="S">S</option>
+            <option value="R">R</option>
+          </select>
+          <button type="submit" class="sb-btn-primary-sm">추가</button>
+          <button type="button" class="sb-btn-subtle" data-cancel-dash-sub="1">취소</button>
+        </form>
+      `;
+    }
+
+    function bindSubCardEvents(container) {
+      container.querySelectorAll('.sb-dash-subcard-row[data-subdoc-id]').forEach((row) => {
+        const child = Store.findNodeAndParent(row.dataset.subdocId)?.node;
+        if (!child) return;
+        row.querySelector('[data-sact="toggle-sub"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (expandedDashIds.has(child.id)) expandedDashIds.delete(child.id);
+          else expandedDashIds.add(child.id);
+          renderAll();
+        });
+        row.querySelector('[data-sact="open"]')?.addEventListener('click', () => hooks.launchItemDirectly(child));
+        row.querySelector('[data-sact="cycle-role"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const cur = Store.getCardRole(child);
+          const next = cur === 'T' ? 'S' : (cur === 'S' ? 'R' : 'T');
+          Store.setCardRole(child, next);
+          hooks.saveAndRender();
+          renderAll();
+        });
+        row.querySelector('[data-sact="toggle-core"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          Store.setCardTodayCore(child, !child.isTodayCore);
+          hooks.saveAndRender();
+          renderAll();
+        });
+        row.querySelector('[data-sact="add-sub"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          inlineSubTargetId = inlineSubTargetId === child.id ? null : child.id;
+          expandedDashIds.add(child.id);
+          renderAll();
+          container.querySelector('.sb-sub-title-inp')?.focus();
+        });
+        row.querySelector('[data-sact="complete"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (child.completed) {
+            child.completed = false;
+            child.completedAt = 0;
+            Store.touchNode(child);
+            hooks.saveAndRender();
+            renderAll();
+          } else if (Store.getCardRole(child) === 'T' && projectWorkspace) {
+            projectWorkspace.openTaskCompletionModal(child);
+          } else {
+            child.completed = true;
+            child.completedAt = Date.now();
+            Store.touchNode(child);
+            hooks.saveAndRender();
+            renderAll();
+          }
+        });
+        row.querySelector('[data-sact="del"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (deleteCardNode(child)) hooks.showToast('하위 카드가 삭제되었습니다.');
+        });
+      });
+
+      container.querySelectorAll('.sb-inline-sub-form[data-dash-sub-parent]').forEach((form) => {
+        form.addEventListener('submit', (e) => {
+          e.preventDefault();
+          const pDoc = Store.findNodeAndParent(form.dataset.dashSubParent)?.node;
+          const title = form.querySelector('.sb-sub-title-inp')?.value || '';
+          const role = form.querySelector('.sb-sub-role-sel')?.value || 'T';
+          if (!pDoc || !title.trim()) return;
+          inlineSubTargetId = null;
+          captureQuickMemo({ title, body: `# ${title.trim()}\n\n`, cardRole: role, parentDoc: pDoc });
+        });
+        form.querySelector('[data-cancel-dash-sub]')?.addEventListener('click', () => {
+          inlineSubTargetId = null;
+          renderAll();
+        });
+      });
+    }
+
     function renderHomeTop3Into(container, dfp) {
       if (!container) return;
-      const tasks = dfp.top3 || [];
-      if (tasks.length === 0) {
+      const coreDocs = getTodayCoreCards();
+      const legacyTasks = (dfp.top3 || []).filter((t) => !t.docId || !coreDocs.some((d) => d.id === t.docId));
+
+      if (coreDocs.length === 0 && legacyTasks.length === 0) {
         container.innerHTML = `
           <div class="sb-empty-line">
-            <span>아직 오늘의 핵심 3가지가 없어요</span>
-            <button type="button" class="sb-empty-cta" id="sb-empty-focus-top3">· 아래에서 추가하기</button>
+            <span>오늘의 핵심으로 지정된 카드가 없어요</span>
+            <button type="button" class="sb-empty-cta" id="sb-empty-focus-top3">· 아래에서 추가하거나 수신함에서 ★ 체크</button>
           </div>
         `;
         $('sb-empty-focus-top3')?.addEventListener('click', () => $('sb-top3-quick-input')?.focus());
         return;
       }
 
-      container.innerHTML = tasks.map((t, idx) => `
+      const docsHtml = coreDocs.map((doc) => {
+        const subKids = Store.getSubCards(doc.id, hooks.isItemVisible);
+        const hasSub = subKids.length > 0;
+        const isExp = expandedDashIds.has(doc.id);
+        const rels = Store.getRelationsForNode(doc.id);
+        const proj = (rels.projects || []).find((x) => x.node?.type === 'para-entity')?.node;
+        const cleanTitle = String(doc.name || '').replace(/\.md$/i, '');
+        return `
+          <div class="sb-top3-card-block" data-core-doc="${esc(doc.id)}">
+            <div class="sb-top3-row">
+              ${hasSub
+                ? `<button type="button" class="sb-tree-toggle" data-cact="toggle-sub" title="${isExp ? '하위 접기' : '하위 펼치기'}">${isExp ? '−' : '+'}</button>`
+                : ''}
+              <button type="button" class="sb-checkbox-box" data-cact="complete" title="완료 처리 (내부/외부처리)" aria-label="완료">${svg('check', 12)}</button>
+              <button type="button" class="sb-top3-title sb-top3-title-btn" data-cact="open" title="클릭하여 카드 열기">${esc(cleanTitle)}</button>
+              ${proj ? `<span class="sb-code-pill-xs" title="${esc(proj.name)}">${esc(Store.getParaCode(proj))}</span>` : ''}
+              ${doc.coreTime ? `<span class="sb-top3-time">${esc(formatKoreanTime(doc.coreTime))}</span>` : ''}
+              <div class="sb-top3-row-acts">
+                <button type="button" class="sb-mini-icon-act" data-cact="add-sub" title="하위 카드 추가">+</button>
+                <button type="button" class="sb-mini-icon-act" data-cact="unpin" title="완료하지 않고 오늘의 핵심에서 내리기">−</button>
+                <button type="button" class="sb-mini-icon-act is-del" data-cact="delete" title="완료하지 않고 카드 삭제">${svg('trash', 12)}</button>
+              </div>
+            </div>
+            ${inlineSubTargetId === doc.id ? renderInlineDashSubFormHtml(doc.id, 1) : ''}
+            ${hasSub && isExp ? renderSubCardsTreeHtml(doc.id, 1) : ''}
+          </div>
+        `;
+      }).join('');
+
+      const legacyHtml = legacyTasks.map((t, idx) => `
         <div class="sb-top3-row" data-tidx="${idx}">
           <button type="button" class="sb-checkbox-box" data-tact="done" title="완료 처리" aria-label="완료">${svg('check', 12)}</button>
           <span class="sb-top3-title" contenteditable="true" spellcheck="false">${esc(t.title)}</span>
           ${t.time ? `<span class="sb-top3-time">${esc(formatKoreanTime(t.time))}</span>` : ''}
-          ${t.docId ? `<button type="button" class="sb-mini-ghost" data-tact="open-doc" title="연결 메모 열기">${svg('doc', 13)}</button>` : ''}
+          <button type="button" class="sb-mini-icon-act is-del" data-tact="remove" title="완료 없이 목록에서 삭제">✕</button>
         </div>
       `).join('');
 
-      container.querySelectorAll('.sb-top3-row').forEach((row) => {
+      container.innerHTML = docsHtml + legacyHtml;
+
+      container.querySelectorAll('.sb-top3-card-block[data-core-doc]').forEach((block) => {
+        const doc = Store.findNodeAndParent(block.dataset.coreDoc)?.node;
+        if (!doc) return;
+        block.querySelector('[data-cact="toggle-sub"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (expandedDashIds.has(doc.id)) expandedDashIds.delete(doc.id);
+          else expandedDashIds.add(doc.id);
+          renderAll();
+        });
+        block.querySelector('[data-cact="open"]')?.addEventListener('click', () => hooks.launchItemDirectly(doc));
+        block.querySelector('[data-cact="complete"]')?.addEventListener('click', () => {
+          if (projectWorkspace) projectWorkspace.openTaskCompletionModal(doc);
+          else {
+            doc.completed = true;
+            doc.completedAt = Date.now();
+            Store.touchNode(doc);
+            hooks.saveAndRender();
+            renderAll();
+          }
+        });
+        block.querySelector('[data-cact="add-sub"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          inlineSubTargetId = inlineSubTargetId === doc.id ? null : doc.id;
+          expandedDashIds.add(doc.id);
+          renderAll();
+          container.querySelector('.sb-sub-title-inp')?.focus();
+        });
+        block.querySelector('[data-cact="unpin"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          Store.setCardTodayCore(doc, false);
+          hooks.saveAndRender();
+          renderAll();
+          hooks.showToast(`"${doc.name.replace(/\.md$/i, '')}" 오늘의 핵심에서 내렸습니다. (완료 안 함 · 수신함/프로젝트 유지)`);
+        });
+        block.querySelector('[data-cact="delete"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const name = doc.name.replace(/\.md$/i, '');
+          if (deleteCardNode(doc)) {
+            hooks.showToast(`"${name}" 카드를 삭제했습니다.`);
+          }
+        });
+      });
+
+      bindSubCardEvents(container);
+
+      container.querySelectorAll('.sb-top3-row[data-tidx]').forEach((row) => {
         const idx = Number(row.dataset.tidx);
-        const task = tasks[idx];
+        const task = legacyTasks[idx];
         row.querySelector('[data-tact="done"]')?.addEventListener('click', () => {
           const cur = hooks.loadDfpState();
-          const removed = cur.top3.splice(idx, 1)[0];
-          if (removed) {
+          const rIdx = cur.top3.findIndex((x) => x.id === task?.id);
+          if (rIdx >= 0) {
+            const removed = cur.top3.splice(rIdx, 1)[0];
             const todayStr = hooks.getTodayYMD();
             cur.archive.unshift({ ...removed, completedAt: todayStr });
             if (!cur.completedDates) cur.completedDates = {};
@@ -979,23 +1266,12 @@
             hooks.showToast(`완료됨: ${removed.title}`);
           }
         });
-        row.querySelector('[data-tact="open-doc"]')?.addEventListener('click', () => {
-          const doc = Store.findNodeAndParent(task?.docId)?.node;
-          if (doc) hooks.launchItemDirectly(doc);
-        });
-        const titleEl = row.querySelector('.sb-top3-title');
-        titleEl?.addEventListener('blur', () => {
-          const next = titleEl.textContent.trim();
-          if (next && next !== task?.title) {
-            const cur = hooks.loadDfpState();
-            if (cur.top3[idx]) {
-              cur.top3[idx].title = next;
-              hooks.saveDfpState(cur);
-            }
-          }
-        });
-        titleEl?.addEventListener('keydown', (e) => {
-          if (e.key === 'Enter') { e.preventDefault(); titleEl.blur(); }
+        row.querySelector('[data-tact="remove"]')?.addEventListener('click', () => {
+          const cur = hooks.loadDfpState();
+          cur.top3 = (cur.top3 || []).filter((x) => x.id !== task?.id);
+          hooks.saveDfpState(cur);
+          renderAll();
+          hooks.showToast('완료하지 않고 오늘의 핵심에서 삭제했습니다.');
         });
       });
     }
@@ -1012,8 +1288,13 @@
 
     function renderInboxPreviewInto(container, inbox) {
       if (!container) return;
-      const docs = inbox.unassignedDocs.slice(0, 3);
-      if (docs.length === 0 && inbox.backlogTasks.length === 0) {
+      // Show only root-level unassigned docs (sub-cards appear nested under their parent!)
+      const unassignedIdSet = new Set(inbox.unassignedDocs.map((d) => d.id));
+      const rootDocs = inbox.unassignedDocs
+        .filter((d) => !d.parentCardId || !unassignedIdSet.has(d.parentCardId))
+        .slice(0, 4);
+
+      if (rootDocs.length === 0 && inbox.backlogTasks.length === 0) {
         container.innerHTML = `
           <div class="sb-empty-line">
             <span>수신함이 비어 있어요</span>
@@ -1028,44 +1309,88 @@
         return;
       }
 
-      const rowsHtml = docs.map((doc) => {
+      const rowsHtml = rootDocs.map((doc) => {
         const snippet = String(doc.summary || '').replace(/^#+\s*/gm, '').replace(/\s+/g, ' ').trim();
+        const role = Store.getCardRole(doc);
+        const subKids = Store.getSubCards(doc.id, hooks.isItemVisible);
+        const hasSub = subKids.length > 0;
+        const isExp = expandedDashIds.has(doc.id);
         return `
-          <div class="sb-inbox-item" data-doc-id="${esc(doc.id)}">
-            <span class="sb-inbox-item-ico">${svg(hooks.isSpreadsheetItem(doc) ? 'sheet' : 'doc', 15)}</span>
-            <div class="sb-inbox-item-text" data-open-doc="1">
-              <div class="sb-inbox-item-title">${esc(doc.name.replace(/\.md$/i, ''))}</div>
-              <div class="sb-inbox-item-snippet">${esc(snippet || '내용 없음')}</div>
+          <div class="sb-inbox-item-wrap" data-doc-id="${esc(doc.id)}">
+            <div class="sb-inbox-item">
+              ${hasSub
+                ? `<button type="button" class="sb-tree-toggle" data-iact="toggle-sub" title="${isExp ? '하위 접기' : '하위 펼치기'}">${isExp ? '−' : '+'}</button>`
+                : `<span class="sb-inbox-item-ico">${svg(hooks.isSpreadsheetItem(doc) ? 'sheet' : 'doc', 15)}</span>`}
+              <div class="sb-inbox-item-text" data-open-doc="1">
+                <div class="sb-inbox-item-title-row">
+                  <span class="sb-role-pill-xs is-role-${role.toLowerCase()}" data-iact="cycle-role" title="자료형태 클릭 전환 (T/S/R)">${role}</span>
+                  <span class="sb-inbox-item-title">${esc(doc.name.replace(/\.md$/i, ''))}</span>
+                </div>
+                <div class="sb-inbox-item-snippet">${esc(snippet || '내용 없음')}</div>
+              </div>
+              <div class="sb-par-btns">
+                <button type="button" class="sb-mini-icon-act${doc.isTodayCore ? ' is-star-on' : ''}" data-iact="toggle-core" title="오늘의 핵심에 올리기/빼기">${doc.isTodayCore ? '★' : '☆'}</button>
+                <button type="button" class="sb-mini-icon-act" data-iact="add-sub" title="하위 카드 추가">+</button>
+                <button type="button" class="sb-par-btn" data-par="project" title="프로젝트로 분류">P</button>
+                <button type="button" class="sb-par-btn" data-par="area" title="영역으로 분류">A</button>
+                <button type="button" class="sb-par-btn" data-par="resource" title="자료로 분류">R</button>
+              </div>
             </div>
-            <div class="sb-par-btns">
-              <button type="button" class="sb-par-btn" data-par="project" title="프로젝트로 분류">P</button>
-              <button type="button" class="sb-par-btn" data-par="area" title="영역으로 분류">A</button>
-              <button type="button" class="sb-par-btn" data-par="resource" title="자료로 분류">R</button>
-            </div>
+            ${inlineSubTargetId === doc.id ? renderInlineDashSubFormHtml(doc.id, 1) : ''}
+            ${hasSub && isExp ? renderSubCardsTreeHtml(doc.id, 1) : ''}
           </div>
         `;
       }).join('');
 
-      const taskPreviewHtml = docs.length < 3
-        ? inbox.backlogTasks.slice(0, 3 - docs.length).map((t) => `
+      const taskPreviewHtml = rootDocs.length < 3
+        ? inbox.backlogTasks.slice(0, 3 - rootDocs.length).map((t) => `
             <div class="sb-inbox-item is-task">
               <span class="sb-inbox-item-ico">${svg('star', 14)}</span>
               <div class="sb-inbox-item-text">
                 <div class="sb-inbox-item-title">${esc(t.title)}</div>
                 <div class="sb-inbox-item-snippet">할 일 대기 목록</div>
               </div>
-              <button type="button" class="sb-mini-ghost" data-promote-task="${esc(t.id)}" title="오늘의 핵심 3가지로 올리기">핵심</button>
+              <button type="button" class="sb-mini-ghost" data-promote-task="${esc(t.id)}" title="오늘의 핵심으로 올리기">핵심</button>
             </div>
           `).join('')
         : '';
 
       container.innerHTML = rowsHtml + taskPreviewHtml;
 
-      container.querySelectorAll('.sb-inbox-item[data-doc-id]').forEach((row) => {
-        const doc = Store.findNodeAndParent(row.dataset.docId)?.node;
+      container.querySelectorAll('.sb-inbox-item-wrap[data-doc-id]').forEach((wrap) => {
+        const doc = Store.findNodeAndParent(wrap.dataset.docId)?.node;
         if (!doc) return;
-        row.querySelector('[data-open-doc]')?.addEventListener('click', () => hooks.launchItemDirectly(doc));
-        row.querySelectorAll('[data-par]').forEach((btn) => {
+        wrap.querySelector('[data-iact="toggle-sub"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (expandedDashIds.has(doc.id)) expandedDashIds.delete(doc.id);
+          else expandedDashIds.add(doc.id);
+          renderAll();
+        });
+        wrap.querySelector('[data-iact="cycle-role"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const cur = Store.getCardRole(doc);
+          const next = cur === 'T' ? 'S' : (cur === 'S' ? 'R' : 'T');
+          Store.setCardRole(doc, next);
+          hooks.saveAndRender();
+          renderAll();
+        });
+        wrap.querySelector('[data-iact="toggle-core"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const next = !doc.isTodayCore;
+          Store.setCardTodayCore(doc, next);
+          hooks.saveAndRender();
+          renderAll();
+          hooks.showToast(next ? '★ 오늘의 핵심에 올렸습니다.' : '오늘의 핵심에서 내렸습니다.');
+        });
+        wrap.querySelector('[data-iact="add-sub"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          inlineSubTargetId = inlineSubTargetId === doc.id ? null : doc.id;
+          expandedDashIds.add(doc.id);
+          renderAll();
+          container.querySelector('.sb-sub-title-inp')?.focus();
+        });
+        wrap.querySelector('[data-open-doc]')?.addEventListener('click', () => hooks.launchItemDirectly(doc));
+        wrap.querySelectorAll('[data-par]').forEach((btn) => {
           btn.addEventListener('click', (e) => {
             e.stopPropagation();
             openQuickClassifyMenu(btn, doc, btn.dataset.par);
@@ -1073,19 +1398,16 @@
         });
       });
 
+      bindSubCardEvents(container);
+
       container.querySelectorAll('[data-promote-task]').forEach((btn) => {
         btn.addEventListener('click', () => {
           const cur = hooks.loadDfpState();
-          if (cur.top3.length >= 3) {
-            hooks.showToast('오늘의 핵심 3가지가 모두 찼습니다.');
-            return;
-          }
           const idx = cur.backlog.findIndex((x) => x.id === btn.dataset.promoteTask);
           if (idx >= 0) {
             const [picked] = cur.backlog.splice(idx, 1);
-            cur.top3.push(picked);
             hooks.saveDfpState(cur);
-            renderAll();
+            captureQuickMemo({ title: picked.title, cardRole: 'T', isTodayCore: true });
           }
         });
       });
@@ -1204,15 +1526,20 @@
         </header>
 
         <section class="sb-card sb-inbox-composer-card">
-          <div class="sb-composer-grid">
-            <input type="text" id="sb-inbox-title" class="sb-field-input" placeholder="메모 제목 (선택)">
+          <div class="sb-composer-grid sb-composer-grid-3">
+            <input type="text" id="sb-inbox-title" class="sb-field-input" placeholder="메모 / 할일 제목 (선택)">
+            <select id="sb-inbox-role-select" class="sb-field-select" title="자료형태">
+              <option value="T">T 할일 (Todo)</option>
+              <option value="S" selected>S 자료 (Source)</option>
+              <option value="R">R 산출물 (Result)</option>
+            </select>
             <select id="sb-inbox-para-select" class="sb-field-select">${paraOptionsHtml}</select>
           </div>
           <textarea id="sb-inbox-body" rows="4" class="sb-field-textarea" placeholder="떠오르는 아이디어, 회의 메모, 할 일을 빠르게 기록하세요... (Ctrl+Enter 저장)"></textarea>
           <div class="sb-qm-foot">
             <label class="sb-check-inline">
               <input type="checkbox" id="sb-inbox-add-todo">
-              <span>오늘의 핵심/할 일 대기에도 추가</span>
+              <span>★ 오늘의 핵심에 올리기 (체크 시 대시보드 오늘의 핵심에 표시)</span>
             </label>
             <button type="button" class="sb-btn-primary" id="sb-inbox-save-btn">수신함에 저장</button>
           </div>
@@ -1233,10 +1560,13 @@
       const doInboxSave = () => {
         const paraVal = $('sb-inbox-para-select')?.value || '';
         const [pType, pId] = paraVal.includes('::') ? paraVal.split('::') : ['', ''];
+        const role = $('sb-inbox-role-select')?.value || 'S';
+        const isCore = Boolean($('sb-inbox-add-todo')?.checked);
         captureQuickMemo({
           title: $('sb-inbox-title')?.value || '',
           body: $('sb-inbox-body')?.value || '',
-          addToTodo: Boolean($('sb-inbox-add-todo')?.checked),
+          cardRole: isCore && role === 'S' ? 'T' : role,
+          isTodayCore: isCore,
           paraType: pType,
           paraId: pId
         });
@@ -1314,19 +1644,35 @@
 
       html += docsToShow.map((doc) => {
         const snippet = String(doc.summary || '').replace(/^#+\s*/gm, '').replace(/\s+/g, ' ').trim();
+        const role = Store.getCardRole(doc);
+        const subKids = Store.getSubCards(doc.id, hooks.isItemVisible);
+        const hasSub = subKids.length > 0;
+        const isExp = expandedDashIds.has(doc.id);
         return `
-          <div class="sb-inbox-full-row" data-doc-id="${esc(doc.id)}">
-            <span class="sb-inbox-item-ico">${svg(hooks.isSpreadsheetItem(doc) ? 'sheet' : 'doc', 16)}</span>
-            <div class="sb-inbox-item-text" data-open-doc="1">
-              <div class="sb-inbox-item-title">${esc(doc.name.replace(/\.md$/i, ''))}</div>
-              <div class="sb-inbox-item-snippet">${esc(snippet || '내용 없음')} · ${esc(formatRelativeTime(doc.updatedAt || doc.createdAt))}</div>
+          <div class="sb-inbox-item-wrap" data-doc-id="${esc(doc.id)}">
+            <div class="sb-inbox-full-row">
+              ${hasSub
+                ? `<button type="button" class="sb-tree-toggle" data-iact="toggle-sub" title="${isExp ? '하위 접기' : '하위 펼치기'}">${isExp ? '−' : '+'}</button>`
+                : `<span class="sb-inbox-item-ico">${svg(hooks.isSpreadsheetItem(doc) ? 'sheet' : 'doc', 16)}</span>`}
+              <div class="sb-inbox-item-text" data-open-doc="1">
+                <div class="sb-inbox-item-title-row">
+                  <span class="sb-role-pill-xs is-role-${role.toLowerCase()}" data-iact="cycle-role" title="자료형태 클릭 전환">${role}</span>
+                  <span class="sb-inbox-item-title">${esc(doc.name.replace(/\.md$/i, ''))}</span>
+                </div>
+                <div class="sb-inbox-item-snippet">${esc(snippet || '내용 없음')} · ${esc(formatRelativeTime(doc.updatedAt || doc.createdAt))}</div>
+              </div>
+              <div class="sb-par-btns">
+                <button type="button" class="sb-mini-icon-act${doc.isTodayCore ? ' is-star-on' : ''}" data-iact="toggle-core" title="오늘의 핵심 토글">${doc.isTodayCore ? '★' : '☆'}</button>
+                <button type="button" class="sb-mini-icon-act" data-iact="add-sub" title="하위 카드 추가">+</button>
+                <button type="button" class="sb-par-btn" data-par="project" title="프로젝트 연결">P</button>
+                <button type="button" class="sb-par-btn" data-par="area" title="영역 연결">A</button>
+                <button type="button" class="sb-par-btn" data-par="resource" title="자료 연결">R</button>
+                <button type="button" class="sb-mini-ghost" data-locate-doc="1" title="탐색기에서 보기">${svg('explorer', 13)}</button>
+                <button type="button" class="sb-mini-icon-act is-del" data-iact="del" title="삭제">${svg('trash', 12)}</button>
+              </div>
             </div>
-            <div class="sb-par-btns">
-              <button type="button" class="sb-par-btn" data-par="project" title="프로젝트 연결">P</button>
-              <button type="button" class="sb-par-btn" data-par="area" title="영역 연결">A</button>
-              <button type="button" class="sb-par-btn" data-par="resource" title="자료 연결">R</button>
-              <button type="button" class="sb-mini-ghost" data-locate-doc="1" title="탐색기에서 보기">${svg('explorer', 13)}</button>
-            </div>
+            ${inlineSubTargetId === doc.id ? renderInlineDashSubFormHtml(doc.id, 1) : ''}
+            ${hasSub && isExp ? renderSubCardsTreeHtml(doc.id, 1) : ''}
           </div>
         `;
       }).join('');
@@ -1359,9 +1705,42 @@
         renderAll();
       });
 
-      listEl.querySelectorAll('[data-doc-id]').forEach((row) => {
+      listEl.querySelectorAll('.sb-inbox-item-wrap[data-doc-id]').forEach((row) => {
         const doc = Store.findNodeAndParent(row.dataset.docId)?.node;
         if (!doc) return;
+        row.querySelector('[data-iact="toggle-sub"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (expandedDashIds.has(doc.id)) expandedDashIds.delete(doc.id);
+          else expandedDashIds.add(doc.id);
+          renderAll();
+        });
+        row.querySelector('[data-iact="cycle-role"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const cur = Store.getCardRole(doc);
+          const next = cur === 'T' ? 'S' : (cur === 'S' ? 'R' : 'T');
+          Store.setCardRole(doc, next);
+          hooks.saveAndRender();
+          renderAll();
+        });
+        row.querySelector('[data-iact="toggle-core"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const next = !doc.isTodayCore;
+          Store.setCardTodayCore(doc, next);
+          hooks.saveAndRender();
+          renderAll();
+          hooks.showToast(next ? '★ 오늘의 핵심에 올렸습니다.' : '오늘의 핵심에서 내렸습니다.');
+        });
+        row.querySelector('[data-iact="add-sub"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          inlineSubTargetId = inlineSubTargetId === doc.id ? null : doc.id;
+          expandedDashIds.add(doc.id);
+          renderAll();
+          listEl.querySelector('.sb-sub-title-inp')?.focus();
+        });
+        row.querySelector('[data-iact="del"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (deleteCardNode(doc)) hooks.showToast('카드가 삭제되었습니다.');
+        });
         row.querySelector('[data-open-doc]')?.addEventListener('click', () => hooks.launchItemDirectly(doc));
         row.querySelector('[data-locate-doc]')?.addEventListener('click', () => hooks.navigateToNode(doc));
         row.querySelectorAll('[data-par]').forEach((btn) => {
@@ -1371,6 +1750,8 @@
           });
         });
       });
+
+      bindSubCardEvents(listEl);
 
       listEl.querySelectorAll('[data-task-id]').forEach((row) => {
         const tid = row.dataset.taskId;
@@ -1690,7 +2071,18 @@
       if (activeView === 'home') renderHomeView(canvas);
       else if (activeView === 'inbox') renderInboxView(canvas);
       else if (activeView === 'review') renderWeeklyReviewView(canvas);
-      else renderParaStageView(canvas, activeView);
+      else if (activeView === 'project-detail' && projectWorkspace && activeProjectId) {
+        projectWorkspace.renderProjectDetailView(canvas, activeProjectId, {
+          onBack: () => {
+            activeView = 'project';
+            activeProjectId = null;
+            renderAll();
+          },
+          onOpenProjectModal: (ent) => openProjectModal(ent, 'project')
+        });
+      } else {
+        renderParaStageView(canvas, activeView === 'project-detail' ? 'project' : activeView);
+      }
     }
 
     // Bind sidebar "+ 새 폴더" button & footer settings click
@@ -1708,6 +2100,10 @@
       setActiveView(v) {
         activeView = v || 'home';
         renderAll();
+      },
+      openProjectDetail,
+      openTaskCompletionModal(doc, projectId) {
+        projectWorkspace?.openTaskCompletionModal(doc, projectId);
       },
       openProjectModal,
       captureQuickMemo,

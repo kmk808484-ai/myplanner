@@ -609,6 +609,47 @@
     return removeEntry(oldSegs, safeOld);
   }
 
+  async function copyFile(srcFolderSegments, srcName, destFolderSegments, destName) {
+    if (!isConnected() || !srcName || !destName) return { ok: false };
+    const srcSegs = sanitizeSegments(srcFolderSegments);
+    const dstSegs = sanitizeSegments(destFolderSegments);
+    const safeSrc = sanitizeName(srcName, '');
+    const safeDst = sanitizeName(destName, '');
+    if (!safeSrc || !safeDst) return { ok: false };
+
+    if (activeMode === 'fsa' && dirHandle) {
+      try {
+        const srcDir = await getFsaDir(srcSegs, false);
+        const srcFh = await srcDir.getFileHandle(safeSrc, { create: false });
+        const file = await srcFh.getFile();
+        return writeBlobFile(dstSegs, safeDst, file, { silent: true });
+      } catch (err) {
+        return { ok: false, error: err?.message };
+      }
+    }
+
+    if (activeMode === 'bridge') {
+      try {
+        const headers = await getBridgeJsonHeaders(bridgeBaseUrl);
+        const res = await fetch(`${bridgeBaseUrl}/offline-fs/copy`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            srcFolderPath: srcSegs,
+            srcName: safeSrc,
+            destFolderPath: dstSegs,
+            destName: safeDst
+          })
+        });
+        const data = await res.json().catch(() => ({}));
+        return { ok: Boolean(res.ok && data.ok), path: data.path, error: data.error };
+      } catch (err) {
+        return { ok: false, error: err?.message };
+      }
+    }
+    return { ok: false };
+  }
+
   async function saveWorkspaceMeta(fileSystem) {
     if (!isConnected() || !fileSystem) return { ok: false };
     const payload = JSON.stringify({
@@ -630,6 +671,7 @@
       async function walk(handle, pathSegs) {
         for await (const [name, entry] of handle.entries()) {
           if (!name || name.startsWith('.')) continue;
+          if (pathSegs.length === 0 && name === 'SB') continue;
           if (entry.kind === 'directory') {
             const nextPath = [...pathSegs, name];
             folders.push(nextPath);
@@ -720,6 +762,7 @@
     writeBlobFile,
     removeEntry,
     renameEntry,
+    copyFile,
     saveWorkspaceMeta,
     scanFolderFiles,
     downloadBlobToPC,

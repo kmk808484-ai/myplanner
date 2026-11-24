@@ -13,6 +13,7 @@
   const BrainSecurity = window.BrainSecurity;
   const BrainBackup = window.BrainBackup;
   const BrainIcons = window.BrainIcons;
+  const BrainSbMirror = window.BrainSbMirror;
 
   let isEditing = false;
   let isSendingChat = false;
@@ -333,6 +334,7 @@
       });
       if (linkedCnt > 0) {
         scheduleDriveSync();
+        triggerSbMirrorSync();
         renderParaTree();
         if (activeParaView?.entityId === ent.id) openParaVirtualView(activeParaView);
         if (state.selectedItem) renderDetailRelations(state.selectedItem);
@@ -547,6 +549,21 @@
     );
   }
 
+  function getSbMirrorHooks() {
+    return {
+      isItemVisible,
+      getLocalFileNameForItem,
+      serializeItemForLocalFile,
+      getRelativeFolderPathForItem
+    };
+  }
+
+  function triggerSbMirrorSync(opts = {}) {
+    if (BrainSbMirror && BrainLocalFolder?.isConnected()) {
+      BrainSbMirror.scheduleSbMirrorSync(getSbMirrorHooks(), opts);
+    }
+  }
+
   function saveAndRender(options = {}) {
     persistFS(options);
     autoBackupDirty = true;
@@ -558,6 +575,7 @@
     renderContextChips();
     if (typeof renderRelationsDbPanel === 'function') renderRelationsDbPanel();
     if (isHomeMode && paraDashboard) paraDashboard.renderAll();
+    triggerSbMirrorSync();
     if (!options.skipDriveSync) {
       scheduleDriveSync();
     }
@@ -1180,7 +1198,8 @@
           const ent = findParaEntity(id);
           if (!ent) return;
           if (isHomeMode && paraDashboard) {
-            paraDashboard.openProjectModal(ent);
+            if (ent.paraType === 'project') paraDashboard.openProjectDetail(ent.id, 'cards');
+            else paraDashboard.openProjectModal(ent);
           } else {
             openParaVirtualView({ mode: 'entity', entityId: ent.id });
           }
@@ -2823,11 +2842,12 @@
     const exportFs = isOwnerAuthenticated() ? state.fileSystem : stripLocalItemsForExport(state.fileSystem);
     return {
       exportedAt: new Date().toISOString(),
-      version: '7.0',
+      version: '7.1',
       fileSystem: exportFs,
       paraEntities: state.paraEntities || [],
       relations: state.relations || [],
       pinnedAppIds: state.pinnedAppIds || [],
+      globalTemplates: state.globalTemplates || [],
       dfpState: typeof loadDfpState === 'function' ? loadDfpState() : null,
       chatHistory: state.chatHistory || []
     };
@@ -2861,6 +2881,10 @@
     if (Array.isArray(parsed.pinnedAppIds)) {
       state.pinnedAppIds = parsed.pinnedAppIds;
       persistPinnedApps();
+    }
+    if (Array.isArray(parsed.globalTemplates)) {
+      state.globalTemplates = parsed.globalTemplates;
+      window.BrainStore.persistGlobalTemplates();
     }
     if (parsed.dfpState && typeof parsed.dfpState === 'object' && typeof saveDfpState === 'function') {
       saveDfpState(parsed.dfpState);
@@ -3980,6 +4004,17 @@
       };
     }
 
+    if (item.uploadedBlobBase64) {
+      const cleanB64 = String(item.uploadedBlobBase64).replace(/^data:[^;]+;base64,/, '');
+      const buf = base64ToArrayBuffer(cleanB64);
+      return {
+        fileName: getLocalFileNameForItem(item),
+        type: 'blob',
+        mimeType: item.uploadedMime || 'application/octet-stream',
+        blob: new Blob([buf], { type: item.uploadedMime || 'application/octet-stream' })
+      };
+    }
+
     if (!isBinaryFileName(item.name)) {
       const fileName = getLocalFileNameForItem(item);
       return {
@@ -4079,6 +4114,9 @@
 
     await walk(node);
     await BrainLocalFolder.saveWorkspaceMeta(state.fileSystem);
+    if (BrainSbMirror) {
+      await BrainSbMirror.syncAllSbMirrors(getSbMirrorHooks(), { force: true }).catch(() => {});
+    }
     return savedCount;
   }
 
@@ -4422,6 +4460,9 @@
     });
     if (st.mode === 'bridge') bridgeOfflineFsAvailable = true;
     updateLocalFolderUI(st);
+    if (st.connected) {
+      triggerSbMirrorSync({ immediate: true });
+    }
     return st;
   }
 
@@ -6333,6 +6374,7 @@
         }
         if (res) {
           scheduleDriveSync();
+          triggerSbMirrorSync();
           if (state.selectedItem) renderDetailRelations(state.selectedItem);
           renderRelationsDbPanel();
           showToast(`🔗 "${relationSourceItem.name}" ↔ "${node.name}" 연결되었습니다.`);
@@ -6524,6 +6566,7 @@
         }
         if (res) {
           scheduleDriveSync();
+          triggerSbMirrorSync();
           renderDetailRelations(item);
           renderRelationsDbPanel();
           renderInlineRelationPickerList();
@@ -6803,6 +6846,29 @@
       ];
 
       propsEl.innerHTML = '';
+
+      // 자료형태 (T: 할일 / S: 자료 / R: 산출물) — SB 폴더 파일명 규칙(P-01-T-파일명)에 자동 반영
+      if (item.type === 'doc') {
+        const roleRow = document.createElement('div');
+        roleRow.className = 'reldb-prop-row';
+        const curRole = window.BrainStore.getCardRole(item);
+        roleRow.innerHTML =
+          `<div class="reldb-prop-key">🏷️ 자료형태</div>` +
+          `<div class="reldb-prop-val sb-reldb-role-btns">` +
+          `  <button type="button" class="reldb-quick-btn${curRole === 'T' ? ' active' : ''}" data-set-role="T">T 할일</button>` +
+          `  <button type="button" class="reldb-quick-btn${curRole === 'S' ? ' active' : ''}" data-set-role="S">S 자료</button>` +
+          `  <button type="button" class="reldb-quick-btn${curRole === 'R' ? ' active' : ''}" data-set-role="R">R 산출물</button>` +
+          `</div>`;
+        roleRow.querySelectorAll('[data-set-role]').forEach((rb) => {
+          rb.addEventListener('click', () => {
+            window.BrainStore.setCardRole(item, rb.dataset.setRole);
+            saveAndRender();
+            showToast(`자료형태가 ${rb.dataset.setRole}로 변경되었습니다. (SB 폴더명 자동 동기화)`);
+          });
+        });
+        propsEl.appendChild(roleRow);
+      }
+
       propRows.forEach((rowDef) => {
         const rowEl = document.createElement('div');
         rowEl.className = 'reldb-prop-row';
@@ -6832,6 +6898,7 @@
             e.stopPropagation();
             if (removeRelation(rel.id)) {
               scheduleDriveSync();
+              triggerSbMirrorSync();
               renderDetailRelations(item);
               renderRelationsDbPanel();
               if (reldbPickerMode) renderInlineRelationPickerList();

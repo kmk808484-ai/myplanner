@@ -495,7 +495,7 @@ try {
         $protectedPaths = @(
             "/pick-file", "/open", "/open-content",
             "/offline-fs/pick-folder", "/offline-fs/mkdir", "/offline-fs/write",
-            "/offline-fs/delete", "/offline-fs/rename", "/offline-fs/list"
+            "/offline-fs/delete", "/offline-fs/rename", "/offline-fs/copy", "/offline-fs/list"
         )
         if ($protectedPaths -contains $trimmedPath) {
             if (-not (Test-BridgeToken -Request $request)) {
@@ -933,6 +933,35 @@ try {
             continue
         }
 
+        if ($method -eq "POST" -and $trimmedPath -eq "/offline-fs/copy") {
+            $reader = New-Object System.IO.StreamReader($request.InputStream, [System.Text.Encoding]::UTF8)
+            $rawBody = $reader.ReadToEnd()
+            $reader.Close()
+            try {
+                $payload = $rawBody | ConvertFrom-Json
+                $offlineRoot = Get-OfflineRootPath
+                $srcPath = Resolve-OfflinePath -RootFull $offlineRoot -FolderSegments $payload.srcFolderPath -FileName ([string]$payload.srcName)
+                $dstPath = Resolve-OfflinePath -RootFull $offlineRoot -FolderSegments $payload.destFolderPath -FileName ([string]$payload.destName)
+                if (-not $srcPath -or -not $dstPath) {
+                    Send-JsonResponse -Response $response -StatusCode 400 -Body @{ ok = $false; error = "허용되지 않은 경로입니다." }
+                    continue
+                }
+                if (-not (Test-Path -LiteralPath $srcPath -PathType Leaf)) {
+                    Send-JsonResponse -Response $response -StatusCode 404 -Body @{ ok = $false; error = "원본 파일이 없습니다." }
+                    continue
+                }
+                $dstParent = Split-Path -Parent $dstPath
+                if (-not (Test-Path -LiteralPath $dstParent)) {
+                    New-Item -ItemType Directory -Path $dstParent -Force | Out-Null
+                }
+                Copy-Item -LiteralPath $srcPath -Destination $dstPath -Force
+                Send-JsonResponse -Response $response -StatusCode 200 -Body @{ ok = $true; path = $dstPath }
+            } catch {
+                Send-JsonResponse -Response $response -StatusCode 500 -Body @{ ok = $false; error = $_.Exception.Message }
+            }
+            continue
+        }
+
         if ($method -eq "GET" -and $trimmedPath -eq "/offline-fs/list") {
             try {
                 $offlineRoot = Get-OfflineRootPath
@@ -948,6 +977,8 @@ try {
                     if ([string]::IsNullOrWhiteSpace($rel)) { continue }
                     $parts = $rel.Split('\')
                     if ($parts | Where-Object { $_.StartsWith('.') }) { continue }
+                    # SB 미러 폴더는 DB 분류 복사본 전용이므로 물리 파일 스캔에서 제외
+                    if ($parts.Length -gt 0 -and $parts[0] -eq "SB") { continue }
                     if ($it.PSIsContainer) {
                         $foldersOut += ,$parts
                     } else {

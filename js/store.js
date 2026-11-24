@@ -75,6 +75,106 @@
     }
   }
 
+  const DEFAULT_GLOBAL_TEMPLATES = [
+    {
+      id: 'gtpl-ext-report',
+      name: '외부 처리 결과 보고서',
+      content:
+        '# {{제목}} — 외부 처리 결과\n\n' +
+        '- **처리일시**: {{날짜}}\n' +
+        '- **관련 프로젝트**: {{프로젝트}}\n' +
+        '- **처리 대상 / 담당**: \n\n' +
+        '## 1. 처리 요약\n- \n\n' +
+        '## 2. 핵심 결과 및 협의 내용\n- \n\n' +
+        '## 3. 후속 조치 (Next Action)\n- [ ] \n'
+    },
+    {
+      id: 'gtpl-meeting-note',
+      name: '외부 미팅 · 협의 기록',
+      content:
+        '# {{제목}} — 미팅 기록\n\n' +
+        '- **일시**: {{날짜}}\n' +
+        '- **참석자**: \n' +
+        '- **프로젝트**: {{프로젝트}}\n\n' +
+        '## 논의 안건\n1. \n\n' +
+        '## 결정 사항\n- \n\n' +
+        '## 공유/참고 링크\n- \n'
+    },
+    {
+      id: 'gtpl-simple-log',
+      name: '간단 완료 메모',
+      content:
+        '# {{제목}} 완료 기록 ({{날짜}})\n\n' +
+        '- 완료 내용: \n' +
+        '- 비고: \n'
+    }
+  ];
+
+  function getParaPrefixLetter(paraType) {
+    if (paraType === 'project') return 'P';
+    if (paraType === 'resource') return 'R';
+    if (paraType === 'area') return 'A';
+    return 'P';
+  }
+
+  function nextParaNumberForType(paraType) {
+    let maxNum = 0;
+    (state.paraEntities || []).forEach((e) => {
+      if (e && e.paraType === paraType) {
+        const n = Number(e.paraNumber || 0);
+        if (Number.isFinite(n) && n > maxNum) maxNum = n;
+      }
+    });
+    return maxNum + 1;
+  }
+
+  function ensureParaNumbers() {
+    let changed = false;
+    ['project', 'area', 'resource'].forEach((t) => {
+      const list = (state.paraEntities || []).filter((e) => e && e.paraType === t);
+      const used = new Set();
+      list.forEach((e) => {
+        const n = Number(e.paraNumber || 0);
+        if (Number.isInteger(n) && n > 0 && !used.has(n)) {
+          used.add(n);
+        } else {
+          e.paraNumber = 0;
+        }
+      });
+      let cursor = 1;
+      list.forEach((e) => {
+        if (!e.paraNumber) {
+          while (used.has(cursor)) cursor++;
+          e.paraNumber = cursor;
+          used.add(cursor);
+          changed = true;
+        }
+      });
+    });
+    return changed;
+  }
+
+  function getParaCode(ent) {
+    if (!ent) return 'P-00';
+    normalizeParaEntityFields(ent);
+    const num = String(Math.max(1, Number(ent.paraNumber || 1))).padStart(2, '0');
+    return `${getParaPrefixLetter(ent.paraType)}-${num}`;
+  }
+
+  function getSbFolderName(ent) {
+    if (!ent) return 'P-00_기타';
+    const safeTitle = String(ent.name || '이름없음')
+      .trim()
+      .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
+      .replace(/[. ]+$/g, '')
+      .slice(0, 60) || '이름없음';
+    return `${getParaCode(ent)}_${safeTitle}`;
+  }
+
+  function stripSbPrefix(fileName) {
+    return String(fileName || '').replace(/^[PRA]-\d{2}-[TSR]-/i, '');
+  }
+
   function normalizeParaEntityFields(e) {
     if (!e || typeof e !== 'object') return e;
     if (e.paraType === 'archive') {
@@ -89,6 +189,11 @@
     e.updatedAt = Number(e.updatedAt) || e.createdAt;
     if (e.archived && !e.archivedAt) e.archivedAt = e.updatedAt;
     if (!e.archived) e.archivedAt = 0;
+    if (!Number.isInteger(Number(e.paraNumber)) || Number(e.paraNumber) < 1) {
+      e.paraNumber = nextParaNumberForType(e.paraType);
+    } else {
+      e.paraNumber = Number(e.paraNumber);
+    }
 
     if (e.paraType === 'project') {
       if (!['active', 'hold', 'completed'].includes(e.status)) {
@@ -98,6 +203,9 @@
       e.dueDate = typeof e.dueDate === 'string' ? e.dueDate.trim() : '';
       const p = Number(e.progress);
       e.progress = Number.isFinite(p) ? Math.max(0, Math.min(100, Math.round(p))) : (e.archived ? 100 : 0);
+      if (!Array.isArray(e.templates)) e.templates = [];
+      if (!Array.isArray(e.risks)) e.risks = [];
+      if (typeof e.riskDocId !== 'string') e.riskDocId = '';
     }
     return e;
   }
@@ -449,7 +557,8 @@
       relations: `${prefix}relations`,
       paraEntities: `${prefix}para_entities`,
       pinnedApps: `${prefix}pinned_apps`,
-      syncMeta: `${prefix}sync_meta`
+      syncMeta: `${prefix}sync_meta`,
+      globalTemplates: `${prefix}global_templates`
     };
   }
 
@@ -529,6 +638,7 @@
     relations: [],
     paraEntities: [],
     pinnedAppIds: [],
+    globalTemplates: [],
     attachedContextIds: []
   };
   state.currentFolder = state.fileSystem;
@@ -619,6 +729,7 @@
     let loadedRelations = [];
     let loadedPinnedApps = [];
     let loadedParaEntities = [];
+    let loadedGlobalTemplates = null;
     try {
       const rawRel = localStorage.getItem(keys.relations);
       if (rawRel) loadedRelations = JSON.parse(rawRel) || [];
@@ -631,6 +742,10 @@
       const rawPara = localStorage.getItem(keys.paraEntities);
       if (rawPara) loadedParaEntities = JSON.parse(rawPara) || [];
     } catch (_) {}
+    try {
+      const rawTpls = localStorage.getItem(keys.globalTemplates);
+      if (rawTpls) loadedGlobalTemplates = JSON.parse(rawTpls);
+    } catch (_) {}
 
     state.fileSystem = loadedFS;
     state.currentFolder = state.fileSystem;
@@ -641,10 +756,15 @@
     state.relations = Array.isArray(loadedRelations) ? loadedRelations : [];
     state.paraEntities = Array.isArray(loadedParaEntities) ? loadedParaEntities : [];
     state.pinnedAppIds = Array.isArray(loadedPinnedApps) ? loadedPinnedApps : [];
+    state.globalTemplates = Array.isArray(loadedGlobalTemplates)
+      ? loadedGlobalTemplates
+      : JSON.parse(JSON.stringify(DEFAULT_GLOBAL_TEMPLATES));
     state.attachedContextIds = [];
 
-    // 이전 버전(폴더형 PARA) → 가상 PARA 엔티티 구조로 자동 마이그레이션
-    if (normalizeParaWorkspace()) {
+    // 이전 버전(폴더형 PARA) → 가상 PARA 엔티티 구조로 자동 마이그레이션 & 고유 넘버링 보장
+    const migrated = normalizeParaWorkspace();
+    const numbered = ensureParaNumbers();
+    if (migrated || numbered) {
       try {
         localStorage.setItem(keys.db, JSON.stringify(state.fileSystem));
         localStorage.setItem(keys.relations, JSON.stringify(state.relations));
@@ -670,6 +790,7 @@
     state.relations = [];
     state.paraEntities = [];
     state.pinnedAppIds = [];
+    state.globalTemplates = [];
     state.attachedContextIds = [];
   }
 
@@ -931,6 +1052,325 @@
     document.documentElement.setAttribute('data-theme', theme);
   }
 
+  function persistGlobalTemplates(options = {}) {
+    if (!activeUserEmail) return;
+    try {
+      localStorage.setItem(getUserKeys(activeUserEmail).globalTemplates, JSON.stringify(state.globalTemplates || []));
+    } catch (_) {}
+    if (!options.silent) {
+      setSyncMeta({ updatedAt: Date.now(), hasUserEdits: true });
+    }
+  }
+
+  function getGlobalTemplates() {
+    if (!Array.isArray(state.globalTemplates) || state.globalTemplates.length === 0) {
+      state.globalTemplates = JSON.parse(JSON.stringify(DEFAULT_GLOBAL_TEMPLATES));
+    }
+    return state.globalTemplates;
+  }
+
+  function saveGlobalTemplate({ id = '', name = '', content = '' }) {
+    const cleanName = String(name || '').trim();
+    if (!cleanName) return null;
+    const list = getGlobalTemplates();
+    const existing = id ? list.find((t) => t.id === id) : null;
+    if (existing) {
+      existing.name = cleanName;
+      existing.content = String(content ?? '');
+      existing.updatedAt = Date.now();
+      persistGlobalTemplates();
+      return existing;
+    }
+    const created = {
+      id: `gtpl-${genId()}`,
+      name: cleanName,
+      content: String(content ?? ''),
+      updatedAt: Date.now()
+    };
+    list.push(created);
+    persistGlobalTemplates();
+    return created;
+  }
+
+  function deleteGlobalTemplate(id) {
+    const list = getGlobalTemplates();
+    const before = list.length;
+    state.globalTemplates = list.filter((t) => t.id !== id);
+    if (state.globalTemplates.length !== before) {
+      persistGlobalTemplates();
+      return true;
+    }
+    return false;
+  }
+
+  function saveProjectTemplate(projectId, { id = '', name = '', content = '' }) {
+    const ent = findParaEntity(projectId);
+    const cleanName = String(name || '').trim();
+    if (!ent || !cleanName) return null;
+    normalizeParaEntityFields(ent);
+    if (!Array.isArray(ent.templates)) ent.templates = [];
+    const existing = id ? ent.templates.find((t) => t.id === id) : null;
+    if (existing) {
+      existing.name = cleanName;
+      existing.content = String(content ?? '');
+      existing.updatedAt = Date.now();
+    } else {
+      ent.templates.push({
+        id: `ptpl-${genId()}`,
+        name: cleanName,
+        content: String(content ?? ''),
+        updatedAt: Date.now()
+      });
+    }
+    ent.updatedAt = Date.now();
+    persistParaEntities();
+    return existing || ent.templates[ent.templates.length - 1];
+  }
+
+  function deleteProjectTemplate(projectId, tplId) {
+    const ent = findParaEntity(projectId);
+    if (!ent || !Array.isArray(ent.templates)) return false;
+    const before = ent.templates.length;
+    ent.templates = ent.templates.filter((t) => t.id !== tplId);
+    if (ent.templates.length !== before) {
+      ent.updatedAt = Date.now();
+      persistParaEntities();
+      return true;
+    }
+    return false;
+  }
+
+  // ---- Project Risk Management (A/B/C Severity + Scenario -> Markdown Sync) ----
+  function addProjectRisk(projectId, { scenario = '', risk = '', level = 'B', mitigation = '', status = 'monitoring' }) {
+    const ent = findParaEntity(projectId);
+    if (!ent) return null;
+    normalizeParaEntityFields(ent);
+    const cleanScenario = String(scenario || '').trim();
+    const cleanRisk = String(risk || '').trim();
+    if (!cleanScenario && !cleanRisk) return null;
+    const item = {
+      id: `risk-${genId()}`,
+      scenario: cleanScenario || '기본 시나리오',
+      risk: cleanRisk || cleanScenario,
+      level: ['A', 'B', 'C'].includes(level) ? level : 'B',
+      mitigation: String(mitigation || '').trim(),
+      status: ['monitoring', 'mitigating', 'resolved'].includes(status) ? status : 'monitoring',
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    ent.risks.push(item);
+    ent.updatedAt = Date.now();
+    persistParaEntities();
+    return item;
+  }
+
+  function updateProjectRisk(projectId, riskId, patch = {}) {
+    const ent = findParaEntity(projectId);
+    if (!ent || !Array.isArray(ent.risks)) return null;
+    const item = ent.risks.find((r) => r.id === riskId);
+    if (!item) return null;
+    if (patch.scenario !== undefined) item.scenario = String(patch.scenario || '').trim();
+    if (patch.risk !== undefined) item.risk = String(patch.risk || '').trim();
+    if (patch.level && ['A', 'B', 'C'].includes(patch.level)) item.level = patch.level;
+    if (patch.mitigation !== undefined) item.mitigation = String(patch.mitigation || '').trim();
+    if (patch.status && ['monitoring', 'mitigating', 'resolved'].includes(patch.status)) item.status = patch.status;
+    item.updatedAt = Date.now();
+    ent.updatedAt = Date.now();
+    persistParaEntities();
+    return item;
+  }
+
+  function deleteProjectRisk(projectId, riskId) {
+    const ent = findParaEntity(projectId);
+    if (!ent || !Array.isArray(ent.risks)) return false;
+    const before = ent.risks.length;
+    ent.risks = ent.risks.filter((r) => r.id !== riskId);
+    if (ent.risks.length !== before) {
+      ent.updatedAt = Date.now();
+      persistParaEntities();
+      return true;
+    }
+    return false;
+  }
+
+  function renderRisksToMarkdown(ent) {
+    if (!ent) return '';
+    normalizeParaEntityFields(ent);
+    const code = getParaCode(ent);
+    const statusMap = { monitoring: '모니터링', mitigating: '대응 중', resolved: '해소됨' };
+    const levelLabel = {
+      A: '🔴 A등급 (고위험 · 즉시 대응)',
+      B: '🟠 B등급 (중위험 · 계획 수립)',
+      C: '🟢 C등급 (저위험 · 관찰)'
+    };
+    const grouped = { A: [], B: [], C: [] };
+    (ent.risks || []).forEach((r) => {
+      const lv = ['A', 'B', 'C'].includes(r.level) ? r.level : 'B';
+      grouped[lv].push(r);
+    });
+    const lines = [
+      `# ${code} ${ent.name} — 리스크 관리 (시나리오 분석)`,
+      '',
+      `- 최종 갱신: ${new Date().toLocaleString('ko-KR')}`,
+      `- 요약: **A등급 ${grouped.A.length}건** · **B등급 ${grouped.B.length}건** · **C등급 ${grouped.C.length}건**`,
+      ''
+    ];
+    ['A', 'B', 'C'].forEach((lv) => {
+      lines.push(`## ${levelLabel[lv]}`);
+      if (grouped[lv].length === 0) {
+        lines.push('- 등록된 리스크 없음');
+      } else {
+        lines.push('| 시나리오 | 예상 리스크 | 대응 방안 | 상태 |');
+        lines.push('|---|---|---|---|');
+        grouped[lv].forEach((r) => {
+          const escCell = (v) => String(v || '-').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+          lines.push(`| ${escCell(r.scenario)} | ${escCell(r.risk)} | ${escCell(r.mitigation)} | ${statusMap[r.status] || '모니터링'} |`);
+        });
+      }
+      lines.push('');
+    });
+    return lines.join('\n');
+  }
+
+  // ---- Unified Card Helpers (Role T/S/R, Today Core, Sub-Cards, Tags, Schedule) ----
+  function getCardRole(doc) {
+    if (!doc) return 'S';
+    if (['T', 'S', 'R'].includes(doc.cardRole)) return doc.cardRole;
+    if (doc.cardKind === 'deliverable') return 'R';
+    if (doc.cardKind === 'task' || doc.cardKind === 'event' || doc.isTodayCore || /#할일|#todo\b/i.test(String(doc.tag || ''))) return 'T';
+    if (/#산출물|#결과|#result\b/i.test(String(doc.tag || ''))) return 'R';
+    return 'S';
+  }
+
+  function setCardRole(doc, role) {
+    if (!doc || !['T', 'S', 'R'].includes(role)) return false;
+    doc.cardRole = role;
+    if (role === 'T' && (!doc.cardKind || doc.cardKind === 'note')) doc.cardKind = 'task';
+    if (role === 'R') doc.cardKind = 'deliverable';
+    if (role === 'S' && doc.cardKind === 'deliverable') doc.cardKind = 'note';
+    touchNode(doc);
+    persistFS();
+    return true;
+  }
+
+  function setCardTodayCore(doc, flag, timeStr) {
+    if (!doc) return false;
+    doc.isTodayCore = Boolean(flag);
+    if (timeStr !== undefined) doc.coreTime = String(timeStr || '').trim();
+    if (doc.isTodayCore && !doc.cardRole) doc.cardRole = 'T';
+    touchNode(doc);
+    persistFS();
+    return true;
+  }
+
+  function getCardTags(doc) {
+    if (!doc) return [];
+    const set = new Set();
+    if (Array.isArray(doc.customTags)) {
+      doc.customTags.forEach((t) => {
+        const c = String(t || '').trim().replace(/^#+/, '');
+        if (c) set.add(c);
+      });
+    }
+    const raw = String(doc.tag || '');
+    const matches = raw.match(/#[^\s#]+/g) || [];
+    matches.forEach((m) => {
+      const c = m.replace(/^#+/, '').trim();
+      if (c && !['MD', '수신함', '일일메모', 'Excel', '시트'].includes(c)) set.add(c);
+    });
+    return Array.from(set);
+  }
+
+  function setCardTags(doc, tagsArr) {
+    if (!doc) return;
+    const clean = Array.from(new Set(
+      (Array.isArray(tagsArr) ? tagsArr : String(tagsArr || '').split(/[,\s]+/))
+        .map((t) => String(t || '').trim().replace(/^#+/, ''))
+        .filter(Boolean)
+    ));
+    doc.customTags = clean;
+    const baseTag = clean.map((t) => `#${t}`).join(' ');
+    doc.tag = baseTag || doc.tag || '';
+    touchNode(doc);
+    persistFS();
+  }
+
+  function getSubCards(parentCardId, visibilityFilter = null) {
+    if (!parentCardId) return [];
+    const map = new Map();
+    // 1. Direct parentCardId property
+    collectAllNodes(state.fileSystem).forEach((n) => {
+      if (!n || n.type !== 'doc' || n.id === parentCardId) return;
+      if (n.parentCardId === parentCardId) {
+        if (typeof visibilityFilter !== 'function' || visibilityFilter(n)) {
+          map.set(n.id, n);
+        }
+      }
+    });
+    // 2. Relation DB parent -> child links
+    (state.relations || []).forEach((r) => {
+      if (r.type === 'parent' && r.sourceId === parentCardId) {
+        const child = findNodeAndParent(r.targetId)?.node;
+        if (child && child.type === 'doc' && child.id !== parentCardId) {
+          if (typeof visibilityFilter !== 'function' || visibilityFilter(child)) {
+            map.set(child.id, child);
+          }
+        }
+      }
+    });
+    return Array.from(map.values()).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  }
+
+  function linkSubCard(parentDoc, childDoc, { inheritPara = true } = {}) {
+    if (!parentDoc || !childDoc || parentDoc.id === childDoc.id) return false;
+    childDoc.parentCardId = parentDoc.id;
+    addRelation({ sourceId: parentDoc.id, targetId: childDoc.id, type: 'parent', label: childDoc.cardRole === 'R' ? '산출물' : '하위 카드' });
+    if (inheritPara) {
+      const parentRels = getRelationsForNode(parentDoc.id);
+      (parentRels.projects || []).forEach(({ node }) => {
+        if (node?.type === 'para-entity') addRelation({ sourceId: childDoc.id, targetId: node.id, type: 'project' });
+      });
+      (parentRels.areas || []).forEach(({ node }) => {
+        if (node?.type === 'para-entity') addRelation({ sourceId: childDoc.id, targetId: node.id, type: 'area' });
+      });
+      (parentRels.resources || []).forEach(({ node }) => {
+        if (node?.type === 'para-entity') addRelation({ sourceId: childDoc.id, targetId: node.id, type: 'resource' });
+      });
+    }
+    touchNode(childDoc);
+    persistFS();
+    return true;
+  }
+
+  function updateCardSchedule(doc, { startDate, endDate, preservePlannedEnd = true } = {}) {
+    if (!doc) return false;
+    if (preservePlannedEnd && doc.endDate && !doc.plannedEndDate && endDate && endDate !== doc.endDate) {
+      doc.plannedEndDate = doc.endDate;
+    }
+    if (startDate !== undefined) doc.startDate = String(startDate || '').trim();
+    if (endDate !== undefined) doc.endDate = String(endDate || '').trim();
+    if (!doc.plannedEndDate && doc.endDate) doc.plannedEndDate = doc.endDate;
+    touchNode(doc);
+    persistFS();
+    return true;
+  }
+
+  function getProjectLinkedDocs(projectId, visibilityFilter = null) {
+    const map = new Map();
+    (state.relations || []).forEach((r) => {
+      if (r.sourceId === projectId || r.targetId === projectId) {
+        const otherId = r.sourceId === projectId ? r.targetId : r.sourceId;
+        const found = findNodeAndParent(otherId)?.node;
+        if (found && found.type === 'doc') {
+          if (typeof visibilityFilter !== 'function' || visibilityFilter(found)) {
+            map.set(found.id, found);
+          }
+        }
+      }
+    });
+    return Array.from(map.values()).sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
+  }
+
   function touchNode(node) {
     if (!node || typeof node !== 'object') return node;
     const now = Date.now();
@@ -977,6 +1417,7 @@
     switchUser,
     clearActiveWorkspace,
     normalizeParaWorkspace,
+    normalizeParaEntityFields,
     findParaEntity,
     resolveAnyNode,
     persistParaEntities,
@@ -988,6 +1429,29 @@
     declareParaEntity,
     getParaEntities,
     getUnassignedNodes,
+    ensureParaNumbers,
+    getParaCode,
+    getSbFolderName,
+    stripSbPrefix,
+    persistGlobalTemplates,
+    getGlobalTemplates,
+    saveGlobalTemplate,
+    deleteGlobalTemplate,
+    saveProjectTemplate,
+    deleteProjectTemplate,
+    addProjectRisk,
+    updateProjectRisk,
+    deleteProjectRisk,
+    renderRisksToMarkdown,
+    getCardRole,
+    setCardRole,
+    setCardTodayCore,
+    getCardTags,
+    setCardTags,
+    getSubCards,
+    linkSubCard,
+    updateCardSchedule,
+    getProjectLinkedDocs,
     touchNode,
     searchAll,
     genId,
