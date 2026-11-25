@@ -65,13 +65,100 @@
 
   function mountParaDashboard(hooks) {
     const Store = global.BrainStore;
+    const gtd = global.BrainGtdSecondBrain
+      ? global.BrainGtdSecondBrain.createGtdSecondBrain(hooks)
+      : null;
     const projectWorkspace = global.BrainProjectWorkspace
-      ? global.BrainProjectWorkspace.createProjectWorkspace(hooks)
+      ? global.BrainProjectWorkspace.createProjectWorkspace({
+          ...hooks,
+          openExtractModal: (doc) => gtd?.openExtractModal(doc),
+          openCardPropertiesModal: (doc, cb) => gtd?.openCardPropertiesModal(doc, cb || renderAll)
+        })
       : null;
 
-    let activeView = 'home'; // 'home' | 'inbox' | 'project' | 'project-detail' | 'area' | 'resource' | 'archive' | 'review'
+    let googleCalendarInstance = null;
+    function getGoogleCalendar() {
+      if (!googleCalendarInstance && global.BrainGoogleCalendar) {
+        googleCalendarInstance = global.BrainGoogleCalendar.createGoogleCalendar({
+          ...hooks,
+          openCardProps: (doc) => openCardProps(doc),
+          onDataChanged: () => renderAll(),
+          getAllVisibleDocs: () => getAllVisibleDocs(),
+          openProjectDetail
+        });
+      }
+      return googleCalendarInstance;
+    }
+
+    function computeInboxPeriodBuckets() {
+      const todayYmd = hooks.getTodayYMD();
+      const [ty, tm, td] = todayYmd.split('-').map(Number);
+      const tMs = Date.UTC(ty, tm - 1, td);
+      const toYmd = (ms) => {
+        const d = new Date(ms);
+        return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+      };
+      const tomorrowYmd = toYmd(tMs + 86400000);
+      const weekEndYmd = toYmd(tMs + 7 * 86400000);
+      const openDocs = getAllVisibleDocs().filter((d) => !d.completed);
+
+      const overdueDocs = openDocs
+        .filter((d) => Boolean(d.endDate && d.endDate < todayYmd))
+        .sort((a, b) => String(a.endDate || '').localeCompare(String(b.endDate || '')));
+
+      const todayDocs = openDocs.filter((d) => {
+        const s = d.startDate || '';
+        const e = d.endDate || '';
+        if (s && e) return todayYmd >= s && todayYmd <= e;
+        return s === todayYmd || e === todayYmd;
+      });
+
+      const tomorrowDocs = openDocs.filter((d) => {
+        const s = d.startDate || '';
+        const e = d.endDate || '';
+        if (s && e) return tomorrowYmd >= s && tomorrowYmd <= e;
+        return s === tomorrowYmd || e === tomorrowYmd;
+      });
+
+      const weekDocs = openDocs.filter((d) => {
+        const s = d.startDate || '';
+        const e = d.endDate || '';
+        if (s && e) return s <= weekEndYmd && e >= todayYmd;
+        const single = e || s;
+        return Boolean(single && single >= todayYmd && single <= weekEndYmd);
+      });
+
+      return { todayYmd, tomorrowYmd, weekEndYmd, overdueDocs, todayDocs, tomorrowDocs, weekDocs };
+    }
+
+    function formatPeriodBadgeHtml(doc, todayYmd) {
+      const s = doc.startDate || '';
+      const e = doc.endDate || '';
+      if (!s && !e) return '';
+      const fmt = (ymd) => ymd.slice(5).replace('-', '/');
+      if (!doc.completed && e && e < todayYmd) {
+        return `<span class="sb-period-pill is-overdue">⚠️ 기간지남 · ${esc(fmt(e))}</span>`;
+      }
+      if (s && e && s !== e) {
+        return `<span class="sb-period-pill">📅 ${esc(fmt(s))} ~ ${esc(fmt(e))}</span>`;
+      }
+      return `<span class="sb-period-pill">📅 ${esc(fmt(e || s))}</span>`;
+    }
+
+    function openCardProps(doc) {
+      if (!doc) return;
+      if (gtd && typeof gtd.openCardPropertiesModal === 'function') {
+        gtd.openCardPropertiesModal(doc, renderAll);
+      } else {
+        hooks.launchItemDirectly(doc);
+      }
+    }
+
+    let activeView = 'home'; // 'home' | 'inbox' | 'next-actions' | 'calendar' | 'project' | 'project-detail' | 'master-gantt' | 'area' | 'resource' | 'archive' | 'review' | 'history'
     let activeProjectId = null;
-    let inboxTab = 'all';    // 'all' | 'memos' | 'files' | 'tasks' | 'done'
+    let inboxTab = 'all';    // 'all' | 'overdue' | 'today' | 'tomorrow' | 'week' | 'memos' | 'files' | 'tasks' | 'done'
+    let homeInboxTab = 'all'; // 'all' | 'overdue' | 'today' | 'tomorrow' | 'week'
+    let dragProjectId = null;
     let projectFilter = 'all'; // 'all' | 'active' | 'hold'
     let archiveFilter = 'all'; // 'all' | 'project' | 'area' | 'resource'
     let showInlineComposer = false;
@@ -190,7 +277,35 @@
       };
     }
 
-    // ---- Project Edit / Create Modal ----
+    // ---- Project Edit / Create Modal (with Life Goal, Hierarchy Parent, Past R-Card Reuse, 5-Why Link) ----
+    function renderPemReuseRecommendations() {
+      const box = $('pem-reuse-box');
+      const listEl = $('pem-reuse-list');
+      if (!box || !listEl) return;
+      const pType = $('pem-type')?.value || 'project';
+      const isEdit = Boolean($('pem-id')?.value?.trim());
+      if (pType !== 'project' || isEdit) {
+        box.style.display = 'none';
+        return;
+      }
+      const q = `${$('pem-name')?.value || ''} ${$('pem-summary')?.value || ''}`.trim();
+      const recs = Store.getRecommendedDeliverables(q).slice(0, 5);
+      if (recs.length === 0) {
+        box.style.display = 'none';
+        return;
+      }
+      box.style.display = 'block';
+      listEl.innerHTML = recs.map(({ doc, project }) => `
+        <label class="sb-pem-reuse-row">
+          <input type="checkbox" class="sb-pem-reuse-chk" value="${esc(doc.id)}">
+          <span>
+            <strong>${esc(doc.name.replace(/\.md$/i, ''))}</strong>
+            <small>${esc(Store.getParaCode(project))} ${esc(project.name)} · ♻️ ${Number(doc.reuseCount || 0)}회</small>
+          </span>
+        </label>
+      `).join('');
+    }
+
     function openProjectModal(entity = null, defaultType = 'project') {
       const modal = $('para-entity-modal');
       if (!modal) return;
@@ -213,7 +328,25 @@
         $('pem-status').value = entity?.status || 'active';
         $('pem-progress').value = String(entity?.progress ?? 0);
         $('pem-progress-val').textContent = `${entity?.progress ?? 0}%`;
+
+        // Populate Life Goal 5 selector
+        const lgSel = $('pem-life-goal');
+        if (lgSel) {
+          const goals = (Store.state.lifeGoals || []).filter((g) => g.title);
+          lgSel.innerHTML = `<option value="">연결 안 함</option>` +
+            goals.map((g, i) => `<option value="${esc(g.id)}"${entity?.lifeGoalId === g.id ? ' selected' : ''}>목표 ${i + 1}: ${esc(g.title)}</option>`).join('');
+        }
+        // Populate Parent Project (Hierarchy Level) selector
+        const ppSel = $('pem-parent-proj');
+        if (ppSel) {
+          const projs = Store.getParaEntities('project', { onlyActive: true }).filter((p) => p.id !== entity?.id);
+          ppSel.innerHTML = `<option value="">최상위 프로젝트 (Lv.1)</option>` +
+            projs.map((p) => `<option value="${esc(p.id)}"${entity?.parentProjectId === p.id ? ' selected' : ''}>Lv.${Store.getProjectLevel(p.id)} · ${esc(Store.getParaCode(p))} ${esc(p.name)}</option>`).join('');
+        }
       }
+
+      const reqBtn = $('pem-open-req-btn');
+      if (reqBtn) reqBtn.style.display = pType === 'project' ? 'inline-flex' : 'none';
 
       const completeBtn = $('pem-complete-archive-btn');
       if (completeBtn) {
@@ -222,6 +355,7 @@
       const delBtn = $('pem-delete-btn');
       if (delBtn) delBtn.style.display = isEdit ? 'inline-flex' : 'none';
 
+      renderPemReuseRecommendations();
       modal.style.display = 'flex';
       setTimeout(() => $('pem-name')?.focus(), 20);
     }
@@ -238,6 +372,37 @@
 
       $('pem-progress')?.addEventListener('input', (e) => {
         if ($('pem-progress-val')) $('pem-progress-val').textContent = `${e.target.value}%`;
+      });
+      $('pem-name')?.addEventListener('input', renderPemReuseRecommendations);
+      $('pem-summary')?.addEventListener('input', renderPemReuseRecommendations);
+
+      $('pem-open-req-btn')?.addEventListener('click', () => {
+        let id = $('pem-id').value.trim();
+        if (!id) {
+          const name = $('pem-name').value.trim();
+          if (!name) {
+            hooks.showToast('요구사항 분석을 열기 전에 프로젝트 이름을 먼저 입력해 주세요.');
+            $('pem-name').focus();
+            return;
+          }
+          const created = Store.declareParaEntity({
+            paraType: 'project',
+            name,
+            summary: $('pem-summary').value.trim(),
+            dueDate: $('pem-due').value.trim(),
+            status: $('pem-status').value || 'active',
+            progress: Number($('pem-progress').value || 0),
+            lifeGoalId: $('pem-life-goal')?.value || '',
+            parentProjectId: $('pem-parent-proj')?.value || ''
+          });
+          if (!created) return;
+          id = created.id;
+          $('pem-id').value = id;
+          hooks.saveAndRender();
+        }
+        close();
+        openProjectDetail(id, 'requirements');
+        projectWorkspace?.openRequirementEditorModal(id, null, () => renderAll());
       });
 
       $('pem-form')?.addEventListener('submit', (e) => {
@@ -257,12 +422,16 @@
             patch.dueDate = $('pem-due').value.trim();
             patch.status = $('pem-status').value || 'active';
             patch.progress = Number($('pem-progress').value || 0);
+            patch.lifeGoalId = $('pem-life-goal')?.value || '';
             if (patch.status === 'completed') {
               patch.archived = true;
               patch.progress = 100;
             }
           }
           Store.updateParaEntity(id, patch);
+          if (pType === 'project') {
+            Store.setProjectParent(id, $('pem-parent-proj')?.value || '');
+          }
           hooks.showToast(`"${name}" 수정되었습니다.`);
         } else {
           const created = Store.declareParaEntity({
@@ -272,9 +441,29 @@
             archived: pType === 'archive',
             dueDate: pType === 'project' ? $('pem-due').value.trim() : '',
             status: pType === 'project' ? ($('pem-status').value || 'active') : '',
-            progress: pType === 'project' ? Number($('pem-progress').value || 0) : 0
+            progress: pType === 'project' ? Number($('pem-progress').value || 0) : 0,
+            lifeGoalId: pType === 'project' ? ($('pem-life-goal')?.value || '') : '',
+            parentProjectId: pType === 'project' ? ($('pem-parent-proj')?.value || '') : ''
           });
-          if (created) hooks.showToast(`"${created.name}" 생성되었습니다.`);
+          if (created && pType === 'project') {
+            // Pull checked recommended past R-cards & increment reuseCount!
+            let reused = 0;
+            modal.querySelectorAll('.sb-pem-reuse-chk:checked').forEach((chk) => {
+              const rdoc = Store.findNodeAndParent(chk.value)?.node;
+              if (rdoc) {
+                Store.addRelation({ sourceId: rdoc.id, targetId: created.id, type: 'project', label: '재사용 인용' });
+                Store.incrementCardReuse(rdoc.id);
+                reused++;
+              }
+            });
+            hooks.showToast(
+              reused > 0
+                ? `"${created.name}" 생성 완료! (과거 산출물 ${reused}건 불러오기·재사용 반영)`
+                : `"${created.name}" 생성되었습니다.`
+            );
+          } else if (created) {
+            hooks.showToast(`"${created.name}" 생성되었습니다.`);
+          }
         }
         close();
         hooks.saveAndRender();
@@ -283,13 +472,15 @@
 
       $('pem-complete-archive-btn')?.addEventListener('click', () => {
         const id = $('pem-id').value.trim();
-        if (!id) return;
-        const ent = Store.completeAndArchiveProject(id);
-        if (ent) {
-          close();
+        const ent = Store.findParaEntity(id);
+        if (!ent) return;
+        close();
+        if (projectWorkspace) {
+          projectWorkspace.openProjectCompleteModal(ent, () => renderAll());
+        } else {
+          Store.completeAndArchiveProject(id);
           hooks.saveAndRender();
           renderAll();
-          hooks.showToast(`"${ent.name}" 완료 처리 후 보관함(Archives)으로 이동했습니다.`);
         }
       });
 
@@ -305,7 +496,7 @@
       });
     }
 
-    // ---- Quick Classify Popover ([P] [A] [R] buttons) ----
+    // ---- Quick Classify Popover ([P] [A] [R] buttons — Multi-Select Supported!) ----
     function openQuickClassifyMenu(anchorEl, doc, paraType) {
       closeQuickClassifyMenu();
       const pop = document.createElement('div');
@@ -313,70 +504,102 @@
       pop.id = 'sb-quick-classify-pop';
 
       const typeNames = { project: '프로젝트', area: '영역', resource: '자료' };
-      const entities = Store.getParaEntities(paraType, { onlyActive: true });
 
-      pop.innerHTML =
-        `<div class="sb-qcp-head">` +
-        `  <span>${typeNames[paraType]}에 연결</span>` +
-        `  <button type="button" class="sb-icon-btn-xs" data-qcp-close="1">${svg('close', 12)}</button>` +
-        `</div>` +
-        `<div class="sb-qcp-list">` +
-        (entities.length > 0
-          ? entities.map((e) =>
-              `<button type="button" class="sb-qcp-item" data-eid="${esc(e.id)}">` +
-              `  <span class="sb-code-pill-xs">${esc(Store.getParaCode(e))}</span>` +
-              `  <span>${esc(e.name)}</span>` +
-              `</button>`
-            ).join('')
-          : `<div class="sb-qcp-empty">아직 ${typeNames[paraType]}가 없어요</div>`) +
-        `</div>` +
-        `<form class="sb-qcp-create">` +
-        `  <input type="text" class="sb-qcp-input" placeholder="새 ${typeNames[paraType]} 만들고 연결...">` +
-        `  <button type="submit" class="sb-qcp-submit">추가</button>` +
-        `</form>`;
+      const getConnectedSet = () => {
+        const rels = Store.getRelationsForNode(doc.id);
+        const list = paraType === 'project' ? rels.projects : (paraType === 'area' ? rels.areas : rels.resources);
+        return new Set((list || []).map((x) => x.node?.id).filter(Boolean));
+      };
+
+      const renderPopContent = () => {
+        const entities = Store.getParaEntities(paraType, { onlyActive: true });
+        const connectedSet = getConnectedSet();
+        pop.innerHTML =
+          `<div class="sb-qcp-head">` +
+          `  <span>${typeNames[paraType]} 연결 <small style="opacity:0.7;">(중복 선택)</small></span>` +
+          `  <button type="button" class="sb-icon-btn-xs" data-qcp-close="1">${svg('close', 12)}</button>` +
+          `</div>` +
+          `<div class="sb-qcp-list">` +
+          (entities.length > 0
+            ? entities.map((e) => {
+                const isOn = connectedSet.has(e.id);
+                return (
+                  `<button type="button" class="sb-qcp-item ${isOn ? 'is-selected' : ''}" data-eid="${esc(e.id)}">` +
+                  `  <span class="sb-qcp-chk">${isOn ? '☑' : '☐'}</span>` +
+                  `  <span class="sb-code-pill-xs">${esc(Store.getParaCode(e))}</span>` +
+                  `  <span style="flex:1; overflow:hidden; text-overflow:ellipsis;">${esc(e.name)}</span>` +
+                  `</button>`
+                );
+              }).join('')
+            : `<div class="sb-qcp-empty">아직 ${typeNames[paraType]}가 없어요</div>`) +
+          `</div>` +
+          `<form class="sb-qcp-create">` +
+          `  <input type="text" class="sb-qcp-input" placeholder="새 ${typeNames[paraType]} 만들고 연결...">` +
+          `  <button type="submit" class="sb-qcp-submit">추가</button>` +
+          `</form>` +
+          `<div class="sb-qcp-foot">` +
+          `  <span class="sb-muted-sm">${connectedSet.size}개 연결됨</span>` +
+          `  <button type="button" class="sb-btn-primary-xs" data-qcp-done="1">완료</button>` +
+          `</div>`;
+
+        pop.querySelector('[data-qcp-close]')?.addEventListener('click', closeQuickClassifyMenu);
+        pop.querySelector('[data-qcp-done]')?.addEventListener('click', () => {
+          closeQuickClassifyMenu();
+          renderAll();
+        });
+
+        pop.querySelectorAll('.sb-qcp-item').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const eid = btn.dataset.eid;
+            const ent = Store.findParaEntity(eid);
+            if (!ent) return;
+            const existing = (Store.state.relations || []).find(
+              (r) => r.type === paraType && (
+                (r.sourceId === doc.id && r.targetId === ent.id) ||
+                (r.sourceId === ent.id && r.targetId === doc.id)
+              )
+            );
+            if (existing) {
+              Store.removeRelation(existing.id);
+              hooks.showToast(`"${doc.name.replace(/\.md$/i, '')}" ↔ ${typeNames[paraType]} [${ent.name}] 연결 해제`);
+            } else {
+              Store.addRelation({ sourceId: doc.id, targetId: ent.id, type: paraType });
+              const subCnt = Store.getAllDescendantCards(doc.id).length;
+              const subNote = subCnt > 0 && (paraType === 'project' || paraType === 'area') ? ` (하위 ${subCnt}건 자동 상속)` : '';
+              hooks.showToast(`"${doc.name.replace(/\.md$/i, '')}" → ${typeNames[paraType]} [${ent.name}] 연결됨${subNote}`);
+            }
+            Store.touchNode(doc);
+            hooks.saveAndRender();
+            renderPopContent();
+          });
+        });
+
+        pop.querySelector('.sb-qcp-create')?.addEventListener('submit', (e) => {
+          e.preventDefault();
+          const inp = pop.querySelector('.sb-qcp-input');
+          const newName = String(inp?.value || '').trim();
+          if (!newName) return;
+          const created = Store.declareParaEntity({ paraType, name: newName });
+          if (created) {
+            Store.addRelation({ sourceId: doc.id, targetId: created.id, type: paraType });
+            Store.touchNode(doc);
+            hooks.saveAndRender();
+            hooks.showToast(`새 ${typeNames[paraType]} "${created.name}" 생성 및 연결 완료`);
+            renderPopContent();
+          }
+        });
+      };
 
       document.body.appendChild(pop);
       const rect = anchorEl.getBoundingClientRect();
-      const popW = 228;
+      const popW = 248;
       const left = Math.max(8, Math.min(window.innerWidth - popW - 10, rect.right - popW));
-      const top = Math.min(window.innerHeight - 240, rect.bottom + 6);
+      const top = Math.min(window.innerHeight - 290, rect.bottom + 6);
       pop.style.left = `${left}px`;
       pop.style.top = `${top}px`;
 
       pop.addEventListener('click', (e) => e.stopPropagation());
-      pop.querySelector('[data-qcp-close]')?.addEventListener('click', closeQuickClassifyMenu);
-
-      pop.querySelectorAll('.sb-qcp-item').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const eid = btn.dataset.eid;
-          const ent = Store.findParaEntity(eid);
-          if (ent) {
-            Store.addRelation({ sourceId: doc.id, targetId: ent.id, type: paraType });
-            Store.touchNode(doc);
-            hooks.saveAndRender();
-            renderAll();
-            hooks.showToast(`"${doc.name.replace(/\.md$/i, '')}" → ${typeNames[paraType]} [${ent.name}] 연결됨`);
-          }
-          closeQuickClassifyMenu();
-        });
-      });
-
-      pop.querySelector('.sb-qcp-create')?.addEventListener('submit', (e) => {
-        e.preventDefault();
-        const inp = pop.querySelector('.sb-qcp-input');
-        const newName = String(inp?.value || '').trim();
-        if (!newName) return;
-        const created = Store.declareParaEntity({ paraType, name: newName });
-        if (created) {
-          Store.addRelation({ sourceId: doc.id, targetId: created.id, type: paraType });
-          Store.touchNode(doc);
-          hooks.saveAndRender();
-          renderAll();
-          hooks.showToast(`새 ${typeNames[paraType]} "${created.name}" 생성 및 연결 완료`);
-        }
-        closeQuickClassifyMenu();
-      });
-
+      renderPopContent();
       openClassifyPopover = pop;
     }
 
@@ -477,10 +700,14 @@
       const archCnt = Store.getParaEntities('archive').length;
       const reviewAlertCnt = getReviewAlerts().totalAlerts;
 
+      const nextActCnt = Store.getProjectNextActionEntries(null, hooks.isItemVisible).length;
       const items = [
         { id: 'home', label: '홈', icon: 'home', badge: 0 },
         { id: 'inbox', label: '수신함', icon: 'inbox', badge: kpis.inboxCount },
+        { id: 'next-actions', label: '다음 행동', icon: 'check', badge: nextActCnt },
+        { id: 'calendar', label: '캘린더', icon: 'calendar', badge: 0 },
         { id: 'project', label: '프로젝트', icon: 'project', badge: kpis.activeProjects, subtle: true },
+        { id: 'master-gantt', label: '전체 간트', icon: 'chart', badge: 0 },
         { id: 'area', label: '영역', icon: 'area', badge: areaCnt, subtle: true },
         { id: 'resource', label: '자료', icon: 'resource', badge: resCnt, subtle: true },
         { id: 'archive', label: '보관', icon: 'archive', badge: archCnt, subtle: true }
@@ -499,6 +726,10 @@
         `  <span class="sb-nav-ico">${svg('review', 16)}</span>` +
         `  <span class="sb-nav-lbl">주간 리뷰</span>` +
         (reviewAlertCnt > 0 ? `<span class="sb-nav-dot" title="정리가 필요한 항목 ${reviewAlertCnt}건"></span>` : '') +
+        `</button>` +
+        `<button type="button" class="sb-nav-item${activeView === 'history' ? ' active' : ''}" data-pnav="history">` +
+        `  <span class="sb-nav-ico">${svg('clock', 16)}</span>` +
+        `  <span class="sb-nav-lbl">변경 이력</span>` +
         `</button>` +
         `<button type="button" class="sb-nav-item" data-paction="explorer">` +
         `  <span class="sb-nav-ico">${svg('explorer', 16)}</span>` +
@@ -620,6 +851,9 @@
           <button type="button" class="sb-nav-subitem" data-builtin-app="relation-map">${svg('graph', 14)}<span>관계 맵</span></button>
           <button type="button" class="sb-nav-subitem" data-builtin-app="spreadsheet">${svg('sheet', 14)}<span>엑셀 시트</span></button>
           <button type="button" class="sb-nav-subitem" data-builtin-app="origin">${svg('chart', 14)}<span>Origin 그래프</span></button>
+          <button type="button" class="sb-nav-subitem" data-builtin-app="ocr-extractor">${svg('scan', 14)}<span>OCR 추출기</span></button>
+          <button type="button" class="sb-nav-subitem" data-builtin-app="pdf-converter">${svg('doc', 14)}<span>PDF 변환기</span></button>
+          <button type="button" class="sb-nav-subitem" data-builtin-app="screen-capture">${svg('sparkle', 14)}<span>화면 캡처</span></button>
           <button type="button" class="sb-nav-subitem" data-builtin-app="markdown">${svg('doc', 14)}<span>새 마크다운</span></button>
           ${pinned.map((it) => `
             <button type="button" class="sb-nav-subitem" data-pinned-id="${esc(it.id)}">
@@ -631,8 +865,73 @@
       `;
     }
 
-    // ---- Render Home Dashboard Main View (Image-Faithful Layout) ----
+    // ---- Collapsible Left Sidebar Toggle ----
+    const SIDEBAR_HIDDEN_KEY = 'brainOS_home_sidebar_hidden_v1';
+    function applySidebarCollapsed(hidden) {
+      const shell = $('home-screen');
+      if (shell) shell.classList.toggle('is-sidebar-hidden', Boolean(hidden));
+      try { localStorage.setItem(SIDEBAR_HIDDEN_KEY, hidden ? '1' : '0'); } catch (_) {}
+    }
+    try {
+      if (localStorage.getItem(SIDEBAR_HIDDEN_KEY) === '1') applySidebarCollapsed(true);
+    } catch (_) {}
+    $('btn-collapse-home-sidebar')?.addEventListener('click', () => applySidebarCollapsed(true));
+    $('btn-expand-home-sidebar')?.addEventListener('click', () => applySidebarCollapsed(false));
+
+    // ---- Customizable Drag-and-Drop & Drag-Resizable Dashboard Widget & App Layout (12-col grid) ----
+    const DASH_LAYOUT_KEY = 'brainOS_dash_layout_v3';
+    const DEFAULT_DASH_LAYOUT = [
+      { id: 'projects', cols: 6, heightPx: 0 },
+      { id: 'calendar-widget', cols: 6, heightPx: 360 },
+      { id: 'top3', cols: 6, heightPx: 0 },
+      { id: 'inbox', cols: 6, heightPx: 0 },
+      { id: 'life', cols: 12, heightPx: 0 },
+      { id: 'apps-dock', cols: 6, heightPx: 0 },
+      { id: 'recent', cols: 6, heightPx: 0 }
+    ];
+    const DASH_APP_CARDS = [
+      { id: 'app:ocr-extractor', app: 'ocr-extractor', icon: '📄', name: 'OCR 추출기', desc: 'HWP · PPTX · PDF 텍스트/OCR 전처리' },
+      { id: 'app:pdf-converter', app: 'pdf-converter', icon: '📕', name: 'PDF 변환기', desc: 'PPTX · HWP · Word · HTML · 이미지 → PDF' },
+      { id: 'app:screen-capture', app: 'screen-capture', icon: '📸', name: '화면 캡처', desc: 'PrintScreen 영역 지정 → 로컬 폴더 저장' },
+      { id: 'app:spreadsheet', app: 'spreadsheet', icon: '📊', name: '엑셀 시트', desc: '빈 시트 초안 열기 · 수식 · 표 분석' },
+      { id: 'app:origin', app: 'origin', icon: '📈', name: 'Origin 그래프', desc: '과학/공학 논문용 그래프 플로팅' },
+      { id: 'app:relation-map', app: 'relation-map', icon: '🕸️', name: 'PARA 관계 맵', desc: '프로젝트별 카드유형 클러스터 그래프' },
+      { id: 'app:markdown', app: 'markdown', icon: '📝', name: '새 마크다운', desc: '실시간 수식(e^5, a/b, int) MD 스튜디오' },
+      { id: 'app:calendar', view: 'calendar', icon: '📅', name: '구글 캘린더', desc: '일 · 주 · 월 블럭 일정 및 인박스 드래그 배치' }
+    ];
+    let dashWidgetPickerOpen = false;
+    let dragDashWidgetId = null;
+
+    function normalizeDashItem(x) {
+      const cols = Number.isFinite(Number(x?.cols))
+        ? Math.max(4, Math.min(12, Math.round(Number(x.cols))))
+        : (Number(x?.span || 1) >= 2 ? 12 : 6);
+      const heightPx = Number.isFinite(Number(x?.heightPx)) && Number(x.heightPx) >= 160
+        ? Math.min(920, Math.round(Number(x.heightPx)))
+        : 0;
+      return { id: String(x?.id || ''), cols, heightPx };
+    }
+
+    function loadDashLayout() {
+      try {
+        const raw = localStorage.getItem(DASH_LAYOUT_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            return parsed.map(normalizeDashItem).filter((x) => x.id);
+          }
+        }
+      } catch (_) {}
+      return DEFAULT_DASH_LAYOUT.map((x) => ({ ...x }));
+    }
+
+    function saveDashLayout(list) {
+      try { localStorage.setItem(DASH_LAYOUT_KEY, JSON.stringify(list)); } catch (_) {}
+    }
+
+    // ---- Render Home Dashboard Main View (Customizable Drag-and-Drop Widget Grid) ----
     function renderHomeView(canvas) {
+      Store.syncOverdueTasksToWaiting();
       const now = new Date();
       const kpis = computeKpis();
       const projects = getActiveProjects();
@@ -640,9 +939,14 @@
       const todayStr = hooks.getTodayYMD();
       const doneToday = Math.min(3, getDoneCoreTodayCount() + Number(dfp.completedDates?.[todayStr] || 0));
       const inbox = getUnifiedInboxData();
+      const periodBuckets = computeInboxPeriodBuckets();
       const recentDocs = getAllVisibleDocs()
         .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0))
         .slice(0, 4);
+      const wrCfg = Store.state.weeklyReviewConfig || { reviewWeekday: 0, lastReviewedDate: '' };
+      const isWeeklyReviewDay = Number(wrCfg.reviewWeekday) === now.getDay() && wrCfg.lastReviewedDate !== todayStr;
+      const dayKoNames = ['일요일', '월요일', '화요일', '수요일', '목요일', '금요일', '토요일'];
+      const activeLifeGoals = (Store.state.lifeGoals || []).filter((g) => g.title);
 
       const nextSched = hooks.computeNextScheduleInstance(dfp, now);
       const clockStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
@@ -661,6 +965,13 @@
       }
 
       canvas.innerHTML = `
+        ${isWeeklyReviewDay ? `
+          <div class="sb-review-alarm-banner">
+            <span>🗓️ 오늘은 매주 설정하신 <b>주간 리뷰할 시간 (${dayKoNames[wrCfg.reviewWeekday]})</b>입니다! 수신함 · 대기 목록 · 언젠가 목록을 점검해 보세요.</span>
+            <button type="button" class="sb-btn-primary-sm" data-jump-view="review">주간 리뷰 시작 →</button>
+          </div>
+        ` : ''}
+
         <!-- Greeting & Clock/Schedule Header -->
         <header class="sb-home-header">
           <div>
@@ -675,6 +986,20 @@
             </button>
           </div>
         </header>
+
+        <!-- Life Goals 5 Strip -->
+        <section class="sb-goals-strip">
+          <div class="sb-goals-strip-left">
+            <span class="sb-goals-strip-title">🎯 인생 중요 목표</span>
+            ${activeLifeGoals.length > 0
+              ? activeLifeGoals.map((g) => {
+                  const pCnt = projects.filter((p) => p.lifeGoalId === g.id).length;
+                  return `<span class="sb-goal-chip" style="--gcol:${esc(g.color || '#4f46e5')}" title="${esc(g.desc || g.title)}">${esc(g.title)}${pCnt > 0 ? ` · ${pCnt}` : ''}</span>`;
+                }).join('')
+              : `<span class="sb-goals-empty">아직 인생 중요 목표 5가지를 설정하지 않았습니다</span>`}
+          </div>
+          <button type="button" class="sb-link-btn" id="sb-btn-edit-life-goals">목표 5가지 설정 →</button>
+        </section>
 
         <!-- 4 KPI Cards -->
         <section class="sb-kpi-grid">
@@ -700,26 +1025,77 @@
           </button>
         </section>
 
-        <!-- Main 2-Column Workspace Grid -->
-        <section class="sb-home-grid">
-          <!-- Left: Active Projects Table -->
-          <div class="sb-card sb-projects-card">
-            <div class="sb-card-head">
-              <div class="sb-card-title-wrap">
-                <span class="sb-card-ico">${svg('project', 16)}</span>
-                <h2 class="sb-card-title">진행 중 프로젝트</h2>
-              </div>
-              <div class="sb-card-head-actions">
-                <button type="button" class="sb-link-btn" id="sb-btn-new-proj-inline">＋ 추가</button>
-                <button type="button" class="sb-link-btn" data-jump-view="project">모든 프로젝트 보기 ${svg('arrowRight', 13)}</button>
+        <!-- Dashboard Layout Customization Toolbar -->
+        <div class="sb-dash-design-bar">
+          <span class="sb-muted-sm">⋮⋮ 상단 드래그로 위치 이동 · ↘ 우하단 모서리 드래그로 위젯 가로·세로 크기 자유 조절</span>
+          <div class="sb-dash-design-acts">
+            <button type="button" class="sb-btn-subtle" id="sb-toggle-widget-picker">🧩 위젯 · 앱 배치</button>
+            <button type="button" class="sb-link-btn" id="sb-reset-dash-layout">↺ 기본 배치</button>
+          </div>
+        </div>
+
+        <section class="sb-card sb-widget-picker${dashWidgetPickerOpen ? '' : ' is-hidden'}" id="sb-widget-picker">
+          <div class="sb-wp-title">대시보드에 배치할 위젯 및 내장 앱을 선택하세요 (드래그로 위치 이동 · 모서리 드래그로 크기 조절)</div>
+          <div class="sb-wp-grid" id="sb-wp-grid"></div>
+        </section>
+
+        <!-- Drag-and-Drop & Drag-Resizable 12-Column Widget Grid -->
+        <section class="sb-dash-grid" id="sb-dash-grid"></section>
+      `;
+
+      const dashLayout = loadDashLayout();
+      const dashGridEl = $('sb-dash-grid');
+
+      const buildWidgetHtml = (w) => {
+        const cols = Math.max(4, Math.min(12, Number(w.cols || 6)));
+        const hStyle = w.heightPx >= 160 ? `height:${w.heightPx}px;` : '';
+        const wrap = (id, innerHtml, removable = false) => `
+          <div class="sb-dash-widget${w.heightPx >= 160 ? ' has-custom-h' : ''}" draggable="true" data-wid="${esc(id)}" data-cols="${cols}" style="grid-column: span ${cols}; ${hStyle}">
+            <div class="sb-dash-wbar">
+              <span class="sb-dash-drag-grip" title="드래그하여 위치 이동">⋮⋮ 이동</span>
+              <div class="sb-dash-wctrls">
+                <button type="button" class="sb-dash-wbtn" data-wspan="${esc(id)}" title="가로 폭 빠른 전환 (${cols}/12칸)">${cols >= 10 ? '◫ 반폭' : '⬌ 전체폭'}</button>
+                ${removable ? `<button type="button" class="sb-dash-wbtn is-del" data-wrem="${esc(id)}" title="대시보드에서 제거">✕</button>` : ''}
               </div>
             </div>
-            <div id="sb-home-projects-body"></div>
+            <div class="sb-dash-wbody">${innerHtml}</div>
+            <div class="sb-dash-resize-handle" data-wresize="${esc(id)}" title="드래그하여 위젯 가로·세로 크기 조절">↘</div>
           </div>
+        `;
 
-          <!-- Right Column: Top 3 + Inbox -->
-          <div class="sb-home-right-col">
-            <!-- Today's Top 3 -->
+        if (w.id === 'calendar-widget') {
+          return wrap('calendar-widget', `
+            <div class="sb-card sb-gcal-home-card">
+              <div class="sb-card-head" style="margin-bottom:8px;">
+                <div class="sb-card-title-wrap">
+                  <span class="sb-card-ico">${svg('calendar', 16)}</span>
+                  <h2 class="sb-card-title">구글 캘린더 · 실시간 일정표</h2>
+                </div>
+              </div>
+              <div id="sb-home-gcal-widget" class="sb-home-gcal-widget"></div>
+            </div>
+          `, true);
+        }
+
+        if (w.id === 'projects') {
+          return wrap('projects', `
+            <div class="sb-card sb-projects-card">
+              <div class="sb-card-head">
+                <div class="sb-card-title-wrap">
+                  <span class="sb-card-ico">${svg('project', 16)}</span>
+                  <h2 class="sb-card-title">진행 중 프로젝트</h2>
+                </div>
+                <div class="sb-card-head-actions">
+                  <button type="button" class="sb-link-btn" id="sb-btn-new-proj-inline">＋ 추가</button>
+                  <button type="button" class="sb-link-btn" data-jump-view="project">모든 프로젝트 보기 ${svg('arrowRight', 13)}</button>
+                </div>
+              </div>
+              <div id="sb-home-projects-body"></div>
+            </div>
+          `);
+        }
+        if (w.id === 'top3') {
+          return wrap('top3', `
             <div class="sb-card sb-top3-card">
               <div class="sb-card-head">
                 <div class="sb-card-title-wrap">
@@ -738,8 +1114,10 @@
                 <button type="button" class="sb-link-btn" data-jump-inbox-tab="tasks">전체 보기 ${svg('arrowRight', 13)}</button>
               </div>
             </div>
-
-            <!-- Unified Inbox Preview Card -->
+          `);
+        }
+        if (w.id === 'inbox') {
+          return wrap('inbox', `
             <div class="sb-card sb-inbox-card">
               <div class="sb-card-head">
                 <div class="sb-card-title-wrap">
@@ -748,11 +1126,16 @@
                 </div>
                 <div class="sb-card-head-actions">
                   <button type="button" class="sb-link-btn" id="sb-toggle-quick-memo">＋ 빠른 메모</button>
-                  <button type="button" class="sb-link-btn" data-jump-view="inbox">모든 수신함 보기 ${svg('arrowRight', 13)}</button>
+                  <button type="button" class="sb-link-btn" data-jump-view="calendar">📅 캘린더</button>
                 </div>
               </div>
-              <div class="sb-inbox-sub">분류되지 않은 항목 · ${inbox.totalCount}건</div>
-
+              <div class="sb-home-inbox-tabs" id="sb-home-inbox-tabs">
+                <button type="button" class="sb-hi-tab${homeInboxTab === 'all' ? ' active' : ''}" data-hitab="all">전체 <span>${inbox.totalCount}</span></button>
+                <button type="button" class="sb-hi-tab${homeInboxTab === 'overdue' ? ' active' : ''}${periodBuckets.overdueDocs.length > 0 ? ' is-danger' : ''}" data-hitab="overdue">기간지남 <span>${periodBuckets.overdueDocs.length}</span></button>
+                <button type="button" class="sb-hi-tab${homeInboxTab === 'today' ? ' active' : ''}" data-hitab="today">오늘 할일 <span>${periodBuckets.todayDocs.length}</span></button>
+                <button type="button" class="sb-hi-tab${homeInboxTab === 'tomorrow' ? ' active' : ''}" data-hitab="tomorrow">내일 할일 <span>${periodBuckets.tomorrowDocs.length}</span></button>
+                <button type="button" class="sb-hi-tab${homeInboxTab === 'week' ? ' active' : ''}" data-hitab="week">이번 주 <span>${periodBuckets.weekDocs.length}</span></button>
+              </div>
               <div class="sb-quick-composer${showInlineComposer ? '' : ' is-hidden'}" id="sb-inline-composer">
                 <div class="sb-qm-top-row">
                   <input type="text" id="sb-qm-title" class="sb-field-input" placeholder="제목 (비워두면 첫 줄 사용)">
@@ -760,90 +1143,329 @@
                     <option value="T">T 할일</option>
                     <option value="S" selected>S 자료</option>
                     <option value="R">R 산출물</option>
+                    <option value="M">◆ M 마일스톤</option>
                   </select>
                 </div>
-                <textarea id="sb-qm-body" rows="3" class="sb-field-textarea" placeholder="빠르게 기록하세요... PARA를 고르지 않으면 자동으로 수신함에 쌓입니다 (Ctrl+Enter)"></textarea>
+                <div class="sb-qm-period-row">
+                  <input type="date" id="sb-qm-start" class="sb-field-input" title="시작일">
+                  <span style="color:var(--text-muted); font-size:0.75rem;">~</span>
+                  <input type="date" id="sb-qm-end" class="sb-field-input" title="종료/마감일">
+                  <input type="time" id="sb-qm-stime" class="sb-field-input" style="max-width:102px;" title="시작 시간 (선택)">
+                  <button type="button" class="sb-mini-ghost" data-qm-preset="today">오늘</button>
+                  <button type="button" class="sb-mini-ghost" data-qm-preset="tomorrow">내일</button>
+                  <button type="button" class="sb-mini-ghost" data-qm-preset="week">이번주</button>
+                </div>
+                <textarea id="sb-qm-body" rows="2" class="sb-field-textarea" placeholder="빠르게 기록하세요... (Ctrl+Enter)"></textarea>
                 <div class="sb-qm-foot">
-                  <label class="sb-check-inline">
-                    <input type="checkbox" id="sb-qm-todo">
-                    <span>★ 오늘의 핵심에 올리기</span>
-                  </label>
+                  <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                    <label class="sb-check-inline">
+                      <input type="checkbox" id="sb-qm-todo">
+                      <span>★ 오늘의 핵심</span>
+                    </label>
+                    <label class="sb-check-inline">
+                      <input type="checkbox" id="sb-qm-sched">
+                      <span>📅 일정(스케줄) 태그</span>
+                    </label>
+                  </div>
                   <button type="button" class="sb-btn-primary-sm" id="sb-qm-save">저장</button>
                 </div>
               </div>
-
               <div class="sb-inbox-preview-list" id="sb-home-inbox-list"></div>
             </div>
-          </div>
-        </section>
-
-        <!-- Recent Materials 4-Card Strip -->
-        <section class="sb-card sb-recent-card">
-          <div class="sb-card-head">
-            <div class="sb-card-title-wrap">
-              <span class="sb-card-ico">${svg('doc', 16)}</span>
-              <h2 class="sb-card-title">최근 자료</h2>
-            </div>
-            <button type="button" class="sb-link-btn" id="sb-open-explorer-from-recent">탐색기에서 전체 보기 ${svg('arrowRight', 13)}</button>
-          </div>
-          <div class="sb-recent-grid" id="sb-home-recent-grid"></div>
-        </section>
-
-        <!-- Reverse-Time Schedule Traffic Light & Outing Checklist (Preserved Core Life Feature!) -->
-        <section class="sb-card sb-life-card" id="sb-life-card">
-          <div class="sb-life-bar-head" id="sb-life-toggle-bar">
-            <div class="sb-life-bar-left">
-              <span class="sb-life-live-dot" id="sb-life-live-dot"></span>
-              <span class="sb-life-bar-title">일정 신호등 · 외출 체크</span>
-              <span class="sb-life-bar-summary" id="sb-life-bar-summary"></span>
-            </div>
-            <div class="sb-life-bar-right">
-              <button type="button" class="sb-btn-subtle" id="sb-life-open-sched">일정 설정</button>
-              <span class="sb-life-chev">${svg(showLifeExpanded ? 'chevronDown' : 'chevronRight', 15)}</span>
-            </div>
-          </div>
-          <div class="sb-life-body${showLifeExpanded ? '' : ' is-hidden'}" id="sb-life-body">
-            <div id="dfp-traffic-bar" class="dfp-traffic-banner bar-safe">
-              <div class="dfp-traffic-inner">
-                <div class="dfp-traffic-signal-col">
-                  <div class="dfp-traffic-housing" aria-label="다음 일정 신호등">
-                    <div id="dfp-bulb-green" class="dfp-bulb bulb-green-off"></div>
-                    <div id="dfp-bulb-yellow" class="dfp-bulb bulb-yellow-off"></div>
-                    <div id="dfp-bulb-red" class="dfp-bulb bulb-red-off"></div>
-                  </div>
-                  <span id="dfp-traffic-badge" class="dfp-traffic-badge">여유</span>
+          `);
+        }
+        if (w.id === 'apps-dock') {
+          return wrap('apps-dock', `
+            <div class="sb-card sb-apps-dock-card">
+              <div class="sb-card-head">
+                <div class="sb-card-title-wrap">
+                  <span class="sb-card-ico">${svg('apps', 16)}</span>
+                  <h2 class="sb-card-title">내장 앱 빠른 실행</h2>
                 </div>
-                <div class="dfp-traffic-center">
-                  <div class="dfp-countdown-row">
-                    <h3 id="dfp-countdown-headline" class="dfp-countdown-headline">예정된 일정 없음</h3>
-                  </div>
-                  <div class="dfp-progress-track">
-                    <div id="dfp-schedule-progress" class="dfp-progress-fill"></div>
-                  </div>
-                  <div id="dfp-timeline-summary" class="dfp-timeline-summary"></div>
+                <button type="button" class="sb-link-btn" id="sb-dock-add-pinned">＋ 앱 고정</button>
+              </div>
+              <div class="sb-apps-dock-grid">
+                ${DASH_APP_CARDS.map((ac) => `
+                  <button type="button" class="sb-dock-tile" ${ac.app ? `data-dock-app="${esc(ac.app)}"` : `data-jump-view="${esc(ac.view)}"`} title="${esc(ac.desc)}">
+                    <span class="sb-dock-ico">${ac.icon}</span>
+                    <span class="sb-dock-name">${esc(ac.name)}</span>
+                  </button>
+                `).join('')}
+              </div>
+            </div>
+          `, true);
+        }
+        if (w.id === 'recent') {
+          return wrap('recent', `
+            <div class="sb-card sb-recent-card">
+              <div class="sb-card-head">
+                <div class="sb-card-title-wrap">
+                  <span class="sb-card-ico">${svg('doc', 16)}</span>
+                  <h2 class="sb-card-title">최근 자료</h2>
                 </div>
-                <div class="dfp-traffic-right">
-                  <div class="dfp-outing-box">
-                    <div class="dfp-outing-head">
-                      <span>외출 체크</span>
-                      <div class="sb-flex-gap-xs">
-                        <button type="button" id="dfp-toggle-checklist-add" class="dfp-mini-icon-btn" title="체크 항목 추가">＋</button>
-                        <button type="button" id="dfp-reset-checklist" class="dfp-mini-icon-btn" title="체크 초기화">↺</button>
+                <button type="button" class="sb-link-btn" id="sb-open-explorer-from-recent">탐색기에서 전체 보기 ${svg('arrowRight', 13)}</button>
+              </div>
+              <div class="sb-recent-grid" id="sb-home-recent-grid"></div>
+            </div>
+          `, true);
+        }
+        if (w.id === 'life') {
+          return wrap('life', `
+            <div class="sb-card sb-life-card" id="sb-life-card">
+              <div class="sb-life-bar-head" id="sb-life-toggle-bar">
+                <div class="sb-life-bar-left">
+                  <span class="sb-life-live-dot" id="sb-life-live-dot"></span>
+                  <span class="sb-life-bar-title">일정 신호등 · 외출 체크</span>
+                  <span class="sb-life-bar-summary" id="sb-life-bar-summary"></span>
+                </div>
+                <div class="sb-life-bar-right">
+                  <button type="button" class="sb-btn-subtle" id="sb-life-open-sched">일정 설정</button>
+                  <span class="sb-life-chev">${svg(showLifeExpanded ? 'chevronDown' : 'chevronRight', 15)}</span>
+                </div>
+              </div>
+              <div class="sb-life-body${showLifeExpanded ? '' : ' is-hidden'}" id="sb-life-body">
+                <div id="dfp-traffic-bar" class="dfp-traffic-banner bar-safe">
+                  <div class="dfp-traffic-inner">
+                    <div class="dfp-traffic-signal-col">
+                      <div class="dfp-traffic-housing" aria-label="다음 일정 신호등">
+                        <div id="dfp-bulb-green" class="dfp-bulb bulb-green-off"></div>
+                        <div id="dfp-bulb-yellow" class="dfp-bulb bulb-yellow-off"></div>
+                        <div id="dfp-bulb-red" class="dfp-bulb bulb-red-off"></div>
+                      </div>
+                      <span id="dfp-traffic-badge" class="dfp-traffic-badge">여유</span>
+                    </div>
+                    <div class="dfp-traffic-center">
+                      <div class="dfp-countdown-row">
+                        <h3 id="dfp-countdown-headline" class="dfp-countdown-headline">예정된 일정 없음</h3>
+                      </div>
+                      <div class="dfp-progress-track">
+                        <div id="dfp-schedule-progress" class="dfp-progress-fill"></div>
+                      </div>
+                      <div id="dfp-timeline-summary" class="dfp-timeline-summary"></div>
+                      <div id="dfp-live-calc-row" class="dfp-live-calc-row is-hidden">
+                        <label class="dfp-live-field">🚌 이동 <input type="number" id="dfp-live-travel" min="0" max="300" step="5" value="30">분</label>
+                        <label class="dfp-live-field">☕ 여유 <input type="number" id="dfp-live-buffer" min="0" max="180" step="5" value="10">분</label>
+                        <span class="dfp-live-depart-pill">→ 출발 시작 <strong id="dfp-live-depart-time">--:--</strong></span>
                       </div>
                     </div>
-                    <div id="dfp-checklist-items" class="dfp-outing-chips"></div>
-                    <form id="dfp-checklist-form" class="dfp-checklist-form is-hidden">
-                      <input type="text" id="dfp-checklist-input" placeholder="항목 추가..." maxlength="15" class="dfp-input-sm">
-                      <button type="submit" class="dfp-btn-dark-sm">추가</button>
-                    </form>
+                    <div class="dfp-traffic-right">
+                      <div class="dfp-outing-box">
+                        <div class="dfp-outing-head">
+                          <span>외출 체크</span>
+                          <div class="sb-flex-gap-xs">
+                            <button type="button" id="dfp-toggle-checklist-add" class="dfp-mini-icon-btn" title="체크 항목 추가">＋</button>
+                            <button type="button" id="dfp-reset-checklist" class="dfp-mini-icon-btn" title="체크 초기화">↺</button>
+                          </div>
+                        </div>
+                        <div id="dfp-checklist-items" class="dfp-outing-chips"></div>
+                        <form id="dfp-checklist-form" class="dfp-checklist-form is-hidden">
+                          <input type="text" id="dfp-checklist-input" placeholder="항목 추가..." maxlength="15" class="dfp-input-sm">
+                          <button type="submit" class="dfp-btn-dark-sm">추가</button>
+                        </form>
+                      </div>
+                      <button type="button" id="dfp-complete-schedule-btn" class="dfp-depart-btn is-hidden">✓ 출발 완료</button>
+                    </div>
                   </div>
-                  <button type="button" id="dfp-complete-schedule-btn" class="dfp-depart-btn is-hidden">✓ 출발 완료</button>
                 </div>
               </div>
             </div>
-          </div>
-        </section>
-      `;
+          `, true);
+        }
+        const appDef = DASH_APP_CARDS.find((a) => a.id === w.id);
+        if (appDef) {
+          return wrap(w.id, `
+            <div class="sb-card sb-app-widget-card">
+              <div class="sb-app-widget-body">
+                <div class="sb-app-widget-ico">${appDef.icon}</div>
+                <div class="sb-app-widget-info">
+                  <div class="sb-app-widget-name">${esc(appDef.name)}</div>
+                  <div class="sb-muted-sm">${esc(appDef.desc)}</div>
+                </div>
+                <button type="button" class="sb-btn-primary-sm" ${appDef.app ? `data-dock-app="${esc(appDef.app)}"` : `data-jump-view="${esc(appDef.view)}"`}>열기 →</button>
+              </div>
+            </div>
+          `, true);
+        }
+        return '';
+      };
+
+      if (dashGridEl) dashGridEl.innerHTML = dashLayout.map(buildWidgetHtml).join('');
+
+      const wpGrid = $('sb-wp-grid');
+      if (wpGrid) {
+        const activeIds = new Set(dashLayout.map((x) => x.id));
+        const catalog = [
+          { id: 'projects', icon: '🚀', name: '진행 중 프로젝트' },
+          { id: 'calendar-widget', icon: '📅', name: '구글 캘린더 (실시간 시간표)' },
+          { id: 'top3', icon: '⭐', name: '오늘의 핵심 3가지' },
+          { id: 'inbox', icon: '📥', name: '수신함 (기간별 탭)' },
+          { id: 'apps-dock', icon: '⚡', name: '내장 앱 빠른 실행 보드' },
+          { id: 'recent', icon: '📄', name: '최근 자료' },
+          { id: 'life', icon: '🚦', name: '일정 신호등 · 외출 체크' },
+          ...DASH_APP_CARDS.map((a) => ({ id: a.id, icon: a.icon, name: `${a.name} 앱 카드` }))
+        ];
+        wpGrid.innerHTML = catalog.map((c) => `
+          <label class="sb-wp-item${activeIds.has(c.id) ? ' active' : ''}">
+            <input type="checkbox" data-wp-toggle="${esc(c.id)}" ${activeIds.has(c.id) ? 'checked' : ''}>
+            <span>${c.icon} ${esc(c.name)}</span>
+          </label>
+        `).join('');
+        wpGrid.querySelectorAll('[data-wp-toggle]').forEach((chk) => {
+          chk.addEventListener('change', () => {
+            const wid = chk.dataset.wpToggle;
+            const cur = loadDashLayout();
+            if (chk.checked) {
+              if (!cur.some((x) => x.id === wid)) {
+                cur.push({
+                  id: wid,
+                  cols: wid === 'life' ? 12 : 6,
+                  heightPx: wid === 'calendar-widget' ? 360 : 0
+                });
+              }
+            } else {
+              const idx = cur.findIndex((x) => x.id === wid);
+              if (idx >= 0) cur.splice(idx, 1);
+            }
+            saveDashLayout(cur);
+            renderAll();
+          });
+        });
+      }
+
+      $('sb-toggle-widget-picker')?.addEventListener('click', () => {
+        dashWidgetPickerOpen = !dashWidgetPickerOpen;
+        $('sb-widget-picker')?.classList.toggle('is-hidden', !dashWidgetPickerOpen);
+      });
+      $('sb-reset-dash-layout')?.addEventListener('click', () => {
+        saveDashLayout(DEFAULT_DASH_LAYOUT.map((x) => ({ ...x })));
+        hooks.showToast('↺ 대시보드 기본 배치로 복원되었습니다.');
+        renderAll();
+      });
+      $('sb-dock-add-pinned')?.addEventListener('click', () => hooks.openPinAppModal?.());
+      canvas.querySelectorAll('[data-dock-app]').forEach((b) => {
+        b.addEventListener('click', () => hooks.launchBuiltinApp?.(b.dataset.dockApp));
+      });
+      canvas.querySelectorAll('[data-wspan]').forEach((b) => {
+        b.addEventListener('click', () => {
+          const cur = loadDashLayout();
+          const item = cur.find((x) => x.id === b.dataset.wspan);
+          if (item) {
+            item.cols = Number(item.cols || 6) >= 10 ? 6 : 12;
+            saveDashLayout(cur);
+            renderAll();
+          }
+        });
+      });
+      canvas.querySelectorAll('[data-wrem]').forEach((b) => {
+        b.addEventListener('click', () => {
+          const cur = loadDashLayout().filter((x) => x.id !== b.dataset.wrem);
+          saveDashLayout(cur);
+          renderAll();
+        });
+      });
+
+      // Drag-Resize Dashboard Widgets (Width in 12-col steps + Height in px)!
+      canvas.querySelectorAll('[data-wresize]').forEach((handle) => {
+        handle.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const wid = handle.dataset.wresize;
+          const wEl = handle.closest('.sb-dash-widget');
+          if (!wEl || !dashGridEl) return;
+
+          const gridRect = dashGridEl.getBoundingClientRect();
+          const startRect = wEl.getBoundingClientRect();
+          const startX = e.clientX;
+          const startY = e.clientY;
+          const origW = startRect.width;
+          const origH = startRect.height;
+          let latestCols = Number(wEl.dataset.cols || 6);
+          let latestH = Math.round(origH);
+          const colUnit = Math.max(40, gridRect.width / 12);
+
+          wEl.setAttribute('draggable', 'false');
+          wEl.classList.add('is-resizing', 'has-custom-h');
+
+          const pill = document.createElement('div');
+          pill.className = 'sb-dash-resize-pill';
+          wEl.appendChild(pill);
+
+          const updatePill = () => {
+            pill.textContent = `${latestCols}/12폭 · ${latestH}px`;
+          };
+          updatePill();
+
+          const onMove = (mv) => {
+            const dx = mv.clientX - startX;
+            const dy = mv.clientY - startY;
+            const targetW = Math.max(colUnit * 4, Math.min(gridRect.width, origW + dx));
+            latestCols = Math.max(4, Math.min(12, Math.round(targetW / colUnit)));
+            latestH = Math.max(180, Math.min(900, Math.round(origH + dy)));
+            wEl.style.gridColumn = `span ${latestCols}`;
+            wEl.style.height = `${latestH}px`;
+            wEl.dataset.cols = String(latestCols);
+            updatePill();
+          };
+
+          const onUp = () => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            wEl.setAttribute('draggable', 'true');
+            wEl.classList.remove('is-resizing');
+            pill.remove();
+            const cur = loadDashLayout();
+            const item = cur.find((x) => x.id === wid);
+            if (item) {
+              item.cols = latestCols;
+              item.heightPx = latestH;
+              saveDashLayout(cur);
+            }
+            hooks.showToast(`📐 위젯 크기 저장 (${latestCols}/12폭 · ${latestH}px)`);
+          };
+
+          document.addEventListener('mousemove', onMove);
+          document.addEventListener('mouseup', onUp);
+        });
+      });
+
+      // Drag-and-Drop Widget Swapping & Pushing!
+      canvas.querySelectorAll('.sb-dash-widget[data-wid]').forEach((wEl) => {
+        wEl.addEventListener('dragstart', (e) => {
+          if (e.target.closest('input, textarea, select, button, .sb-dash-resize-handle')) {
+            e.preventDefault();
+            return;
+          }
+          dragDashWidgetId = wEl.dataset.wid;
+          wEl.classList.add('is-dragging');
+          e.dataTransfer.effectAllowed = 'move';
+          try { e.dataTransfer.setData('text/plain', dragDashWidgetId); } catch (_) {}
+        });
+        wEl.addEventListener('dragend', () => {
+          dragDashWidgetId = null;
+          canvas.querySelectorAll('.sb-dash-widget').forEach((x) => x.classList.remove('is-dragging', 'is-drop-target'));
+        });
+        wEl.addEventListener('dragover', (e) => {
+          if (!dragDashWidgetId || dragDashWidgetId === wEl.dataset.wid) return;
+          e.preventDefault();
+          wEl.classList.add('is-drop-target');
+        });
+        wEl.addEventListener('dragleave', () => wEl.classList.remove('is-drop-target'));
+        wEl.addEventListener('drop', (e) => {
+          e.preventDefault();
+          wEl.classList.remove('is-drop-target');
+          const targetId = wEl.dataset.wid;
+          if (!dragDashWidgetId || !targetId || dragDashWidgetId === targetId) return;
+          const cur = loadDashLayout();
+          const fromIdx = cur.findIndex((x) => x.id === dragDashWidgetId);
+          const toIdx = cur.findIndex((x) => x.id === targetId);
+          if (fromIdx < 0 || toIdx < 0) return;
+          const [moved] = cur.splice(fromIdx, 1);
+          cur.splice(toIdx, 0, moved);
+          saveDashLayout(cur);
+          hooks.showToast('🧩 대시보드 위젯 배치가 변경되었습니다.');
+          renderAll();
+        });
+      });
 
       // Bind view jumps
       canvas.querySelectorAll('[data-jump-view]').forEach((el) => {
@@ -872,6 +1494,7 @@
         if (chev) chev.innerHTML = svg(showLifeExpanded ? 'chevronDown' : 'chevronRight', 15);
       });
       $('sb-btn-new-proj-inline')?.addEventListener('click', () => openProjectModal(null, 'project'));
+      $('sb-btn-edit-life-goals')?.addEventListener('click', () => gtd?.openLifeGoalsModal());
       $('sb-open-explorer-from-recent')?.addEventListener('click', () => hooks.setHomeMode(false));
 
       // Fill Projects Table
@@ -903,19 +1526,74 @@
         $('sb-inline-composer')?.classList.toggle('is-hidden', !showInlineComposer);
         if (showInlineComposer) $('sb-qm-body')?.focus();
       });
+      // Home Inbox Direct Tabs
+      canvas.querySelectorAll('[data-hitab]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          homeInboxTab = btn.dataset.hitab || 'all';
+          renderAll();
+        });
+      });
+
+      // Home Quick Memo Period Presets
+      canvas.querySelectorAll('[data-qm-preset]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const p = btn.dataset.qmPreset;
+          if ($('sb-qm-role')) $('sb-qm-role').value = 'T';
+          if (p === 'today') {
+            if ($('sb-qm-start')) $('sb-qm-start').value = periodBuckets.todayYmd;
+            if ($('sb-qm-end')) $('sb-qm-end').value = periodBuckets.todayYmd;
+          } else if (p === 'tomorrow') {
+            if ($('sb-qm-start')) $('sb-qm-start').value = periodBuckets.tomorrowYmd;
+            if ($('sb-qm-end')) $('sb-qm-end').value = periodBuckets.tomorrowYmd;
+          } else if (p === 'week') {
+            if ($('sb-qm-start')) $('sb-qm-start').value = periodBuckets.todayYmd;
+            if ($('sb-qm-end')) $('sb-qm-end').value = periodBuckets.weekEndYmd;
+          }
+        });
+      });
+
       const doQuickSave = () => {
         const title = $('sb-qm-title')?.value || '';
         const body = $('sb-qm-body')?.value || '';
         const role = $('sb-qm-role')?.value || 'S';
         const isCore = Boolean($('sb-qm-todo')?.checked);
+        const isSched = Boolean($('sb-qm-sched')?.checked);
+        const startDate = String($('sb-qm-start')?.value || '').trim();
+        const endDate = String($('sb-qm-end')?.value || '').trim();
+        const startTime = String($('sb-qm-stime')?.value || '').trim();
         if (!String(title).trim() && !String(body).trim()) return;
         showInlineComposer = false;
-        captureQuickMemo({
+        const created = captureQuickMemo({
           title,
           body,
-          cardRole: isCore && role === 'S' ? 'T' : role,
-          isTodayCore: isCore
+          cardRole: (isCore || isSched || startDate || endDate) && role === 'S' ? 'T' : role,
+          isTodayCore: isCore,
+          coreTime: startTime
         });
+        if (created) {
+          const finalStart = startDate || endDate || (isSched ? hooks.getTodayYMD() : '');
+          const finalEnd = endDate || finalStart;
+          if (finalStart) {
+            Store.updateCardSchedule(created, { startDate: finalStart, endDate: finalEnd });
+          }
+          if (startTime) {
+            created.startTime = startTime;
+            created.coreTime = startTime;
+            const [sh, sm] = startTime.split(':').map(Number);
+            const endM = Math.min(23 * 60 + 55, (sh || 0) * 60 + (sm || 0) + 60);
+            created.endTime = `${String(Math.floor(endM / 60)).padStart(2, '0')}:${String(endM % 60).padStart(2, '0')}`;
+          }
+          if (isSched) {
+            created.isSchedule = true;
+            created.travelMins = 30;
+            created.bufferMins = 10;
+            const curTags = Store.getCardTags(created);
+            if (!curTags.includes('일정')) Store.setCardTags(created, ['일정', ...curTags]);
+          }
+          Store.touchNode(created);
+          hooks.saveAndRender();
+          renderAll();
+        }
       };
       $('sb-qm-save')?.addEventListener('click', doQuickSave);
       $('sb-qm-body')?.addEventListener('keydown', (e) => {
@@ -925,8 +1603,19 @@
         }
       });
 
-      // Fill Inbox Preview List
-      renderInboxPreviewInto($('sb-home-inbox-list'), inbox);
+      // Fill Live Google Calendar Widget if placed on Dashboard
+      const gcalWidgetHost = $('sb-home-gcal-widget');
+      if (gcalWidgetHost) {
+        getGoogleCalendar()?.renderDashboardCalendarWidget(gcalWidgetHost, {
+          onOpenFullCalendar: () => {
+            activeView = 'calendar';
+            renderAll();
+          }
+        });
+      }
+
+      // Fill Inbox Preview List (filtered by active Home Inbox Tab)
+      renderInboxPreviewInto($('sb-home-inbox-list'), inbox, periodBuckets);
 
       // Fill Recent Materials
       renderRecentDocsInto($('sb-home-recent-grid'), recentDocs);
@@ -949,30 +1638,62 @@
         return;
       }
 
+      // Sort hierarchically (Lv.1 parent followed immediately by Lv.2/Lv.3 children)
+      const projMap = new Map(projects.map((p) => [p.id, p]));
+      const childrenByParent = new Map();
+      const roots = [];
+      projects.forEach((p) => {
+        if (p.parentProjectId && projMap.has(p.parentProjectId)) {
+          if (!childrenByParent.has(p.parentProjectId)) childrenByParent.set(p.parentProjectId, []);
+          childrenByParent.get(p.parentProjectId).push(p);
+        } else {
+          roots.push(p);
+        }
+      });
+      const flatHierarchy = [];
+      const walkH = (list, visited = new Set()) => {
+        list.forEach((p) => {
+          if (visited.has(p.id)) return;
+          visited.add(p.id);
+          flatHierarchy.push(p);
+          if (childrenByParent.has(p.id)) walkH(childrenByParent.get(p.id), visited);
+        });
+      };
+      walkH(roots);
+
       container.innerHTML = `
         <div class="sb-proj-table">
           <div class="sb-proj-thead">
-            <span>프로젝트</span>
+            <span>프로젝트 (드래그로 상하관계 설정)</span>
             <span>진행도</span>
             <span>마감까지</span>
             <span>상태</span>
             <span>작업</span>
           </div>
-          ${projects.map((p) => {
+          ${flatHierarchy.map((p) => {
             const dday = computeDdayInfo(p.dueDate);
             const isHold = p.status === 'hold';
             const statusText = isHold ? '보류' : '진행';
             const prog = Math.max(0, Math.min(100, Number(p.progress || 0)));
             const linkedCnt = getLinkedCount(p.id);
             const code = Store.getParaCode(p);
+            const lv = Store.getProjectLevel(p.id);
+            const missedCnt = Store.getProjectOverdueMissedTasks(p.id, hooks.isItemVisible).length;
+            const indentPx = Math.min(lv - 1, 3) * 18;
             return `
-              <div class="sb-proj-row" data-pid="${esc(p.id)}">
-                <button type="button" class="sb-proj-name-btn" data-pact="detail" title="클릭하여 프로젝트 내부 구성·간트차트·리스크 보기 (${linkedCnt}건)">
-                  <span class="sb-proj-dot ${isHold ? 'is-hold' : 'is-active'}"></span>
-                  <span class="sb-code-pill-xs">${esc(code)}</span>
-                  <span class="sb-proj-name">${esc(p.name)}</span>
-                  ${linkedCnt > 0 ? `<span class="sb-proj-linked-mini">${linkedCnt}</span>` : ''}
-                </button>
+              <div class="sb-proj-row${missedCnt > 0 ? ' is-overdue-row' : ''}" draggable="true" data-pid="${esc(p.id)}">
+                <div class="sb-proj-name-wrap" style="padding-left:${indentPx}px">
+                  ${lv > 1 ? `<span class="sb-sub-arrow">↳</span>` : ''}
+                  <button type="button" class="sb-proj-name-btn" data-pact="detail" title="클릭하여 프로젝트 상세 열기 · 드래그하여 다른 프로젝트 하위로 이동">
+                    <span class="sb-proj-dot ${missedCnt > 0 ? 'is-overdue' : (isHold ? 'is-hold' : 'is-active')}"></span>
+                    <span class="sb-lv-badge">Lv.${lv}</span>
+                    <span class="sb-code-pill-xs">${esc(code)}</span>
+                    <span class="sb-proj-name">${esc(p.name)}</span>
+                    ${missedCnt > 0 ? `<span class="sb-overdue-badge">누락 ${missedCnt}</span>` : ''}
+                    ${linkedCnt > 0 ? `<span class="sb-proj-linked-mini">${linkedCnt}</span>` : ''}
+                  </button>
+                  ${lv > 1 ? `<button type="button" class="sb-mini-icon-act" data-pact="unnest" title="상하관계 해제 (Lv.1)">⤴</button>` : ''}
+                </div>
                 <div class="sb-proj-prog-cell" data-pact="step-prog" title="클릭하여 진행도 +10% 조절">
                   <div class="sb-prog-track"><div class="sb-prog-fill" style="width:${prog}%"></div></div>
                   <span class="sb-prog-pct">${prog}%</span>
@@ -997,8 +1718,42 @@
         const ent = Store.findParaEntity(pid);
         if (!ent) return;
 
+        row.addEventListener('dragstart', (e) => {
+          dragProjectId = pid;
+          row.classList.add('is-dragging');
+          e.dataTransfer.effectAllowed = 'move';
+        });
+        row.addEventListener('dragend', () => {
+          dragProjectId = null;
+          row.classList.remove('is-dragging');
+          container.querySelectorAll('.sb-proj-row').forEach((r) => r.classList.remove('is-drag-over'));
+        });
+        row.addEventListener('dragover', (e) => {
+          e.preventDefault();
+          if (dragProjectId && dragProjectId !== pid) row.classList.add('is-drag-over');
+        });
+        row.addEventListener('dragleave', () => row.classList.remove('is-drag-over'));
+        row.addEventListener('drop', (e) => {
+          e.preventDefault();
+          row.classList.remove('is-drag-over');
+          if (!dragProjectId || dragProjectId === pid) return;
+          if (Store.setProjectParent(dragProjectId, pid)) {
+            const childEnt = Store.findParaEntity(dragProjectId);
+            hooks.saveAndRender();
+            renderAll();
+            hooks.showToast(`📂 "${childEnt?.name || ''}" → "${ent.name}" 하위(Lv.${Store.getProjectLevel(dragProjectId)})로 편입됨`);
+          }
+        });
+
         row.querySelector('[data-pact="detail"]')?.addEventListener('click', () => {
           openProjectDetail(ent.id, 'cards');
+        });
+        row.querySelector('[data-pact="unnest"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          Store.setProjectParent(ent.id, '');
+          hooks.saveAndRender();
+          renderAll();
+          hooks.showToast(`⤴ "${ent.name}" 상하관계가 해제되어 Lv.1이 되었습니다.`);
         });
         row.querySelectorAll('[data-pact="edit"]').forEach((b) => {
           b.addEventListener('click', () => openProjectModal(ent, 'project'));
@@ -1016,10 +1771,14 @@
           hooks.showToast(`"${ent.name}" 상태: ${nextStatus === 'hold' ? '보류' : '진행'}`);
         });
         row.querySelector('[data-pact="complete"]')?.addEventListener('click', () => {
-          Store.completeAndArchiveProject(ent.id);
-          hooks.saveAndRender();
-          renderAll();
-          hooks.showToast(`"${ent.name}" 완료 후 보관함(Archives)으로 보냈습니다.`);
+          if (projectWorkspace) {
+            projectWorkspace.openProjectCompleteModal(ent, () => renderAll());
+          } else {
+            Store.completeAndArchiveProject(ent.id);
+            hooks.saveAndRender();
+            renderAll();
+            hooks.showToast(`"${ent.name}" 완료 후 보관함(Archives)으로 보냈습니다.`);
+          }
         });
       });
     }
@@ -1085,7 +1844,7 @@
           else expandedDashIds.add(child.id);
           renderAll();
         });
-        row.querySelector('[data-sact="open"]')?.addEventListener('click', () => hooks.launchItemDirectly(child));
+        row.querySelector('[data-sact="open"]')?.addEventListener('click', () => openCardProps(child));
         row.querySelector('[data-sact="cycle-role"]')?.addEventListener('click', (e) => {
           e.stopPropagation();
           const cur = Store.getCardRole(child);
@@ -1213,7 +1972,7 @@
           else expandedDashIds.add(doc.id);
           renderAll();
         });
-        block.querySelector('[data-cact="open"]')?.addEventListener('click', () => hooks.launchItemDirectly(doc));
+        block.querySelector('[data-cact="open"]')?.addEventListener('click', () => openCardProps(doc));
         block.querySelector('[data-cact="complete"]')?.addEventListener('click', () => {
           if (projectWorkspace) projectWorkspace.openTaskCompletionModal(doc);
           else {
@@ -1286,19 +2045,33 @@
       return `${ampm} ${h12}:${mm}`;
     }
 
-    function renderInboxPreviewInto(container, inbox) {
+    function renderInboxPreviewInto(container, inbox, buckets = null) {
       if (!container) return;
-      // Show only root-level unassigned docs (sub-cards appear nested under their parent!)
-      const unassignedIdSet = new Set(inbox.unassignedDocs.map((d) => d.id));
-      const rootDocs = inbox.unassignedDocs
-        .filter((d) => !d.parentCardId || !unassignedIdSet.has(d.parentCardId))
-        .slice(0, 4);
+      const b = buckets || computeInboxPeriodBuckets();
+      let listSource = inbox.unassignedDocs;
+      if (homeInboxTab === 'overdue') listSource = b.overdueDocs;
+      else if (homeInboxTab === 'today') listSource = b.todayDocs;
+      else if (homeInboxTab === 'tomorrow') listSource = b.tomorrowDocs;
+      else if (homeInboxTab === 'week') listSource = b.weekDocs;
 
-      if (rootDocs.length === 0 && inbox.backlogTasks.length === 0) {
+      const sourceIdSet = new Set(listSource.map((d) => d.id));
+      const rootDocs = (homeInboxTab === 'all'
+        ? listSource.filter((d) => !d.parentCardId || !sourceIdSet.has(d.parentCardId))
+        : listSource
+      ).slice(0, 8);
+
+      if (rootDocs.length === 0 && (homeInboxTab !== 'all' || inbox.backlogTasks.length === 0)) {
+        const emptyMsgs = {
+          all: '수신함이 비어 있어요',
+          overdue: '기간이 지난 미완료 할일이 없어요 👍',
+          today: '오늘 예정된 할일이 없어요',
+          tomorrow: '내일 예정된 할일이 없어요',
+          week: '이번 주 예정된 할일이 없어요'
+        };
         container.innerHTML = `
           <div class="sb-empty-line">
-            <span>수신함이 비어 있어요</span>
-            <button type="button" class="sb-empty-cta" id="sb-empty-new-memo">· 빠른 메모 남기기</button>
+            <span>${emptyMsgs[homeInboxTab] || '항목이 비어 있어요'}</span>
+            <button type="button" class="sb-empty-cta" id="sb-empty-new-memo">· 빠른 메모/할일 추가</button>
           </div>
         `;
         $('sb-empty-new-memo')?.addEventListener('click', () => {
@@ -1315,20 +2088,24 @@
         const subKids = Store.getSubCards(doc.id, hooks.isItemVisible);
         const hasSub = subKids.length > 0;
         const isExp = expandedDashIds.has(doc.id);
+        const periodBadge = formatPeriodBadgeHtml(doc, b.todayYmd);
         return `
           <div class="sb-inbox-item-wrap" data-doc-id="${esc(doc.id)}">
-            <div class="sb-inbox-item">
+            <div class="sb-inbox-item${!doc.completed && doc.endDate && doc.endDate < b.todayYmd ? ' is-overdue-row' : ''}">
               ${hasSub
                 ? `<button type="button" class="sb-tree-toggle" data-iact="toggle-sub" title="${isExp ? '하위 접기' : '하위 펼치기'}">${isExp ? '−' : '+'}</button>`
-                : `<span class="sb-inbox-item-ico">${svg(hooks.isSpreadsheetItem(doc) ? 'sheet' : 'doc', 15)}</span>`}
+                : `<button type="button" class="sb-checkbox-sm${doc.completed ? ' checked' : ''}" data-iact="complete" title="완료 처리">${doc.completed ? '✓' : ''}</button>`}
               <div class="sb-inbox-item-text" data-open-doc="1">
                 <div class="sb-inbox-item-title-row">
                   <span class="sb-role-pill-xs is-role-${role.toLowerCase()}" data-iact="cycle-role" title="자료형태 클릭 전환 (T/S/R)">${role}</span>
                   <span class="sb-inbox-item-title">${esc(doc.name.replace(/\.md$/i, ''))}</span>
+                  ${periodBadge}
                 </div>
                 <div class="sb-inbox-item-snippet">${esc(snippet || '내용 없음')}</div>
               </div>
               <div class="sb-par-btns">
+                <button type="button" class="sb-mini-ghost" data-iact="clarify" title="GTD 명확화 (행동 필요? 2분규칙 · 위임 · 다음행동 · 버림/참고/언젠가)">명확화</button>
+                ${role === 'S' ? `<button type="button" class="sb-extract-pill is-ex-${Number(doc.extractStage || 1)}" data-iact="extract" title="점진적 요약 (추출 1~4단계)">추출${Number(doc.extractStage || 1)}</button>` : ''}
                 <button type="button" class="sb-mini-icon-act${doc.isTodayCore ? ' is-star-on' : ''}" data-iact="toggle-core" title="오늘의 핵심에 올리기/빼기">${doc.isTodayCore ? '★' : '☆'}</button>
                 <button type="button" class="sb-mini-icon-act" data-iact="add-sub" title="하위 카드 추가">+</button>
                 <button type="button" class="sb-par-btn" data-par="project" title="프로젝트로 분류">P</button>
@@ -1342,7 +2119,7 @@
         `;
       }).join('');
 
-      const taskPreviewHtml = rootDocs.length < 3
+      const taskPreviewHtml = homeInboxTab === 'all' && rootDocs.length < 3
         ? inbox.backlogTasks.slice(0, 3 - rootDocs.length).map((t) => `
             <div class="sb-inbox-item is-task">
               <span class="sb-inbox-item-ico">${svg('star', 14)}</span>
@@ -1360,6 +2137,15 @@
       container.querySelectorAll('.sb-inbox-item-wrap[data-doc-id]').forEach((wrap) => {
         const doc = Store.findNodeAndParent(wrap.dataset.docId)?.node;
         if (!doc) return;
+        wrap.querySelector('[data-iact="complete"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          doc.completed = !doc.completed;
+          doc.completedAt = doc.completed ? Date.now() : 0;
+          Store.touchNode(doc);
+          hooks.saveAndRender();
+          renderAll();
+          hooks.showToast(doc.completed ? `✅ "${doc.name.replace(/\.md$/i, '')}" 완료 처리됨` : '미완료로 복원됨');
+        });
         wrap.querySelector('[data-iact="toggle-sub"]')?.addEventListener('click', (e) => {
           e.stopPropagation();
           if (expandedDashIds.has(doc.id)) expandedDashIds.delete(doc.id);
@@ -1373,6 +2159,14 @@
           Store.setCardRole(doc, next);
           hooks.saveAndRender();
           renderAll();
+        });
+        wrap.querySelector('[data-iact="clarify"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          gtd?.openClarifyModal(doc);
+        });
+        wrap.querySelector('[data-iact="extract"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          gtd?.openExtractModal(doc);
         });
         wrap.querySelector('[data-iact="toggle-core"]')?.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -1389,7 +2183,7 @@
           renderAll();
           container.querySelector('.sb-sub-title-inp')?.focus();
         });
-        wrap.querySelector('[data-open-doc]')?.addEventListener('click', () => hooks.launchItemDirectly(doc));
+        wrap.querySelector('[data-open-doc]')?.addEventListener('click', () => openCardProps(doc));
         wrap.querySelectorAll('[data-par]').forEach((btn) => {
           btn.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -1517,25 +2311,42 @@
         (areas.length ? `<optgroup label="영역">${areas.map((e) => `<option value="area::${esc(e.id)}">${esc(e.name)}</option>`).join('')}</optgroup>` : '') +
         (resources.length ? `<optgroup label="자료">${resources.map((e) => `<option value="resource::${esc(e.id)}">${esc(e.name)}</option>`).join('')}</optgroup>` : '');
 
+      const buckets = computeInboxPeriodBuckets();
+      const { todayYmd, tomorrowYmd, weekEndYmd, overdueDocs, todayDocs: todayTaskDocs, tomorrowDocs: tomorrowTaskDocs, weekDocs: weekTaskDocs } = buckets;
+
       canvas.innerHTML = `
         <header class="sb-page-header">
           <div>
             <h1 class="sb-page-title">수신함 (Inbox)</h1>
-            <p class="sb-page-sub">미분류 메모, 지정되지 않은 파일, 대기 중인 할 일을 한 곳에서 정리하고 P·A·R로 분류하세요.</p>
+            <p class="sb-page-sub">기간별(기간지남 · 오늘 · 내일 · 이번 주)로 할일을 바로 관리하고, 카드를 눌러 기간·소속 프로젝트·다음 행동을 설정하세요.</p>
           </div>
+          <button type="button" class="sb-btn-subtle" id="sb-inbox-open-cal">📅 구글 캘린더 보기</button>
         </header>
 
         <section class="sb-card sb-inbox-composer-card">
-          <div class="sb-composer-grid sb-composer-grid-3">
-            <input type="text" id="sb-inbox-title" class="sb-field-input" placeholder="메모 / 할일 제목 (선택)">
-            <select id="sb-inbox-role-select" class="sb-field-select" title="자료형태">
+          <div class="sb-composer-grid sb-composer-grid-4">
+            <input type="text" id="sb-inbox-title" class="sb-field-input" placeholder="메모 / 할일 / 마일스톤 제목 (선택)">
+            <select id="sb-inbox-role-select" class="sb-field-select" title="카드 유형">
               <option value="T">T 할일 (Todo)</option>
               <option value="S" selected>S 자료 (Source)</option>
               <option value="R">R 산출물 (Result)</option>
+              <option value="M">◆ M 마일스톤</option>
             </select>
             <select id="sb-inbox-para-select" class="sb-field-select">${paraOptionsHtml}</select>
+            <div class="sb-qm-period-row">
+              <input type="date" id="sb-inbox-start" class="sb-field-input" title="시작일">
+              <span style="color:var(--text-muted); font-size:0.75rem;">~</span>
+              <input type="date" id="sb-inbox-date" class="sb-field-input" title="종료 / 마감일">
+            </div>
           </div>
-          <textarea id="sb-inbox-body" rows="4" class="sb-field-textarea" placeholder="떠오르는 아이디어, 회의 메모, 할 일을 빠르게 기록하세요... (Ctrl+Enter 저장)"></textarea>
+          <div class="sb-qm-preset-strip">
+            <span class="sb-muted-sm">기간 빠른 설정:</span>
+            <button type="button" class="sb-mini-ghost" data-ipreset="today">오늘 할일</button>
+            <button type="button" class="sb-mini-ghost" data-ipreset="tomorrow">내일 할일</button>
+            <button type="button" class="sb-mini-ghost" data-ipreset="week">이번 주</button>
+            <button type="button" class="sb-mini-ghost" data-ipreset="clear">기간 초기화</button>
+          </div>
+          <textarea id="sb-inbox-body" rows="2" class="sb-field-textarea" placeholder="떠오르는 아이디어, 회의 메모, 할 일을 빠르게 기록하세요... (Ctrl+Enter 저장)"></textarea>
           <div class="sb-qm-foot">
             <label class="sb-check-inline">
               <input type="checkbox" id="sb-inbox-add-todo">
@@ -1548,28 +2359,68 @@
         <section class="sb-card">
           <div class="sb-subtabs">
             <button type="button" class="sb-subtab${inboxTab === 'all' ? ' active' : ''}" data-itab="all">전체 <span>${inbox.totalCount}</span></button>
+            <button type="button" class="sb-subtab${inboxTab === 'overdue' ? ' active' : ''}${overdueDocs.length > 0 ? ' is-danger' : ''}" data-itab="overdue">⚠️ 기간지남 <span>${overdueDocs.length}</span></button>
+            <button type="button" class="sb-subtab${inboxTab === 'today' ? ' active' : ''}" data-itab="today">오늘 할일 <span>${todayTaskDocs.length}</span></button>
+            <button type="button" class="sb-subtab${inboxTab === 'tomorrow' ? ' active' : ''}" data-itab="tomorrow">내일 할일 <span>${tomorrowTaskDocs.length}</span></button>
+            <button type="button" class="sb-subtab${inboxTab === 'week' ? ' active' : ''}" data-itab="week">이번 주 할일 <span>${weekTaskDocs.length}</span></button>
             <button type="button" class="sb-subtab${inboxTab === 'memos' ? ' active' : ''}" data-itab="memos">미분류 메모 <span>${inbox.memos.length}</span></button>
             <button type="button" class="sb-subtab${inboxTab === 'files' ? ' active' : ''}" data-itab="files">미분류 파일 <span>${inbox.files.length}</span></button>
-            <button type="button" class="sb-subtab${inboxTab === 'tasks' ? ' active' : ''}" data-itab="tasks">할 일 대기 <span>${inbox.backlogTasks.length}</span></button>
             <button type="button" class="sb-subtab${inboxTab === 'done' ? ' active' : ''}" data-itab="done">완료된 할 일 <span>${inbox.doneTasks.length}</span></button>
           </div>
           <div class="sb-inbox-full-list" id="sb-inbox-full-list"></div>
         </section>
       `;
 
+      $('sb-inbox-open-cal')?.addEventListener('click', () => {
+        activeView = 'calendar';
+        renderAll();
+      });
+
+      canvas.querySelectorAll('[data-ipreset]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const p = btn.dataset.ipreset;
+          if (p === 'clear') {
+            if ($('sb-inbox-start')) $('sb-inbox-start').value = '';
+            if ($('sb-inbox-date')) $('sb-inbox-date').value = '';
+            return;
+          }
+          if ($('sb-inbox-role-select')) $('sb-inbox-role-select').value = 'T';
+          if (p === 'today') {
+            if ($('sb-inbox-start')) $('sb-inbox-start').value = todayYmd;
+            if ($('sb-inbox-date')) $('sb-inbox-date').value = todayYmd;
+          } else if (p === 'tomorrow') {
+            if ($('sb-inbox-start')) $('sb-inbox-start').value = tomorrowYmd;
+            if ($('sb-inbox-date')) $('sb-inbox-date').value = tomorrowYmd;
+          } else if (p === 'week') {
+            if ($('sb-inbox-start')) $('sb-inbox-start').value = todayYmd;
+            if ($('sb-inbox-date')) $('sb-inbox-date').value = weekEndYmd;
+          }
+        });
+      });
+
       const doInboxSave = () => {
         const paraVal = $('sb-inbox-para-select')?.value || '';
         const [pType, pId] = paraVal.includes('::') ? paraVal.split('::') : ['', ''];
         const role = $('sb-inbox-role-select')?.value || 'S';
         const isCore = Boolean($('sb-inbox-add-todo')?.checked);
-        captureQuickMemo({
+        const startVal = String($('sb-inbox-start')?.value || '').trim();
+        const dateVal = String($('sb-inbox-date')?.value || '').trim();
+        const created = captureQuickMemo({
           title: $('sb-inbox-title')?.value || '',
           body: $('sb-inbox-body')?.value || '',
-          cardRole: isCore && role === 'S' ? 'T' : role,
+          cardRole: (isCore || startVal || dateVal) && role === 'S' ? 'T' : role,
           isTodayCore: isCore,
           paraType: pType,
           paraId: pId
         });
+        if (created && (startVal || dateVal)) {
+          Store.updateCardSchedule(created, {
+            startDate: startVal || dateVal,
+            endDate: dateVal || startVal
+          });
+          hooks.saveAndRender();
+          renderAll();
+        }
       };
       $('sb-inbox-save-btn')?.addEventListener('click', doInboxSave);
       $('sb-inbox-body')?.addEventListener('keydown', (e) => {
@@ -1622,9 +2473,17 @@
         return;
       }
 
-      const docsToShow = inboxTab === 'memos'
-        ? inbox.memos
-        : (inboxTab === 'files' ? inbox.files : (inboxTab === 'all' ? inbox.unassignedDocs : []));
+      const docsToShow = inboxTab === 'overdue'
+        ? overdueDocs
+        : (inboxTab === 'today'
+          ? todayTaskDocs
+          : (inboxTab === 'tomorrow'
+            ? tomorrowTaskDocs
+            : (inboxTab === 'week'
+              ? weekTaskDocs
+              : (inboxTab === 'memos'
+                ? inbox.memos
+                : (inboxTab === 'files' ? inbox.files : (inboxTab === 'all' ? inbox.unassignedDocs : []))))));
       const tasksToShow = (inboxTab === 'tasks' || inboxTab === 'all') ? inbox.backlogTasks : [];
 
       if (docsToShow.length === 0 && tasksToShow.length === 0) {
@@ -1648,20 +2507,25 @@
         const subKids = Store.getSubCards(doc.id, hooks.isItemVisible);
         const hasSub = subKids.length > 0;
         const isExp = expandedDashIds.has(doc.id);
+        const periodBadge = formatPeriodBadgeHtml(doc, todayYmd);
+        const isOverdue = !doc.completed && doc.endDate && doc.endDate < todayYmd;
         return `
           <div class="sb-inbox-item-wrap" data-doc-id="${esc(doc.id)}">
-            <div class="sb-inbox-full-row">
+            <div class="sb-inbox-full-row${isOverdue ? ' is-overdue-row' : ''}">
               ${hasSub
                 ? `<button type="button" class="sb-tree-toggle" data-iact="toggle-sub" title="${isExp ? '하위 접기' : '하위 펼치기'}">${isExp ? '−' : '+'}</button>`
-                : `<span class="sb-inbox-item-ico">${svg(hooks.isSpreadsheetItem(doc) ? 'sheet' : 'doc', 16)}</span>`}
+                : `<button type="button" class="sb-checkbox-sm${doc.completed ? ' checked' : ''}" data-iact="complete" title="완료 처리">${doc.completed ? '✓' : ''}</button>`}
               <div class="sb-inbox-item-text" data-open-doc="1">
                 <div class="sb-inbox-item-title-row">
                   <span class="sb-role-pill-xs is-role-${role.toLowerCase()}" data-iact="cycle-role" title="자료형태 클릭 전환">${role}</span>
                   <span class="sb-inbox-item-title">${esc(doc.name.replace(/\.md$/i, ''))}</span>
+                  ${periodBadge}
                 </div>
                 <div class="sb-inbox-item-snippet">${esc(snippet || '내용 없음')} · ${esc(formatRelativeTime(doc.updatedAt || doc.createdAt))}</div>
               </div>
               <div class="sb-par-btns">
+                <button type="button" class="sb-mini-ghost" data-iact="clarify" title="GTD 명확화 위자드">명확화</button>
+                ${role === 'S' ? `<button type="button" class="sb-extract-pill is-ex-${Number(doc.extractStage || 1)}" data-iact="extract" title="점진적 요약 (추출 1~4단계)">추출 ${Number(doc.extractStage || 1)}단계</button>` : ''}
                 <button type="button" class="sb-mini-icon-act${doc.isTodayCore ? ' is-star-on' : ''}" data-iact="toggle-core" title="오늘의 핵심 토글">${doc.isTodayCore ? '★' : '☆'}</button>
                 <button type="button" class="sb-mini-icon-act" data-iact="add-sub" title="하위 카드 추가">+</button>
                 <button type="button" class="sb-par-btn" data-par="project" title="프로젝트 연결">P</button>
@@ -1708,6 +2572,15 @@
       listEl.querySelectorAll('.sb-inbox-item-wrap[data-doc-id]').forEach((row) => {
         const doc = Store.findNodeAndParent(row.dataset.docId)?.node;
         if (!doc) return;
+        row.querySelector('[data-iact="complete"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          doc.completed = !doc.completed;
+          doc.completedAt = doc.completed ? Date.now() : 0;
+          Store.touchNode(doc);
+          hooks.saveAndRender();
+          renderAll();
+          hooks.showToast(doc.completed ? `✅ "${doc.name.replace(/\.md$/i, '')}" 완료 처리됨` : '미완료로 복원됨');
+        });
         row.querySelector('[data-iact="toggle-sub"]')?.addEventListener('click', (e) => {
           e.stopPropagation();
           if (expandedDashIds.has(doc.id)) expandedDashIds.delete(doc.id);
@@ -1721,6 +2594,14 @@
           Store.setCardRole(doc, next);
           hooks.saveAndRender();
           renderAll();
+        });
+        row.querySelector('[data-iact="clarify"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          gtd?.openClarifyModal(doc);
+        });
+        row.querySelector('[data-iact="extract"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          gtd?.openExtractModal(doc);
         });
         row.querySelector('[data-iact="toggle-core"]')?.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -1741,7 +2622,7 @@
           e.stopPropagation();
           if (deleteCardNode(doc)) hooks.showToast('카드가 삭제되었습니다.');
         });
-        row.querySelector('[data-open-doc]')?.addEventListener('click', () => hooks.launchItemDirectly(doc));
+        row.querySelector('[data-open-doc]')?.addEventListener('click', () => openCardProps(doc));
         row.querySelector('[data-locate-doc]')?.addEventListener('click', () => hooks.navigateToNode(doc));
         row.querySelectorAll('[data-par]').forEach((btn) => {
           btn.addEventListener('click', (e) => {
@@ -1961,12 +2842,20 @@
     }
 
     function renderWeeklyReviewView(canvas) {
+      Store.syncOverdueTasksToWaiting();
       const { staleOrOverdue, inbox } = getReviewAlerts();
-      const pCount = Store.getParaEntities('project', { onlyActive: true }).length;
+      const activeProjs = getActiveProjects();
+      const projsWithoutNextAction = activeProjs.filter((p) => Store.getProjectNextActionEntries(p.id, hooks.isItemVisible).length === 0);
+      const allDocs = getAllVisibleDocs();
+      const waitingDocs = allDocs.filter((d) => !d.completed && d.gtdStatus === 'waiting');
+      const somedayDocs = allDocs.filter((d) => !d.completed && d.gtdStatus === 'someday');
+      const wrCfg = Store.state.weeklyReviewConfig || { reviewWeekday: 0, checklist: { inbox: false, waiting: false, someday: false }, lastReviewedDate: '' };
+      const dayKo = ['일요일', '월요일', '화요일', '수요일', '목요일', '금요일', '토요일'];
+
+      const pCount = activeProjs.length;
       const aCount = Store.getParaEntities('area', { onlyActive: true }).length;
       const rCount = Store.getParaEntities('resource', { onlyActive: true }).length;
       const archCount = Store.getParaEntities('archive').length;
-      const allDocs = getAllVisibleDocs();
       const classifiedPct = allDocs.length > 0
         ? Math.round(((allDocs.length - inbox.unassignedDocs.length) / allDocs.length) * 100)
         : 100;
@@ -1974,17 +2863,50 @@
       canvas.innerHTML = `
         <header class="sb-page-header">
           <div>
-            <h1 class="sb-page-title">주간 리뷰</h1>
-            <p class="sb-page-sub">오래된 프로젝트와 미분류 수신함을 점검하고, 완료된 프로젝트를 보관소로 정리하세요.</p>
+            <h1 class="sb-page-title">주간 리뷰 (GTD + PARA)</h1>
+            <p class="sb-page-sub">수신함 비우기 → 대기/누락 목록 확인 → 언젠가 목록 훑기 → 다음 행동 없는 프로젝트 점검까지 한 번에 완료하세요.</p>
           </div>
-          <button type="button" class="sb-btn-primary" id="sb-save-weekly-note">주간 리뷰 요약 메모 저장</button>
+          <div class="sb-flex-gap-xs">
+            <label class="sb-date-field">
+              <span>매주 알림 요일</span>
+              <select id="sb-wr-weekday" class="sb-field-select">
+                ${dayKo.map((d, i) => `<option value="${i}"${Number(wrCfg.reviewWeekday) === i ? ' selected' : ''}>매주 ${d}</option>`).join('')}
+              </select>
+            </label>
+            <button type="button" class="sb-btn-subtle" id="sb-wr-mark-done">✓ 이번 주 리뷰 완료</button>
+            <button type="button" class="sb-btn-primary" id="sb-save-weekly-note">주간 리뷰 MD 저장</button>
+          </div>
         </header>
+
+        <!-- GTD 3단계 주간 리뷰 체크리스트 -->
+        <section class="sb-card sb-wr-checklist-card">
+          <div class="sb-card-head">
+            <h2 class="sb-card-title">📋 GTD 주간 리뷰 체크리스트</h2>
+            <span class="sb-page-sub" style="margin:0;">${wrCfg.lastReviewedDate ? `최근 완료일: ${esc(wrCfg.lastReviewedDate)}` : '아직 완료 기록 없음'}</span>
+          </div>
+          <div class="sb-wr-steps">
+            <label class="sb-wr-step-row">
+              <input type="checkbox" data-wr-chk="inbox"${wrCfg.checklist?.inbox ? ' checked' : ''}>
+              <span><b>1. 수신함 비우기</b> (현재 미분류 ${inbox.totalCount}건)</span>
+              <button type="button" class="sb-link-btn" id="sb-review-goto-inbox">수신함 열기 →</button>
+            </label>
+            <label class="sb-wr-step-row">
+              <input type="checkbox" data-wr-chk="waiting"${wrCfg.checklist?.waiting ? ' checked' : ''}>
+              <span><b>2. 프로젝트 대기 · 누락 목록 확인</b> (위임·기간누락 ${waitingDocs.length}건)</span>
+              <button type="button" class="sb-link-btn" data-jump-na="1">다음 행동/대기 열기 →</button>
+            </label>
+            <label class="sb-wr-step-row">
+              <input type="checkbox" data-wr-chk="someday"${wrCfg.checklist?.someday ? ' checked' : ''}>
+              <span><b>3. 언젠가(Someday) 목록 훑기</b> (현재 ${somedayDocs.length}건)</span>
+            </label>
+          </div>
+        </section>
 
         <!-- 단계별 PARA 요약 -->
         <section class="sb-kpi-grid">
           <div class="sb-kpi-card is-static">
             <div class="sb-kpi-icon">${svg('project', 16)}</div>
-            <div class="sb-kpi-label">프로젝트 (진행/보류)</div>
+            <div class="sb-kpi-label">프로젝트 (다음행동 없음 ${projsWithoutNextAction.length})</div>
             <div class="sb-kpi-val">${pCount}</div>
           </div>
           <div class="sb-kpi-card is-static">
@@ -2004,12 +2926,32 @@
           </div>
         </section>
 
+        <!-- 다음 행동 없는 프로젝트 점검 -->
+        <section class="sb-card">
+          <div class="sb-card-head">
+            <div class="sb-card-title-wrap">
+              <span class="sb-card-ico">${svg('alert', 16)}</span>
+              <h2 class="sb-card-title">다음 행동이 없는 프로젝트 점검 (${projsWithoutNextAction.length})</h2>
+            </div>
+          </div>
+          ${projsWithoutNextAction.length === 0
+            ? `<div class="sb-empty-line"><span>모든 활성 프로젝트에 다음 행동이 정의되어 있어요 · 완벽해요!</span></div>`
+            : `<div class="sb-req-list">
+                ${projsWithoutNextAction.map((p) => `
+                  <div class="sb-req-row is-overdue-row">
+                    <span><span class="sb-code-pill-xs">${esc(Store.getParaCode(p))}</span> <strong>${esc(p.name)}</strong> <small style="color:var(--danger);">다음 행동 0건</small></span>
+                    <button type="button" class="sb-mini-accent" data-wr-add-na="${esc(p.id)}">＋ 다음 행동 정의</button>
+                  </div>
+                `).join('')}
+              </div>`}
+        </section>
+
         <section class="sb-home-grid">
           <div class="sb-card">
             <div class="sb-card-head">
               <div class="sb-card-title-wrap">
                 <span class="sb-card-ico">${svg('alert', 16)}</span>
-                <h2 class="sb-card-title">점검이 필요한 프로젝트 (${staleOrOverdue.length})</h2>
+                <h2 class="sb-card-title">오래되거나 마감 임박 프로젝트 (${staleOrOverdue.length})</h2>
               </div>
             </div>
             <div id="sb-review-projects"></div>
@@ -2018,15 +2960,62 @@
           <div class="sb-card">
             <div class="sb-card-head">
               <div class="sb-card-title-wrap">
-                <span class="sb-card-ico">${svg('inbox', 16)}</span>
-                <h2 class="sb-card-title">미분류 수신함 정리 (${inbox.totalCount})</h2>
+                <span class="sb-card-ico">${svg('clock', 16)}</span>
+                <h2 class="sb-card-title">대기 · 누락 (${waitingDocs.length}) & 언젠가 (${somedayDocs.length})</h2>
               </div>
-              <button type="button" class="sb-link-btn" id="sb-review-goto-inbox">전체 정리 ${svg('arrowRight', 13)}</button>
             </div>
-            <div id="sb-review-inbox"></div>
+            <div class="sb-inbox-full-list">
+              ${waitingDocs.slice(0, 4).map((d) => `
+                <div class="sb-inbox-full-row is-overdue-row">
+                  <div class="sb-inbox-item-text">
+                    <div class="sb-inbox-item-title">${d.missedToWaiting ? '🔴 기간누락' : '⏳ 위임대기'} · ${esc(d.name.replace(/\.md$/i, ''))}</div>
+                  </div>
+                  <button type="button" class="sb-btn-subtle" data-wr-clarify="${esc(d.id)}">명확화</button>
+                </div>
+              `).join('')}
+              ${somedayDocs.slice(0, 4).map((d) => `
+                <div class="sb-inbox-full-row">
+                  <div class="sb-inbox-item-text">
+                    <div class="sb-inbox-item-title">☁️ 언젠가 · ${esc(d.name.replace(/\.md$/i, ''))}</div>
+                  </div>
+                  <button type="button" class="sb-btn-subtle" data-wr-clarify="${esc(d.id)}">활성화</button>
+                </div>
+              `).join('')}
+              ${waitingDocs.length === 0 && somedayDocs.length === 0 ? `<div class="sb-empty-line"><span>대기 목록과 언젠가 목록이 깔끔합니다.</span></div>` : ''}
+            </div>
           </div>
         </section>
       `;
+
+      $('sb-wr-weekday')?.addEventListener('change', (e) => {
+        Store.updateWeeklyReviewConfig({ reviewWeekday: Number(e.target.value) });
+        hooks.showToast(`🗓️ 매주 ${dayKo[Number(e.target.value)]}에 주간 리뷰 알림이 표시됩니다.`);
+      });
+      $('sb-wr-mark-done')?.addEventListener('click', () => {
+        const today = hooks.getTodayYMD();
+        Store.updateWeeklyReviewConfig({ lastReviewedDate: today, checklist: { inbox: true, waiting: true, someday: true } });
+        Store.logChange({ category: 'general', message: `주간 리뷰 완료 (${today})` });
+        hooks.showToast('✅ 이번 주 주간 리뷰를 완료 표시했습니다!');
+        renderWeeklyReviewView(canvas);
+      });
+      canvas.querySelectorAll('[data-wr-chk]').forEach((chk) => {
+        chk.addEventListener('change', () => {
+          Store.updateWeeklyReviewConfig({ checklist: { [chk.dataset.wrChk]: Boolean(chk.checked) } });
+        });
+      });
+      canvas.querySelector('[data-jump-na]')?.addEventListener('click', () => {
+        activeView = 'next-actions';
+        renderAll();
+      });
+      canvas.querySelectorAll('[data-wr-add-na]').forEach((b) => {
+        b.addEventListener('click', () => openProjectDetail(b.dataset.wrAddNa, 'next-actions'));
+      });
+      canvas.querySelectorAll('[data-wr-clarify]').forEach((b) => {
+        b.addEventListener('click', () => {
+          const doc = Store.findNodeAndParent(b.dataset.wrClarify)?.node;
+          if (doc) gtd?.openClarifyModal(doc);
+        });
+      });
 
       $('sb-review-goto-inbox')?.addEventListener('click', () => {
         activeView = 'inbox';
@@ -2040,22 +3029,17 @@
         renderProjectsTableInto(projWrap, staleOrOverdue, true);
       }
 
-      renderInboxPreviewInto($('sb-review-inbox'), inbox);
-
       $('sb-save-weekly-note')?.addEventListener('click', () => {
         const today = hooks.getTodayYMD();
         const summaryBody =
-          `## ${today} PARA 주간 리뷰\n\n` +
+          `## ${today} GTD + PARA 주간 리뷰\n\n` +
           `### 단계별 요약\n` +
-          `- **프로젝트**: ${pCount}건 (점검 필요 ${staleOrOverdue.length}건)\n` +
-          `- **영역**: ${aCount}건\n` +
-          `- **자료**: ${rCount}건\n` +
-          `- **보관**: ${archCount}건\n` +
-          `- **수신함 미분류**: ${inbox.totalCount}건 (전체 분류율 ${classifiedPct}%)\n\n` +
-          `### 점검 프로젝트\n` +
-          (staleOrOverdue.length
-            ? staleOrOverdue.map((p) => `- [${p.status === 'hold' ? '보류' : '진행'}] **${p.name}** (${p.progress}% · ${computeDdayInfo(p.dueDate).text})`).join('\n')
-            : '- 없음') +
+          `- **프로젝트**: ${pCount}건 (다음 행동 없음 ${projsWithoutNextAction.length}건 · 점검 필요 ${staleOrOverdue.length}건)\n` +
+          `- **영역**: ${aCount}건 · **자료**: ${rCount}건 · **보관**: ${archCount}건\n` +
+          `- **수신함 미분류**: ${inbox.totalCount}건 (전체 분류율 ${classifiedPct}%)\n` +
+          `- **대기/누락**: ${waitingDocs.length}건 · **언젠가**: ${somedayDocs.length}건\n\n` +
+          `### 다음 행동 없는 프로젝트\n` +
+          (projsWithoutNextAction.length ? projsWithoutNextAction.map((p) => `- ${Store.getParaCode(p)} ${p.name}`).join('\n') : '- 없음') +
           `\n\n### 다음 주 핵심 목표\n- \n`;
         const doc = captureQuickMemo({ title: `${today} 주간 리뷰`, body: summaryBody });
         if (doc) hooks.launchItemDirectly(doc);
@@ -2070,6 +3054,13 @@
       if (!canvas) return;
       if (activeView === 'home') renderHomeView(canvas);
       else if (activeView === 'inbox') renderInboxView(canvas);
+      else if (activeView === 'calendar') {
+        const cal = getGoogleCalendar();
+        if (cal) cal.renderCalendarView(canvas);
+      }
+      else if (activeView === 'next-actions' && gtd) gtd.renderNextActionsView(canvas, { onOpenProjectDetail: openProjectDetail });
+      else if (activeView === 'master-gantt' && gtd) gtd.renderMasterGanttView(canvas, { onOpenProjectDetail: openProjectDetail });
+      else if (activeView === 'history' && gtd) gtd.renderChangeHistoryView(canvas);
       else if (activeView === 'review') renderWeeklyReviewView(canvas);
       else if (activeView === 'project-detail' && projectWorkspace && activeProjectId) {
         projectWorkspace.renderProjectDetailView(canvas, activeProjectId, {

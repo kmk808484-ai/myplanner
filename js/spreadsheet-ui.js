@@ -2864,6 +2864,7 @@
         html = `
           <div class="xl-dd-title">파일 작업</div>
           <button type="button" data-ddcmd="save">💾 저장 (Ctrl+S)</button>
+          <button type="button" data-ddcmd="save-as">📝 다른 이름으로 저장...</button>
           <button type="button" data-ddcmd="import-file">📂 CSV / Excel(.xlsx) 불러오기</button>
           <hr>
           <div class="xl-dd-title">예제 (Origin 그래프 샘플)</div>
@@ -3272,7 +3273,33 @@
       if (typeof options.onSave === 'function') {
         elDirty.textContent = '저장 중...';
         try {
-          await options.onSave(cloneWorkbook(workbook), workbookToMarkdownSummary(workbook));
+          const res = await options.onSave(cloneWorkbook(workbook), workbookToMarkdownSummary(workbook));
+          if (res && res.cancelled) {
+            updateDirtyUI();
+            return;
+          }
+          if (res && res.fileName) options.fileName = res.fileName;
+          isDirty = false;
+          updateDirtyUI();
+        } catch (err) {
+          elDirty.textContent = '저장 실패';
+          toast(`⚠️ 저장 실패: ${err.message}`);
+        }
+      }
+    }
+
+    async function triggerSaveAs() {
+      commitEdit();
+      const handler = typeof options.onSaveAs === 'function' ? options.onSaveAs : options.onSave;
+      if (typeof handler === 'function') {
+        elDirty.textContent = '저장 중...';
+        try {
+          const res = await handler(cloneWorkbook(workbook), workbookToMarkdownSummary(workbook));
+          if (res && res.cancelled) {
+            updateDirtyUI();
+            return;
+          }
+          if (res && res.fileName) options.fileName = res.fileName;
           isDirty = false;
           updateDirtyUI();
         } catch (err) {
@@ -3361,6 +3388,7 @@
 
     function handleCommand(cmd) {
       if (cmd === 'save') { triggerSave(); return; }
+      if (cmd === 'save-as') { triggerSaveAs(); return; }
       if (cmd === 'undo') { doUndo(); return; }
       if (cmd === 'redo') { doRedo(); return; }
       if (cmd === 'copy') { copySelection(false); return; }
@@ -3611,6 +3639,7 @@
         renderGridStructure();
       },
       save: triggerSave,
+      saveAs: triggerSaveAs,
       destroy() {
         if (autoSaveTimer) clearTimeout(autoSaveTimer);
         document.removeEventListener('mouseup', onGlobalMouseUp);

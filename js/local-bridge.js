@@ -164,8 +164,25 @@
     return data;
   }
 
+  async function captureDesktopScreen(baseUrl) {
+    const clean = getCleanBaseUrl(baseUrl);
+    const token = await fetchBridgeSessionToken(clean);
+    if (!token) throw new Error('로컬 브릿지 세션 토큰을 얻지 못했습니다.');
+    const res = await fetch(`${clean}/capture-screen`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Bridge-Token': token },
+      body: '{}'
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok || !data.dataUrl) {
+      throw new Error(data.error || `화면 캡처 실패 (HTTP ${res.status})`);
+    }
+    return data.dataUrl;
+  }
+
   global.BrainLocalBridge = {
     DEFAULT_URL,
+    getCleanBaseUrl,
     isWebUrl,
     isLocalPath,
     isLocalProtectedItem,
@@ -174,6 +191,7 @@
     fetchBridgeSessionToken,
     openLocal,
     openContentLocal,
-    pickLocalFile
+    pickLocalFile,
+    captureDesktopScreen
   };
 })(window);

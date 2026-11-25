@@ -101,25 +101,32 @@ function Send-JsonResponse {
 function Get-MimeType {
     param([string]$FilePath)
     switch ([System.IO.Path]::GetExtension($FilePath).ToLowerInvariant()) {
-        ".html" { return "text/html; charset=utf-8" }
-        ".css"  { return "text/css; charset=utf-8" }
-        ".js"   { return "application/javascript; charset=utf-8" }
-        ".json" { return "application/json; charset=utf-8" }
-        ".svg"  { return "image/svg+xml" }
-        ".png"  { return "image/png" }
-        ".jpg"  { return "image/jpeg" }
-        ".jpeg" { return "image/jpeg" }
-        ".ico"  { return "image/x-icon" }
-        default { return "application/octet-stream" }
+        ".html"  { return "text/html; charset=utf-8" }
+        ".htm"   { return "text/html; charset=utf-8" }
+        ".css"   { return "text/css; charset=utf-8" }
+        ".js"    { return "application/javascript; charset=utf-8" }
+        ".mjs"   { return "application/javascript; charset=utf-8" }
+        ".json"  { return "application/json; charset=utf-8" }
+        ".wasm"  { return "application/wasm" }
+        ".gz"    { return "application/octet-stream" }
+        ".bcmap" { return "application/octet-stream" }
+        ".svg"   { return "image/svg+xml" }
+        ".png"   { return "image/png" }
+        ".jpg"   { return "image/jpeg" }
+        ".jpeg"  { return "image/jpeg" }
+        ".webp"  { return "image/webp" }
+        ".ico"   { return "image/x-icon" }
+        default  { return "application/octet-stream" }
     }
 }
 
 function Serve-StaticFile {
     param(
         [System.Net.HttpListenerResponse]$Response,
-        [string]$RequestPath
+        [string]$RequestPath,
+        [bool]$HeadOnly = $false
     )
-    $rel = $RequestPath.TrimStart('/')
+    $rel = [System.Uri]::UnescapeDataString($RequestPath).TrimStart('/')
     if ([string]::IsNullOrWhiteSpace($rel)) { $rel = "index.html" }
 
     # local-bridge 설정 파일 등은 외부 정적 서빙 차단
@@ -137,19 +144,34 @@ function Serve-StaticFile {
         return
     }
 
+    if (Test-Path -LiteralPath $fullPath -PathType Container) {
+        $fullPath = Join-Path $fullPath "index.html"
+    }
+
     if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
         $Response.StatusCode = 404
         $Response.OutputStream.Close()
         return
     }
 
-    $bytes = [System.IO.File]::ReadAllBytes($fullPath)
-    $Response.StatusCode = 200
-    $Response.ContentType = Get-MimeType -FilePath $fullPath
-    $Response.Headers["Cache-Control"] = "no-cache"
-    $Response.ContentLength64 = $bytes.Length
-    $Response.OutputStream.Write($bytes, 0, $bytes.Length)
-    $Response.OutputStream.Close()
+    try {
+        $Response.StatusCode = 200
+        $Response.ContentType = Get-MimeType -FilePath $fullPath
+        $Response.Headers["Cache-Control"] = "no-cache"
+        if ($HeadOnly) {
+            $fi = New-Object System.IO.FileInfo($fullPath)
+            $Response.ContentLength64 = $fi.Length
+            $Response.OutputStream.Close()
+            return
+        }
+        $bytes = [System.IO.File]::ReadAllBytes($fullPath)
+        $Response.ContentLength64 = $bytes.Length
+        $Response.OutputStream.Write($bytes, 0, $bytes.Length)
+        $Response.OutputStream.Close()
+    } catch {
+        # 클라이언트가 대용량 파일 전송 중 연결을 끊은 경우(Abort/Timeout) 서버 종료 방지
+        try { $Response.Abort() } catch {}
+    }
 }
 
 function Decode-JwtPayload {
@@ -479,8 +501,8 @@ try {
             continue
         }
 
-        if ($method -eq "GET") {
-            Serve-StaticFile -Response $response -RequestPath $urlPath
+        if ($method -eq "GET" -or $method -eq "HEAD") {
+            Serve-StaticFile -Response $response -RequestPath $urlPath -HeadOnly ($method -eq "HEAD")
             continue
         }
 

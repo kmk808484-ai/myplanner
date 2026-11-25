@@ -1,10 +1,10 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="ko">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>세컨드 브레인</title>
-  <link rel="stylesheet" href="css/style.css?v=37">
+  <link rel="stylesheet" href="css/style.css?v=48">
 </head>
 <body>
   <!-- Windows 스타일 OS 잠금 / Google 로그인 · 오프라인 게스트 화면 -->
@@ -21,7 +21,7 @@
 
       <div id="login-offline-badge" class="os-login-offline-badge" style="display:none;">
         ✅ <b>.bat 실행 없이</b> 바로 오프라인 사용 가능<br>
-        <span>메모 · 마크다운 수식 · 엑셀 · Origin 그래프 100% 동작</span>
+        <span>메모 · 마크다운 수식 · 엑셀 · Origin 그래프 · OCR 추출기 100% 동작</span>
       </div>
 
       <div id="login-file-warning" class="auth-notice-warn" style="display:none; text-align:left; margin-bottom:12px;">
@@ -101,6 +101,9 @@
                 <button type="button" class="os-nav-subitem home-app-tile" data-builtin="relation-map">관계 맵</button>
                 <button type="button" class="os-nav-subitem home-app-tile" data-builtin="spreadsheet">엑셀 시트</button>
                 <button type="button" class="os-nav-subitem home-app-tile" data-builtin="origin">Origin 그래프</button>
+                <button type="button" class="os-nav-subitem home-app-tile" data-builtin="ocr-extractor">OCR 추출기</button>
+                <button type="button" class="os-nav-subitem home-app-tile" data-builtin="pdf-converter">PDF 변환기</button>
+                <button type="button" class="os-nav-subitem home-app-tile" data-builtin="screen-capture">화면 캡처</button>
                 <button type="button" class="os-nav-subitem home-app-tile" data-builtin="markdown">새 마크다운</button>
               </div>
               <div id="home-pinned-grid" class="os-nav-sublist"></div>
@@ -188,7 +191,12 @@
 
     <!-- 홈 대시보드 (PARA 사이드바 + 대시보드/수신함/프로젝트/영역/자료/보관/주간리뷰 + 일정 역산 신호등) -->
     <section id="home-screen" class="home-screen sb-home-shell" style="display:none;">
-      <aside class="sb-home-sidebar">
+      <button type="button" class="sb-sidebar-float-open" id="btn-expand-home-sidebar" title="좌측 사이드바 펼치기" aria-label="사이드바 펼치기">☰</button>
+      <aside class="sb-home-sidebar" id="para-home-sidebar">
+        <div class="sb-sidebar-collapse-row">
+          <span class="sb-sidebar-mini-label">탐색 메뉴</span>
+          <button type="button" class="sb-icon-btn-xs" id="btn-collapse-home-sidebar" title="좌측 사이드바 숨기기">◀</button>
+        </div>
         <nav class="sb-nav-list" id="para-nav-list" aria-label="PARA 주요 탐색"></nav>
 
         <div class="sb-sidebar-group">
@@ -775,6 +783,16 @@
         </div>
 
         <div class="settings-section">
+          <h4>🔗 로컬 폴더 관계 파일 추출 · 불러오기</h4>
+          <p class="settings-desc">파일 사본을 중복 복사하지 않고, 로컬 폴더 내 파일들의 PARA · 상하 · 다음행동 관계를 별도 관계 파일(<code>.secondbrain-relations.json</code>)로 추출해 저장·복원합니다. 불러올 때 폴더에 없는 파일의 관계는 자동으로 무시하고 넘어갑니다.</p>
+          <div class="action-row">
+            <button type="button" class="btn btn-secondary" id="btn-lf-export-relations">⬆️ 관계 파일 추출(저장)</button>
+            <button type="button" class="btn btn-secondary" id="btn-lf-import-relations">⬇️ 관계 파일 불러오기</button>
+            <input type="file" id="lf-import-relations-input" accept=".json" style="display:none;">
+          </div>
+        </div>
+
+        <div class="settings-section">
           <h4>💾 오프라인 자동 다운로드 백업</h4>
           <p class="settings-desc">폴더 직접 연결을 지원하지 않는 환경(<code>file://</code> 직접 실행 등)에서도 새로 만들거나 저장(Ctrl+S)한 메모·엑셀 파일을 PC 다운로드 폴더로 자동 저장할 수 있습니다.</p>
           <label class="checkbox-row">
@@ -965,16 +983,35 @@
               <label for="pem-progress"><span>진행도</span><strong id="pem-progress-val">0%</strong></label>
               <input type="range" id="pem-progress" min="0" max="100" step="5" value="0">
             </div>
+            <div class="api-field">
+              <label for="pem-life-goal"><span>🎯 인생 중요 목표 연결</span></label>
+              <select id="pem-life-goal" class="select-input">
+                <option value="">연결 안 함</option>
+              </select>
+            </div>
+            <div class="api-field">
+              <label for="pem-parent-proj"><span>📂 상위 프로젝트 (계층 레벨)</span></label>
+              <select id="pem-parent-proj" class="select-input">
+                <option value="">최상위 프로젝트 (Lv.1)</option>
+              </select>
+            </div>
           </div>
 
           <div class="api-field">
             <label for="pem-summary"><span>목표 · 요약 메모 (선택)</span></label>
-            <textarea id="pem-summary" class="edit-input" rows="3" placeholder="완료 기준이나 핵심 메모를 적어 두세요..."></textarea>
+            <textarea id="pem-summary" class="edit-input" rows="3" placeholder="완료 기준이나 핵심 키워드를 적어 두면 과거 산출물이 자동 추천됩니다..."></textarea>
+          </div>
+
+          <!-- 표현(재사용): 과거 완료 프로젝트 R카드/산출물 자동 추천 -->
+          <div id="pem-reuse-box" class="sb-pem-reuse-box" style="display:none;">
+            <div class="sb-pem-reuse-head">♻️ 과거 산출물(R) 추천 — 체크하면 새 프로젝트로 불러와서 시작합니다</div>
+            <div id="pem-reuse-list" class="sb-pem-reuse-list"></div>
           </div>
         </div>
         <div class="modal-footer sb-modal-foot-split">
           <div class="sb-flex-gap-xs">
-            <button type="button" class="btn btn-secondary" id="pem-complete-archive-btn" style="display:none;">완료 → 보관</button>
+            <button type="button" class="btn btn-secondary" id="pem-open-req-btn">5-Why 요구사항 분석</button>
+            <button type="button" class="btn btn-secondary" id="pem-complete-archive-btn" style="display:none;">완료 검증 · 보관</button>
             <button type="button" class="btn btn-danger-soft" id="pem-delete-btn" style="display:none;">삭제</button>
           </div>
           <div class="sb-flex-gap-xs">
@@ -1008,7 +1045,7 @@
         <div id="tcm-panel-internal" class="sb-tcm-panel">
           <div id="tcm-dropzone" class="sb-tcm-dropzone">
             <p>산출물 파일을 여기로 드래그하거나 아래 버튼으로 <b>여러 파일</b>을 한 번에 선택하세요.</p>
-            <p class="sb-tcm-hint">업로드된 파일은 이 할일의 하위 산출물(<code>R</code>)로 DB 관계가 자동 연결되며, 로컬 연결 시 <code>SB/P-XX_.../P-XX-R-파일명</code>으로 자동 복사됩니다.</p>
+            <p class="sb-tcm-hint">업로드된 파일은 이 할일의 하위 산출물(<code>R</code>)로 DB 관계가 자동 연결되며, 로컬 폴더 연결 시 관계 파일(<code>.secondbrain-relations.json</code>)에 자동 기록됩니다.</p>
             <button type="button" class="sb-btn-primary-sm" id="tcm-pick-files-btn">＋ 산출물 파일 선택 (다중 가능)</button>
             <input type="file" id="tcm-file-input" multiple style="display:none;">
           </div>
@@ -1045,6 +1082,265 @@
     </div>
   </div>
 
+  <!-- GTD 명확화 (Clarify) 위자드 모달 -->
+  <div id="gtd-clarify-modal" class="modal-overlay" style="display:none;">
+    <div class="modal-card sb-tcm-modal">
+      <div class="modal-header">
+        <h3>🧭 GTD 명확화 (Clarify)</h3>
+        <button type="button" class="icon-btn-sm" id="gcm-close-btn">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="sb-tcm-target-line">수신함 카드: <strong id="gcm-doc-title"></strong></div>
+        <div class="sb-gcm-question">1. 이 항목에 구체적인 <b>행동이 필요한가요?</b></div>
+        <div class="sb-tcm-mode-tabs">
+          <button type="button" class="sb-tcm-tab" id="gcm-btn-no-action">아니오 · 행동 필요 없음 (버림 / 참고 / 언젠가)</button>
+          <button type="button" class="sb-tcm-tab active" id="gcm-btn-yes-action">예 · 행동 필요 (2분 규칙 / 위임 / 다음 행동)</button>
+        </div>
+
+        <!-- 행동 필요 없음 -->
+        <div id="gcm-branch-no" class="sb-gcm-branch is-hidden">
+          <div class="sb-gcm-no-grid">
+            <div class="sb-gcm-opt-card">
+              <strong>🗑️ 버림</strong>
+              <p>지금도 나중에도 필요 없으면 즉시 삭제합니다.</p>
+              <button type="button" class="btn btn-danger-soft" id="gcm-act-trash">버림 (삭제)</button>
+            </div>
+            <div class="sb-gcm-opt-card">
+              <strong>📚 참고 (R/자료)</strong>
+              <select id="gcm-ref-resource-sel" class="select-input"></select>
+              <input type="text" id="gcm-ref-new-name" class="edit-input input-sm" placeholder="또는 새 자료 주제명...">
+              <button type="button" class="sb-btn-primary-sm" id="gcm-act-ref">참고 자료로 보관</button>
+            </div>
+            <div class="sb-gcm-opt-card">
+              <strong>☁️ 언젠가 (Someday)</strong>
+              <p>지금 당장은 아니지만 주간 리뷰 때 다시 훑어봅니다.</p>
+              <button type="button" class="sb-btn-subtle" id="gcm-act-someday">언젠가 목록으로</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 행동 필요 -->
+        <div id="gcm-branch-yes" class="sb-gcm-branch">
+          <div class="sb-gcm-2min-bar">
+            <div>
+              <strong>⚡ 2분 규칙</strong>
+              <span>2분 안에 끝나는 일이라면 분류하지 말고 지금 바로 해치우세요!</span>
+            </div>
+            <div class="sb-flex-gap-xs">
+              <span class="sb-meta-pill sb-clock-pill" id="gcm-2min-clock">02:00</span>
+              <button type="button" class="sb-btn-subtle" id="gcm-2min-start">▶ 2분 타이머</button>
+              <button type="button" class="sb-btn-primary-sm" id="gcm-2min-done">✓ 지금 완료!</button>
+            </div>
+          </div>
+
+          <div class="sb-gcm-delegate-bar">
+            <span>🤝 남이 할 일이면 위임(대기):</span>
+            <input type="text" id="gcm-delegate-who" class="sb-field-input" placeholder="위임 대상자 (예: 김 대리, 외부 업체)">
+            <button type="button" class="sb-btn-subtle" id="gcm-act-delegate">위임 → 대기 목록</button>
+          </div>
+
+          <div class="sb-gcm-next-box">
+            <div class="sb-card-head" style="margin-bottom:8px;">
+              <strong>🎯 다음 행동 정의 (2개 이상 입력 시 새 프로젝트 자동 생성!)</strong>
+              <button type="button" class="sb-btn-subtle" id="gcm-add-action-row">＋ 다음 행동 추가</button>
+            </div>
+            <div id="gcm-actions-list" class="sb-gcm-actions-list"></div>
+            <div id="gcm-multi-project-box" class="sb-gcm-proj-box">
+              <div id="gcm-multi-project-hint" class="sb-tcm-hint" style="margin-bottom:6px !important;"></div>
+              <div class="sb-composer-grid">
+                <select id="gcm-existing-proj-sel" class="sb-field-select"></select>
+                <input type="text" id="gcm-new-proj-name" class="sb-field-input" placeholder="새 프로젝트 이름 (2개 이상 시 자동 생성)">
+              </div>
+            </div>
+            <div class="sb-qm-foot" style="margin-top:10px; justify-content:flex-end;">
+              <button type="button" class="sb-btn-primary" id="gcm-commit-next-actions">🎯 다음 행동 확정 저장</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" id="gcm-cancel-btn">닫기</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 자료 추출 4단계 점진적 요약 모달 (1원본 → 2굵게 → 3형광펜 → 4 3줄요약) -->
+  <div id="extract-reader-modal" class="modal-overlay" style="display:none;">
+    <div class="modal-card sb-tcm-modal sb-ex-modal">
+      <div class="modal-header">
+        <div class="sb-tcm-head-meta">
+          <h3>✨ 자료 추출 (점진적 요약 1~4단계)</h3>
+          <span class="sb-code-pill-xs" id="exm-doc-title"></span>
+        </div>
+        <button type="button" class="icon-btn-sm" id="exm-close-btn">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="sb-ex-stepper" id="exm-stepper">
+          <div class="sb-ex-step" data-exstep="1">1. 원본</div>
+          <div class="sb-ex-step" data-exstep="2">2. 굵게 (드래그)</div>
+          <div class="sb-ex-step" data-exstep="3">3. 형광펜 (드래그)</div>
+          <div class="sb-ex-step" data-exstep="4">4. 3줄 요약</div>
+        </div>
+        <div class="sb-ex-guide" id="exm-stage-guide"></div>
+
+        <!-- 4단계: 맨 위 3줄 요약 입력 -->
+        <div id="exm-summary-box" class="sb-ex-summary-box is-hidden">
+          <div class="sb-pd-add-head">📝 내 말로 3줄 요약 (문서 맨 위에 고정됩니다)</div>
+          <input type="text" id="exm-sum-1" class="sb-field-input" placeholder="1줄: 핵심 주제 한 문장">
+          <input type="text" id="exm-sum-2" class="sb-field-input" placeholder="2줄: 가장 중요한 근거 / 인사이트">
+          <input type="text" id="exm-sum-3" class="sb-field-input" placeholder="3줄: 내 프로젝트에 어떻게 적용할지">
+        </div>
+
+        <div class="sb-ex-toolbar">
+          <button type="button" class="sb-btn-subtle is-hidden" id="exm-btn-apply-bold"><b>B</b> 선택한 문장 굵게</button>
+          <button type="button" class="sb-btn-subtle is-hidden" id="exm-btn-apply-hl">🖍️ 선택한 구절 형광펜</button>
+          <button type="button" class="sb-btn-subtle is-hidden" id="exm-back-stage2">↩️ 2단계(굵게)로 돌아가기</button>
+        </div>
+
+        <div id="exm-reader-body" class="sb-ex-reader-body"></div>
+      </div>
+      <div class="modal-footer sb-modal-foot-split">
+        <span class="sb-tcm-hint" style="margin:0 !important;">본문에서 문장을 마우스로 드래그하면 현재 단계 서식이 자동 적용됩니다.</span>
+        <button type="button" class="btn btn-ai" id="exm-next-stage-btn">단계 완료 →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 요구사항 분석 5-Why 대형 MD 편집창 & 판정 빼기 사이클 모달 -->
+  <div id="req-editor-modal" class="modal-overlay" style="display:none;">
+    <div class="modal-card sb-req-modal">
+      <div class="modal-header">
+        <div class="sb-tcm-head-meta">
+          <h3>🔎 요구사항 분석 (5-Why · 본질 요구 · 판정)</h3>
+          <span class="sb-code-pill-xs" id="rem-proj-badge"></span>
+        </div>
+        <button type="button" class="icon-btn-sm" id="rem-close-btn">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="api-field">
+          <label for="rem-title-inp"><span>요구사항 한 줄 제목</span></label>
+          <input type="text" id="rem-title-inp" class="edit-input" placeholder="처음 떠오른 요구 한 줄...">
+        </div>
+        <div class="api-field">
+          <label for="rem-md-editor"><span>5-Why 요구사항 분석 마크다운</span></label>
+          <textarea id="rem-md-editor" class="edit-input sb-req-md-editor" rows="16"></textarea>
+        </div>
+        <div class="sb-req-verdict-box">
+          <div class="sb-pd-add-head">## 판정 (빼기 단계 사이클)</div>
+          <div class="sb-req-verdict-opts">
+            <label class="sb-verdict-pill is-keep"><input type="radio" name="rem-verdict" value="keep" checked><span>유지 (본질과 같음)</span></label>
+            <label class="sb-verdict-pill is-reduce"><input type="radio" name="rem-verdict" value="reduce"><span>줄임 (본질에 맞게 다시 씀)</span></label>
+            <label class="sb-verdict-pill is-drop"><input type="radio" name="rem-verdict" value="drop"><span>삭제 (본질과 무관 · 제외)</span></label>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer sb-modal-foot-split">
+        <button type="button" class="btn btn-secondary" id="rem-cancel-btn">취소</button>
+        <div class="sb-flex-gap-xs">
+          <button type="button" class="btn btn-secondary" id="rem-save-btn">저장</button>
+          <button type="button" class="btn btn-ai" id="rem-save-next-btn">판정 저장 후 다음 요구사항으로 →</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 프로젝트 완료 검증 · 산출물 업로드 · 평가 · 아카이브 후속 선택 모달 -->
+  <div id="project-complete-modal" class="modal-overlay" style="display:none;">
+    <div class="modal-card sb-tcm-modal">
+      <div class="modal-header">
+        <div class="sb-tcm-head-meta">
+          <h3>🏁 프로젝트 완료 검증 & 아카이브</h3>
+          <span class="sb-code-pill-xs" id="pcm-proj-title"></span>
+        </div>
+        <button type="button" class="icon-btn-sm" id="pcm-close-btn">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="sb-pcm-section">
+          <h4>1. 정의한 예상 산출물 파일 업로드</h4>
+          <div id="pcm-deliverables-list" class="sb-pcm-list"></div>
+        </div>
+        <div class="sb-pcm-section">
+          <h4>2. 평가 기준 달성 판정</h4>
+          <div id="pcm-eval-list" class="sb-pcm-list"></div>
+        </div>
+        <div class="sb-pcm-section">
+          <h4>3. 아카이브 후 후속 진행 선택</h4>
+          <div class="sb-pcm-radio-col">
+            <label class="sb-check-inline"><input type="radio" name="pcm-next-mode" value="archive-only" checked><span>📦 그냥 아카이브(보관)로만 보냄</span></label>
+            <label class="sb-check-inline"><input type="radio" name="pcm-next-mode" value="existing"><span>🔗 기존 다음 프로젝트 / 액션 선택</span></label>
+            <div id="pcm-existing-wrap" class="sb-pcm-sub-indent is-hidden">
+              <select id="pcm-existing-proj-sel" class="select-input"></select>
+            </div>
+            <label class="sb-check-inline"><input type="radio" name="pcm-next-mode" value="new"><span>🚀 새 후속 프로젝트 + 첫 다음 액션 바로 생성</span></label>
+            <div id="pcm-new-wrap" class="sb-pcm-sub-indent is-hidden">
+              <input type="text" id="pcm-new-proj-name" class="edit-input input-sm" placeholder="새 후속 프로젝트 이름...">
+              <input type="text" id="pcm-new-first-action" class="edit-input input-sm" placeholder="첫 번째 다음 액션 (선택)...">
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" id="pcm-cancel-btn">취소</button>
+        <button type="button" class="btn btn-ai" id="pcm-confirm-btn">완료 확정 및 아카이브</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 인생 중요 목표 5가지 설정 모달 -->
+  <div id="life-goals-modal" class="modal-overlay" style="display:none;">
+    <div class="modal-card sb-modal-compact" style="max-width:560px;">
+      <div class="modal-header">
+        <h3>🎯 인생 중요 목표 5가지 설정</h3>
+        <button type="button" class="icon-btn-sm" id="lgm-close-btn">✕</button>
+      </div>
+      <form id="lgm-form">
+        <div class="modal-body">
+          <p class="settings-desc">최대 5가지 핵심 인생 목표를 정해두면 각 프로젝트를 해당 목표와 연결해 방향성을 유지할 수 있습니다.</p>
+          <div class="sb-lgm-rows">
+            <div class="sb-lgm-row"><input type="color" id="lgm-color-0" value="#4f46e5"><input type="text" id="lgm-title-0" class="edit-input" placeholder="목표 1 제목 (예: 건강·체력)"><input type="text" id="lgm-desc-0" class="edit-input" placeholder="한 줄 설명"></div>
+            <div class="sb-lgm-row"><input type="color" id="lgm-color-1" value="#0ea5e9"><input type="text" id="lgm-title-1" class="edit-input" placeholder="목표 2 제목 (예: 커리어·전문성)"><input type="text" id="lgm-desc-1" class="edit-input" placeholder="한 줄 설명"></div>
+            <div class="sb-lgm-row"><input type="color" id="lgm-color-2" value="#10b981"><input type="text" id="lgm-title-2" class="edit-input" placeholder="목표 3 제목 (예: 재무적 자유)"><input type="text" id="lgm-desc-2" class="edit-input" placeholder="한 줄 설명"></div>
+            <div class="sb-lgm-row"><input type="color" id="lgm-color-3" value="#f59e0b"><input type="text" id="lgm-title-3" class="edit-input" placeholder="목표 4 제목 (예: 가족·관계)"><input type="text" id="lgm-desc-3" class="edit-input" placeholder="한 줄 설명"></div>
+            <div class="sb-lgm-row"><input type="color" id="lgm-color-4" value="#e11d48"><input type="text" id="lgm-title-4" class="edit-input" placeholder="목표 5 제목 (예: 창작·지식 자산화)"><input type="text" id="lgm-desc-4" class="edit-input" placeholder="한 줄 설명"></div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" id="lgm-cancel-btn">취소</button>
+          <button type="submit" class="btn btn-ai">목표 저장</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 카드 속성 · 소속 · 다음행동 · 명확화 모달 -->
+  <div id="card-props-modal" class="modal-overlay" style="display:none;">
+    <div class="modal-card sb-modal-compact" style="max-width:660px; max-height:90vh; display:flex; flex-direction:column;">
+      <div class="modal-header">
+        <div style="display:flex; align-items:center; gap:8px; min-width:0;">
+          <h3 id="cpm-header-title" style="margin:0;">📋 카드 속성 · 소속 설정</h3>
+        </div>
+        <div style="display:flex; align-items:center; gap:6px;">
+          <button type="button" class="btn btn-secondary btn-sm" id="cpm-open-content-top" title="마크다운/원본 파일 내용물 열기">📝 내용물 열기</button>
+          <button type="button" class="icon-btn-sm" id="cpm-close-btn">✕</button>
+        </div>
+      </div>
+      <div class="modal-body" id="cpm-body" style="overflow-y:auto; flex:1; display:flex; flex-direction:column; gap:14px;">
+        <!-- Dynamic card properties form -->
+      </div>
+      <div class="modal-footer" style="justify-content:space-between; flex-wrap:wrap; gap:8px;">
+        <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+          <button type="button" class="btn btn-secondary btn-sm" id="cpm-btn-clarify">🧭 명확화 (GTD)</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="cpm-btn-extract">✨ 추출 1~4단계</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="cpm-btn-delete" style="color:#dc2626;">🗑️ 삭제</button>
+        </div>
+        <div style="display:flex; align-items:center; gap:6px;">
+          <button type="button" class="btn btn-secondary" id="cpm-cancel-btn">닫기</button>
+          <button type="button" class="btn btn-ai" id="cpm-save-btn">💾 속성 저장</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- OS 멀티 윈도우 레이어 (이동 · 크기조절 · 최소화 · 최대화 · 닫기) -->
   <div id="os-window-layer" class="os-window-layer"></div>
 
@@ -1052,22 +1348,27 @@
   <div id="toast-container"></div>
 
   <!-- 스크립트 (file:// 및 GitHub Pages 모두 호환) -->
-  <script src="js/markdown.js?v=37"></script>
-  <script src="js/security-backup.js?v=37"></script>
-  <script src="js/store.js?v=38"></script>
-  <script src="js/ai-client.js?v=37"></script>
-  <script src="js/auth.js?v=37"></script>
-  <script src="js/drive-sync.js?v=37"></script>
-  <script src="js/local-bridge.js?v=37"></script>
-  <script src="js/local-folder-sync.js?v=37"></script>
-  <script src="js/sb-folder-mirror.js?v=37"></script>
-  <script src="js/window-manager.js?v=37"></script>
-  <script src="js/origin-plot.js?v=37"></script>
-  <script src="js/spreadsheet.js?v=37"></script>
-  <script src="js/spreadsheet-ui.js?v=37"></script>
-  <script src="js/math-markdown-editor.js?v=37"></script>
-  <script src="js/project-workspace.js?v=37"></script>
-  <script src="js/para-dashboard.js?v=37"></script>
-  <script src="js/app.js?v=37"></script>
+  <script src="js/markdown.js?v=39"></script>
+  <script src="js/security-backup.js?v=40"></script>
+  <script src="js/store.js?v=41"></script>
+  <script src="js/ai-client.js?v=39"></script>
+  <script src="js/auth.js?v=39"></script>
+  <script src="js/drive-sync.js?v=39"></script>
+  <script src="js/local-bridge.js?v=48"></script>
+  <script src="js/local-folder-sync.js?v=48"></script>
+  <script src="js/window-manager.js?v=48"></script>
+  <script src="js/doc-postits.js?v=48"></script>
+  <script src="js/pdf-converter.js?v=48"></script>
+  <script src="js/screen-capture.js?v=48"></script>
+  <script src="js/origin-plot.js?v=48"></script>
+  <script src="js/spreadsheet.js?v=39"></script>
+  <script src="js/spreadsheet-ui.js?v=48"></script>
+  <script src="js/math-markdown-editor.js?v=48"></script>
+  <script src="js/gtd-secondbrain.js?v=48"></script>
+  <script src="js/google-calendar.js?v=48"></script>
+  <script src="js/project-workspace.js?v=48"></script>
+  <script src="js/para-dashboard.js?v=48"></script>
+  <script src="js/app.js?v=48"></script>
 </body>
 </html>
+

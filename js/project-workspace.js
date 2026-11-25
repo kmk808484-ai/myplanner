@@ -40,15 +40,23 @@
   }
 
   function getRoleMeta(role) {
-    if (role === 'T') return { code: 'T', label: '할일', cls: 'is-role-t', title: '할일 (Todo) — 클릭하여 자료형태 변경 (T → S → R)' };
-    if (role === 'R') return { code: 'R', label: '산출물', cls: 'is-role-r', title: '산출물 (Result) — 클릭하여 자료형태 변경 (R → T → S)' };
-    return { code: 'S', label: '자료', cls: 'is-role-s', title: '자료 (Source) — 클릭하여 자료형태 변경 (S → R → T)' };
+    if (role === 'T') return { code: 'T', label: '할일', cls: 'is-role-t', title: '할일 (Todo) — 클릭하여 유형 변경 (T → S → R → M)' };
+    if (role === 'R') return { code: 'R', label: '산출물', cls: 'is-role-r', title: '산출물 (Result) — 클릭하여 유형 변경 (R → M → T → S)' };
+    if (role === 'M') return { code: 'M', label: '마일스톤', cls: 'is-role-m', title: '마일스톤 (Milestone) — 클릭하여 유형 변경 (M → T → S → R)' };
+    return { code: 'S', label: '자료', cls: 'is-role-s', title: '자료 (Source) — 클릭하여 유형 변경 (S → R → M → T)' };
   }
 
   function nextRoleCode(role) {
     if (role === 'T') return 'S';
     if (role === 'S') return 'R';
+    if (role === 'R') return 'M';
     return 'T';
+  }
+
+  function getResultSubtypeLabel(st) {
+    if (st === 'trial_error') return '시행착오';
+    if (st === 'mistake') return '실수유형';
+    return '산출물';
   }
 
   function isCardDelayed(doc) {
@@ -71,13 +79,26 @@
     const $ = (id) => document.getElementById(id);
 
     // State inside Project Detail Workspace
-    let detailTab = 'cards'; // 'cards' | 'gantt' | 'risks' | 'templates'
-    let cardRoleFilter = 'all'; // 'all' | 'T' | 'S' | 'R' | 'open' | 'done'
+    let detailTab = 'cards'; // 'cards' | 'next-actions' | 'requirements' | 'gantt' | 'risks' | 'templates'
+    let cardRoleFilter = 'all'; // 'all' | 'T' | 'S' | 'R' | 'M' | 'trial_error' | 'mistake' | 'open' | 'done'
     let cardTagFilter = '';
     let riskLevelFilter = 'all'; // 'all' | 'A' | 'B' | 'C'
+    let projNaCtx = 'all';
+    let projNaTime = 'all';
+    let projNaEnergy = 'all';
     let editingGanttDocId = null;
     let inlineSubParentId = null;
     const expandedCardIds = new Set();
+
+    // Requirement Editor Modal state
+    let reqEditProjectId = null;
+    let reqEditId = null;
+    let reqEditOnSave = null;
+
+    // Project Complete & Archive Modal state
+    let completeProjId = null;
+    let completeProjOnDone = null;
+    let completeStagedMap = new Map(); // specId -> File[]
 
     // Completion Modal state
     let completionTargetDoc = null;
@@ -505,18 +526,22 @@
         .split(/[,\s]+/)
         .map((t) => t.trim().replace(/^#+/, ''))
         .filter(Boolean);
-      const roleVal = ['T', 'S', 'R'].includes(role) ? role : 'T';
-      const kindVal = roleVal === 'R' ? 'deliverable' : (startDate || endDate ? 'event' : (roleVal === 'T' ? 'task' : 'note'));
+      const roleVal = ['T', 'S', 'R', 'M'].includes(role) ? role : 'T';
+      const kindVal = roleVal === 'M'
+        ? 'milestone'
+        : (roleVal === 'R' ? 'deliverable' : (startDate || endDate ? 'event' : (roleVal === 'T' ? 'task' : 'note')));
 
       const doc = Store.touchNode({
         id: Store.genId(),
         type: 'doc',
         name: fileName,
-        icon: roleVal === 'T' ? '☑️' : (roleVal === 'R' ? '📦' : '📄'),
-        tag: parsedTags.map((t) => `#${t}`).join(' ') || (roleVal === 'T' ? '#할일' : (roleVal === 'R' ? '#산출물' : '#자료')),
+        icon: roleVal === 'M' ? '◆' : (roleVal === 'T' ? '☑️' : (roleVal === 'R' ? '📦' : '📄')),
+        tag: parsedTags.map((t) => `#${t}`).join(' ') || (roleVal === 'M' ? '#마일스톤' : (roleVal === 'T' ? '#할일' : (roleVal === 'R' ? '#산출물' : '#자료'))),
         customTags: parsedTags,
         cardRole: roleVal,
         cardKind: kindVal,
+        resultSubtype: roleVal === 'R' ? 'output' : undefined,
+        extractStage: roleVal === 'S' ? 1 : undefined,
         isTodayCore: Boolean(isTodayCore),
         completed: false,
         startDate: String(startDate || '').trim(),
@@ -529,6 +554,11 @@
       folder.children.unshift(doc);
       if (projectEntity) {
         Store.addRelation({ sourceId: doc.id, targetId: projectEntity.id, type: 'project' });
+        Store.logChange({
+          category: 'task',
+          projectName: projectEntity.name,
+          message: `[${Store.getParaCode(projectEntity)}] ${getRoleMeta(roleVal).label} "${cleanTitle}" 추가`
+        });
       }
       if (parentDoc) {
         Store.linkSubCard(parentDoc, doc, { inheritPara: true });
@@ -547,40 +577,52 @@
         return;
       }
       Store.normalizeParaEntityFields(proj);
+      Store.syncOverdueTasksToWaiting();
       const code = Store.getParaCode(proj);
+      const lv = Store.getProjectLevel(proj.id);
+      const parentProj = proj.parentProjectId ? Store.findParaEntity(proj.parentProjectId) : null;
+      const lifeGoal = Store.getLifeGoalById(proj.lifeGoalId);
       const linkedDocs = Store.getProjectLinkedDocs(proj.id, hooks.isItemVisible);
       const totalTasks = linkedDocs.filter((d) => Store.getCardRole(d) === 'T').length;
       const doneTasks = linkedDocs.filter((d) => Store.getCardRole(d) === 'T' && d.completed).length;
-      const datedCount = linkedDocs.filter((d) => d.startDate && d.endDate).length;
+      const datedCount = linkedDocs.filter((d) => (d.startDate && d.endDate) || (Store.getCardRole(d) === 'M' && (d.endDate || d.startDate))).length;
+      const naCount = Store.getProjectNextActionEntries(proj.id, hooks.isItemVisible).length;
+      const missedTasks = Store.getProjectOverdueMissedTasks(proj.id, hooks.isItemVisible);
+      const reqCount = (proj.requirements || []).filter((r) => r.verdict !== 'drop').length;
       const riskA = (proj.risks || []).filter((r) => r.level === 'A' && r.status !== 'resolved').length;
       const isHold = proj.status === 'hold';
 
       canvas.innerHTML = `
-        <header class="sb-pd-header">
+        <header class="sb-pd-header${missedTasks.length > 0 ? ' is-overdue-proj' : ''}">
           <div class="sb-pd-header-left">
-            <button type="button" class="sb-btn-subtle" id="sb-pd-back-btn">← 프로젝트 목록</button>
+            <div class="sb-flex-gap-xs">
+              <button type="button" class="sb-btn-subtle" id="sb-pd-back-btn">← 프로젝트 목록</button>
+              <span class="sb-lv-badge">Lv.${lv}</span>
+              ${parentProj ? `<button type="button" class="sb-btn-subtle" id="sb-pd-unnest-btn" title="상위 프로젝트(${esc(parentProj.name)})에서 분리">상위: ${esc(parentProj.name)} ✕</button>` : ''}
+              ${lifeGoal ? `<span class="sb-goal-chip" style="--gcol:${esc(lifeGoal.color || '#4f46e5')}">🎯 ${esc(lifeGoal.title)}</span>` : ''}
+            </div>
             <div class="sb-pd-title-row">
               <span class="sb-code-pill">${esc(code)}</span>
               <h1 class="sb-page-title">${esc(proj.name)}</h1>
               <span class="sb-status-pill ${isHold ? 'is-hold' : 'is-active'}">${proj.archived ? '보관됨' : (isHold ? '보류' : '진행')}</span>
               ${proj.dueDate ? `<span class="sb-dday-pill">마감 ${esc(proj.dueDate)}</span>` : ''}
+              ${missedTasks.length > 0 ? `<span class="sb-overdue-badge">⚠️ 수행일 누락 ${missedTasks.length}건 → 대기 이동됨</span>` : ''}
             </div>
             <p class="sb-page-sub">
-              ${esc(proj.summary || '프로젝트 내부 카드(상위/하위 계층 · 할일/자료/산출물), 간트차트, 리스크(A/B/C), 템플릿을 한 곳에서 관리합니다.')}
-              · 로컬 미러 폴더: <code>SB/${esc(Store.getSbFolderName(proj))}/</code>
+              ${esc(proj.summary || '프로젝트 내부 구성(카드·다음행동·요구사항 5-Why·산출물·평가기준·간트차트·리스크)을 한 곳에서 관리합니다.')}
             </p>
           </div>
           <div class="sb-pd-header-actions">
             <button type="button" class="sb-btn-subtle" id="sb-pd-edit-btn">속성 편집</button>
-            ${!proj.archived ? `<button type="button" class="sb-btn-primary-sm" id="sb-pd-archive-btn">완료 → 보관</button>` : ''}
+            ${!proj.archived ? `<button type="button" class="sb-btn-primary-sm" id="sb-pd-archive-btn">완료 검증 · 보관</button>` : ''}
           </div>
         </header>
 
         <div class="sb-pd-summary-strip">
           <div class="sb-pd-mini-stat"><span>전체 카드</span><strong>${linkedDocs.length}</strong></div>
+          <div class="sb-pd-mini-stat"><span>다음 행동</span><strong>${naCount}건</strong></div>
           <div class="sb-pd-mini-stat"><span>할일 완료</span><strong>${doneTasks} / ${totalTasks}</strong></div>
-          <div class="sb-pd-mini-stat"><span>일정 이벤트</span><strong>${datedCount}건</strong></div>
-          <div class="sb-pd-mini-stat ${riskA > 0 ? 'is-danger' : ''}"><span>고위험(A) 리스크</span><strong>${riskA}건</strong></div>
+          <div class="sb-pd-mini-stat ${riskA > 0 || missedTasks.length > 0 ? 'is-danger' : ''}"><span>리스크(A) · 누락</span><strong>${riskA} · ${missedTasks.length}</strong></div>
           <div class="sb-pd-mini-stat sb-pd-prog-stat">
             <span>진행도 ${proj.progress}%</span>
             <div class="sb-prog-track"><div class="sb-prog-fill" style="width:${proj.progress}%"></div></div>
@@ -590,39 +632,49 @@
         <section class="sb-card sb-pd-main-card">
           <div class="sb-subtabs" id="sb-pd-tabs">
             <button type="button" class="sb-subtab${detailTab === 'cards' ? ' active' : ''}" data-pd-tab="cards">구성 · 카드 트리 (${linkedDocs.length})</button>
+            <button type="button" class="sb-subtab${detailTab === 'next-actions' ? ' active' : ''}" data-pd-tab="next-actions">다음 행동 (${naCount})</button>
+            <button type="button" class="sb-subtab${detailTab === 'requirements' ? ' active' : ''}" data-pd-tab="requirements">요구사항 · 산출물 · 평가 (${reqCount})</button>
             <button type="button" class="sb-subtab${detailTab === 'gantt' ? ' active' : ''}" data-pd-tab="gantt">간트차트 (${datedCount})</button>
-            <button type="button" class="sb-subtab${detailTab === 'risks' ? ' active' : ''}" data-pd-tab="risks">리스크 관리 A/B/C (${(proj.risks || []).length})</button>
-            <button type="button" class="sb-subtab${detailTab === 'templates' ? ' active' : ''}" data-pd-tab="templates">MD 템플릿 (${(proj.templates || []).length + Store.getGlobalTemplates().length})</button>
+            <button type="button" class="sb-subtab${detailTab === 'risks' ? ' active' : ''}" data-pd-tab="risks">리스크 A/B/C (${(proj.risks || []).length})</button>
+            <button type="button" class="sb-subtab${detailTab === 'templates' ? ' active' : ''}" data-pd-tab="templates">MD 템플릿</button>
           </div>
           <div id="sb-pd-tab-body"></div>
         </section>
       `;
 
+      const rerender = () => renderProjectDetailView(canvas, projectId, { onBack, onOpenProjectModal });
       $('sb-pd-back-btn')?.addEventListener('click', () => onBack?.());
       $('sb-pd-edit-btn')?.addEventListener('click', () => onOpenProjectModal?.(proj));
-      $('sb-pd-archive-btn')?.addEventListener('click', () => {
-        Store.completeAndArchiveProject(proj.id);
+      $('sb-pd-unnest-btn')?.addEventListener('click', () => {
+        Store.setProjectParent(proj.id, '');
         hooks.saveAndRender();
-        hooks.showToast(`"${proj.name}" 완료 후 보관함으로 이동했습니다.`);
-        onBack?.();
+        hooks.showToast(`"${proj.name}" 상하관계가 해제되어 Lv.1이 되었습니다.`);
+        rerender();
+      });
+      $('sb-pd-archive-btn')?.addEventListener('click', () => {
+        openProjectCompleteModal(proj, () => onBack?.());
       });
 
       canvas.querySelectorAll('[data-pd-tab]').forEach((btn) => {
         btn.addEventListener('click', () => {
           detailTab = btn.dataset.pdTab || 'cards';
-          renderProjectDetailView(canvas, projectId, { onBack, onOpenProjectModal });
+          rerender();
         });
       });
 
       const body = $('sb-pd-tab-body');
       if (detailTab === 'cards') {
-        renderProjectCardsTab(body, proj, linkedDocs, () => renderProjectDetailView(canvas, projectId, { onBack, onOpenProjectModal }));
+        renderProjectCardsTab(body, proj, linkedDocs, rerender);
+      } else if (detailTab === 'next-actions') {
+        renderProjectNextActionsTab(body, proj, linkedDocs, rerender);
+      } else if (detailTab === 'requirements') {
+        renderProjectRequirementsTab(body, proj, rerender);
       } else if (detailTab === 'gantt') {
-        renderProjectGanttTab(body, proj, linkedDocs, () => renderProjectDetailView(canvas, projectId, { onBack, onOpenProjectModal }));
+        renderProjectGanttTab(body, proj, linkedDocs, rerender);
       } else if (detailTab === 'risks') {
-        renderProjectRisksTab(body, proj, () => renderProjectDetailView(canvas, projectId, { onBack, onOpenProjectModal }));
+        renderProjectRisksTab(body, proj, rerender);
       } else {
-        renderProjectTemplatesTab(body, proj, () => renderProjectDetailView(canvas, projectId, { onBack, onOpenProjectModal }));
+        renderProjectTemplatesTab(body, proj, rerender);
       }
     }
 
@@ -638,6 +690,9 @@
         if (cardRoleFilter === 'T' && role !== 'T') return false;
         if (cardRoleFilter === 'S' && role !== 'S') return false;
         if (cardRoleFilter === 'R' && role !== 'R') return false;
+        if (cardRoleFilter === 'M' && role !== 'M') return false;
+        if (cardRoleFilter === 'trial_error' && !(role === 'R' && doc.resultSubtype === 'trial_error')) return false;
+        if (cardRoleFilter === 'mistake' && !(role === 'R' && doc.resultSubtype === 'mistake')) return false;
         if (cardRoleFilter === 'open' && doc.completed) return false;
         if (cardRoleFilter === 'done' && !doc.completed) return false;
         if (cardTagFilter && !Store.getCardTags(doc).includes(cardTagFilter)) return false;
@@ -688,9 +743,23 @@
         const compBadge = doc.completed
           ? `<span class="sb-comp-badge">${doc.completionMode === 'internal' ? '내부완료' : (doc.completionMode === 'external' ? '외부완료' : '완료')}</span>`
           : '';
+        const reuseBadge = (role === 'R' && Number(doc.reuseCount || 0) > 0)
+          ? `<span class="sb-reuse-badge" title="다른 프로젝트에서 인용·재사용된 횟수">♻️ ${doc.reuseCount}회</span>`
+          : '';
+        const extractBadge = role === 'S'
+          ? `<button type="button" class="sb-extract-pill is-ex-${Number(doc.extractStage || 1)}" data-act="extract" title="점진적 요약 (추출 1~4단계)">추출 ${Number(doc.extractStage || 1)}단계</button>`
+          : '';
+        const subtypeSel = role === 'R'
+          ? `<select class="sb-subtype-mini" data-act="subtype" title="R 자료 세부 분류">` +
+            `  <option value="output"${(!doc.resultSubtype || doc.resultSubtype === 'output') ? ' selected' : ''}>산출물</option>` +
+            `  <option value="trial_error"${doc.resultSubtype === 'trial_error' ? ' selected' : ''}>시행착오</option>` +
+            `  <option value="mistake"${doc.resultSubtype === 'mistake' ? ' selected' : ''}>실수유형</option>` +
+            `</select>`
+          : '';
+        const isRunning = Store.isTaskCurrentlyRunning(doc);
 
         let html = `
-          <div class="sb-tree-card-row${depth > 0 ? ' is-subcard' : ''}${doc.completed ? ' is-done' : ''}" data-doc-id="${esc(doc.id)}" style="margin-left:${Math.min(depth, 4) * 24}px">
+          <div class="sb-tree-card-row${depth > 0 ? ' is-subcard' : ''}${doc.completed ? ' is-done' : ''}${doc.missedToWaiting ? ' is-overdue-row' : ''}" data-doc-id="${esc(doc.id)}" style="margin-left:${Math.min(depth, 4) * 24}px">
             <div class="sb-tc-left">
               ${depth > 0 ? `<span class="sb-sub-arrow">↳</span>` : ''}
               ${hasKids
@@ -698,8 +767,12 @@
                 : `<span class="sb-tree-toggle-spacer"></span>`}
               <button type="button" class="sb-checkbox-box${doc.completed ? ' is-checked' : ''}" data-act="complete" title="${doc.completed ? '완료 취소' : '완료 처리 (내부/외부처리)'}">${doc.completed ? svg('check', 11) : ''}</button>
               <button type="button" class="sb-role-pill ${rMeta.cls}" data-act="cycle-role" title="${esc(rMeta.title)}">${rMeta.code} ${rMeta.label}</button>
+              ${subtypeSel}
               <button type="button" class="sb-tc-title" data-act="open">${esc(cleanTitle)}</button>
+              ${isRunning ? `<span class="sb-running-pill">수행중</span>` : ''}
               ${compBadge}
+              ${reuseBadge}
+              ${extractBadge}
               ${periodHtml}
               ${tags.slice(0, 4).map((t) => `<span class="sb-tag-chip" data-tag-click="${esc(t)}">#${esc(t)}</span>`).join('')}
             </div>
@@ -708,6 +781,7 @@
               <button type="button" class="sb-mini-ghost" data-act="add-sub" title="하위 카드 추가">+ 하위</button>
               <button type="button" class="sb-mini-ghost" data-act="edit-tags" title="태그 편집">#태그</button>
               ${role === 'T' && !doc.completed ? `<button type="button" class="sb-mini-accent" data-act="complete">완료처리</button>` : ''}
+              <button type="button" class="sb-mini-icon-act is-del" data-act="delete" title="카드 삭제">${svg('trash', 12)}</button>
             </div>
           </div>
         `;
@@ -738,6 +812,10 @@
         return html;
       };
 
+      const recs = Store.getRecommendedDeliverables(`${proj.name} ${proj.summary || ''}`, allTags)
+        .filter((x) => x.project.id !== proj.id && !linkedIdSet.has(x.doc.id))
+        .slice(0, 4);
+
       container.innerHTML = `
         <div class="sb-pd-filter-bar">
           <div class="sb-filter-group">
@@ -746,6 +824,9 @@
               { k: 'T', lbl: 'T 할일' },
               { k: 'S', lbl: 'S 자료' },
               { k: 'R', lbl: 'R 산출물' },
+              { k: 'M', lbl: '◆ 마일스톤' },
+              { k: 'trial_error', lbl: '시행착오' },
+              { k: 'mistake', lbl: '실수유형' },
               { k: 'open', lbl: '미완료' },
               { k: 'done', lbl: '완료' }
             ].map((f) => `<button type="button" class="sb-filter-chip${cardRoleFilter === f.k ? ' active' : ''}" data-role-filter="${f.k}">${f.lbl}</button>`).join('')}
@@ -759,27 +840,45 @@
           ` : ''}
         </div>
 
+        ${recs.length > 0 ? `
+          <div class="sb-reuse-rec-box">
+            <div class="sb-reuse-rec-head">♻️ 표현(재사용) 추천 — 키워드·태그가 겹치는 과거 산출물 / 시행착오를 이 프로젝트로 불러와 바로 시작하세요</div>
+            <div class="sb-reuse-rec-grid">
+              ${recs.map(({ doc: rdoc, project: rproj }) => `
+                <div class="sb-reuse-rec-item">
+                  <div class="sb-reuse-rec-info">
+                    <strong>${esc(rdoc.name.replace(/\.md$/i, ''))}</strong>
+                    <span>${esc(Store.getParaCode(rproj))} ${esc(rproj.name)} · ${getResultSubtypeLabel(rdoc.resultSubtype)} · ♻️ ${Number(rdoc.reuseCount || 0)}회</span>
+                  </div>
+                  <button type="button" class="sb-mini-accent" data-reuse-doc="${esc(rdoc.id)}">＋ 불러오기</button>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        ` : ''}
+
         <div class="sb-pd-tree-list">
           ${visibleRoots.length > 0
             ? visibleRoots.map((d) => renderNodeRecursive(d, 0)).join('')
-            : `<div class="sb-empty-line"><span>조건에 맞는 프로젝트 카드가 없어요. 아래 입력란에서 첫 할일·자료·이벤트를 추가해 보세요.</span></div>`}
+            : `<div class="sb-empty-line"><span>조건에 맞는 프로젝트 카드가 없어요. 아래 입력란에서 첫 할일·자료·마일스톤을 추가해 보세요.</span></div>`}
         </div>
 
-        <!-- Bottom Quick Add Event / Task / Source with Optional Duration -->
+        <!-- Bottom Quick Add Event / Task / Source / Milestone with Optional Duration -->
         <form class="sb-pd-add-event-box" id="sb-pd-add-card-form">
-          <div class="sb-pd-add-head">＋ 프로젝트 세부 이벤트 · 할일 · 자료 추가 (기간 입력 시 간트차트에 자동 반영)</div>
+          <div class="sb-pd-add-head">＋ 프로젝트 세부 이벤트 · 할일 · 자료 · 마일스톤 추가 (기간 입력 시 간트차트에 자동 반영)</div>
           <div class="sb-pd-add-grid">
-            <input type="text" id="sb-pd-new-title" class="sb-field-input" placeholder="제목 (예: 와이어프레임 설계, API 연동 테스트...)" required>
+            <input type="text" id="sb-pd-new-title" class="sb-field-input" placeholder="제목 (예: 와이어프레임 설계, 1차 마일스톤 배포...)" required>
             <select id="sb-pd-new-role" class="sb-field-select">
               <option value="T">T 할일 (Todo)</option>
               <option value="S">S 자료 (Source)</option>
-              <option value="R">R 산출물 (Result)</option>
+              <option value="R">R 산출물 / 시행착오</option>
+              <option value="M">◆ M 마일스톤 (중요일정)</option>
             </select>
             <input type="text" id="sb-pd-new-tags" class="sb-field-input" placeholder="태그 (예: 설계, 절차, 검토)">
           </div>
           <div class="sb-pd-add-grid-2">
             <label class="sb-date-field"><span>시작일</span><input type="date" id="sb-pd-new-start" class="sb-field-input"></label>
-            <label class="sb-date-field"><span>종료일</span><input type="date" id="sb-pd-new-end" class="sb-field-input"></label>
+            <label class="sb-date-field"><span>종료/마일스톤일</span><input type="date" id="sb-pd-new-end" class="sb-field-input"></label>
             <label class="sb-check-inline"><input type="checkbox" id="sb-pd-new-core"><span>오늘의 핵심에 올리기</span></label>
             <button type="submit" class="sb-btn-primary-sm">＋ 카드/이벤트 추가</button>
           </div>
@@ -812,14 +911,43 @@
           rerender();
         });
 
-        row.querySelector('[data-act="open"]')?.addEventListener('click', () => hooks.launchItemDirectly(doc));
+        row.querySelector('[data-act="open"]')?.addEventListener('click', () => {
+          if (typeof hooks.openCardPropertiesModal === 'function') hooks.openCardPropertiesModal(doc, rerender);
+          else hooks.launchItemDirectly(doc);
+        });
 
         row.querySelector('[data-act="cycle-role"]')?.addEventListener('click', () => {
           const next = nextRoleCode(Store.getCardRole(doc));
           Store.setCardRole(doc, next);
           hooks.saveAndRender();
-          hooks.showToast(`자료형태가 ${next}(${getRoleMeta(next).label})로 변경되었습니다. (SB 폴더명 자동 갱신)`);
+          hooks.showToast(`카드 유형이 ${next}(${getRoleMeta(next).label})로 변경되었습니다.`);
           rerender();
+        });
+
+        row.querySelector('[data-act="subtype"]')?.addEventListener('change', (e) => {
+          Store.setCardResultSubtype(doc, e.target.value);
+          hooks.saveAndRender();
+          rerender();
+        });
+
+        row.querySelector('[data-act="extract"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          hooks.openExtractModal?.(doc);
+        });
+
+        row.querySelector('[data-act="delete"]')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const found = Store.findNodeAndParent(doc.id);
+          if (found?.parent?.children) {
+            Store.saveStateForUndo();
+            found.parent.children = found.parent.children.filter((c) => c.id !== doc.id);
+            Store.state.relations = (Store.state.relations || []).filter((r) => r.sourceId !== doc.id && r.targetId !== doc.id);
+            Store.persistRelations();
+            Store.logChange({ category: 'task', projectName: proj.name, message: `카드 삭제: "${doc.name}"` });
+            hooks.saveAndRender();
+            hooks.showToast(`"${doc.name.replace(/\.md$/i, '')}" 카드가 삭제되었습니다.`);
+            rerender();
+          }
         });
 
         row.querySelector('[data-act="toggle-core"]')?.addEventListener('click', () => {
@@ -867,6 +995,24 @@
         });
       });
 
+      // Bind Past Deliverable Reuse buttons
+      container.querySelectorAll('[data-reuse-doc]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const srcDoc = Store.findNodeAndParent(btn.dataset.reuseDoc)?.node;
+          if (!srcDoc) return;
+          Store.addRelation({ sourceId: srcDoc.id, targetId: proj.id, type: 'project', label: '재사용 인용' });
+          const cnt = Store.incrementCardReuse(srcDoc.id);
+          Store.logChange({
+            category: 'relation',
+            projectName: proj.name,
+            message: `과거 산출물 재사용 불러오기: "${srcDoc.name}" (누적 ${cnt}회)`
+          });
+          hooks.saveAndRender();
+          hooks.showToast(`♻️ "${srcDoc.name.replace(/\.md$/i, '')}" 프로젝트로 불러왔습니다! (재사용 ${cnt}회)`);
+          rerender();
+        });
+      });
+
       // Bind inline sub-card form
       container.querySelector('.sb-inline-sub-form')?.addEventListener('submit', (e) => {
         e.preventDefault();
@@ -911,17 +1057,17 @@
       const todayYmd = getTodayYmd();
       const todayMs = parseYmdToDayMs(todayYmd);
       const datedDocs = linkedDocs
-        .filter((d) => d.startDate && d.endDate && parseYmdToDayMs(d.startDate) !== null && parseYmdToDayMs(d.endDate) !== null)
-        .sort((a, b) => parseYmdToDayMs(a.startDate) - parseYmdToDayMs(b.startDate));
+        .filter((d) => (d.startDate && d.endDate && parseYmdToDayMs(d.startDate) !== null && parseYmdToDayMs(d.endDate) !== null) || (Store.getCardRole(d) === 'M' && (d.endDate || d.startDate)))
+        .sort((a, b) => (parseYmdToDayMs(a.startDate || a.endDate) || 0) - (parseYmdToDayMs(b.startDate || b.endDate) || 0));
 
       let minMs = todayMs - 2 * 86400000;
       let maxMs = todayMs + 14 * 86400000;
       datedDocs.forEach((d) => {
-        const s = parseYmdToDayMs(d.startDate);
-        const e = parseYmdToDayMs(d.endDate);
+        const s = parseYmdToDayMs(d.startDate || d.endDate);
+        const e = parseYmdToDayMs(d.endDate || d.startDate);
         const pe = parseYmdToDayMs(d.plannedEndDate);
-        if (s < minMs) minMs = s - 86400000;
-        if (e > maxMs) maxMs = e + 2 * 86400000;
+        if (s && s < minMs) minMs = s - 86400000;
+        if (e && e > maxMs) maxMs = e + 2 * 86400000;
         if (pe && pe > maxMs) maxMs = pe + 2 * 86400000;
       });
       const totalDays = Math.max(10, Math.round((maxMs - minMs) / 86400000) + 1);
@@ -936,18 +1082,21 @@
       }).join('');
 
       const rowsHtml = datedDocs.map((d) => {
-        const sMs = parseYmdToDayMs(d.startDate);
-        const eMs = parseYmdToDayMs(d.endDate);
+        const isMs = Store.getCardRole(d) === 'M';
+        const sStr = d.startDate || d.endDate;
+        const eStr = d.endDate || d.startDate;
+        const sMs = parseYmdToDayMs(sStr);
+        const eMs = parseYmdToDayMs(eStr);
         const leftPct = Math.max(0, ((sMs - minMs) / (totalDays * 86400000)) * 100);
         const widthPct = Math.max(3, (((eMs - sMs) + 86400000) / (totalDays * 86400000)) * 100);
         const delayed = isCardDelayed(d);
         const extended = isCardExtended(d);
-        const barCls = d.completed
-          ? 'is-done'
-          : (delayed ? 'is-delayed' : (extended ? 'is-extended' : 'is-normal'));
-        const statusTag = d.completed
-          ? '완료'
-          : (delayed ? '지연됨' : (extended ? '기간 연장됨' : '정상'));
+        const barCls = isMs
+          ? 'is-milestone'
+          : (d.completed ? 'is-done' : (delayed ? 'is-delayed' : (extended ? 'is-extended' : 'is-normal')));
+        const statusTag = isMs
+          ? '◆ 마일스톤'
+          : (d.completed ? '완료' : (delayed ? '지연됨' : (extended ? '기간 연장됨' : '정상')));
         const cleanTitle = String(d.name || '').replace(/\.md$/i, '');
         const isEditing = editingGanttDocId === d.id;
 
@@ -962,20 +1111,20 @@
           <div class="sb-gantt-row" data-gdoc-id="${esc(d.id)}">
             <div class="sb-gantt-label">
               <div class="sb-gantt-label-top">
-                <button type="button" class="sb-tc-title" data-gact="open">${esc(cleanTitle)}</button>
+                <button type="button" class="sb-tc-title" data-gact="open">${isMs ? '◆ ' : ''}${esc(cleanTitle)}</button>
                 <span class="sb-gantt-status-pill ${barCls}">${statusTag}</span>
               </div>
               <div class="sb-gantt-label-sub">
-                <span>${esc(d.startDate)} ~ ${esc(d.endDate)}</span>
+                <span>${isMs ? esc(eStr) : `${esc(sStr)} ~ ${esc(eStr)}`}</span>
                 <button type="button" class="sb-empty-cta" data-gact="edit-period">기간 수정</button>
               </div>
             </div>
             <div class="sb-gantt-track" data-gact="edit-period" title="클릭하여 기간 수정">
               <div class="sb-gantt-today-line" style="left:${todayPct}%"></div>
               ${plannedMarkerHtml}
-              <div class="sb-gantt-bar ${barCls}" style="left:${leftPct}%; width:${Math.min(100 - leftPct, widthPct)}%;">
-                <span>${formatShortDate(d.startDate)}~${formatShortDate(d.endDate)}</span>
-              </div>
+              ${isMs
+                ? `<span class="sb-gantt-milestone" style="left:${Math.min(98, leftPct)}%" title="◆ ${esc(cleanTitle)} (${esc(eStr)})">◆</span>`
+                : `<div class="sb-gantt-bar ${barCls}" style="left:${leftPct}%; width:${Math.min(100 - leftPct, widthPct)}%;"><span>${formatShortDate(sStr)}~${formatShortDate(eStr)}</span></div>`}
             </div>
           </div>
           ${isEditing ? `
@@ -1028,7 +1177,8 @@
         if (!doc) return;
         row.querySelector('[data-gact="open"]')?.addEventListener('click', (e) => {
           e.stopPropagation();
-          hooks.launchItemDirectly(doc);
+          if (typeof hooks.openCardPropertiesModal === 'function') hooks.openCardPropertiesModal(doc, rerender);
+          else hooks.launchItemDirectly(doc);
         });
         row.querySelectorAll('[data-gact="edit-period"]').forEach((el) => {
           el.addEventListener('click', () => {
@@ -1276,9 +1426,568 @@
       });
     }
 
+    // ---- Tab: Project Next Actions (현재 수행중 할일 + 상황/시간/에너지 필터 + 누락 대기) ----
+    function renderProjectNextActionsTab(container, proj, linkedDocs, rerender) {
+      Store.syncOverdueTasksToWaiting();
+      const opts = Store.state.gtdTagOptions || { contexts: ['@PC', '@폰', '@외출', '@집'], times: ['@15분', '@30분', '@1시간', '@2시간'], energies: ['@높음', '@중간', '@낮음'] };
+      const runningTasks = linkedDocs.filter((d) => Store.isTaskCurrentlyRunning(d));
+      const allTasks = linkedDocs.filter((d) => !d.completed && Store.getCardRole(d) === 'T');
+      const missedTasks = Store.getProjectOverdueMissedTasks(proj.id, hooks.isItemVisible);
+      const entries = Store.getProjectNextActionEntries(proj.id, hooks.isItemVisible).filter((e) => {
+        if (projNaCtx !== 'all' && e.context !== projNaCtx) return false;
+        if (projNaTime !== 'all' && e.time !== projNaTime) return false;
+        if (projNaEnergy !== 'all' && e.energy !== projNaEnergy) return false;
+        return true;
+      });
+
+      const mkTagRow = (lbl, grp, list, cur, attr) => `
+        <div class="sb-gtd-filter-row">
+          <span class="sb-gtd-flbl">${lbl}</span>
+          <div class="sb-filter-group">
+            <button type="button" class="sb-filter-chip${cur === 'all' ? ' active' : ''}" ${attr}="all">전체</button>
+            ${list.map((t) => `<button type="button" class="sb-filter-chip${cur === t ? ' active' : ''}" ${attr}="${esc(t)}">${esc(t)}</button>`).join('')}
+            <button type="button" class="sb-filter-chip sb-add-tag-chip" data-pna-addtag="${grp}">＋ 추가</button>
+          </div>
+        </div>
+      `;
+
+      container.innerHTML = `
+        <div class="sb-gtd-filter-box">
+          ${mkTagRow('상황', 'contexts', opts.contexts || [], projNaCtx, 'data-pctx')}
+          ${mkTagRow('허용 시간', 'times', opts.times || [], projNaTime, 'data-ptime')}
+          ${mkTagRow('인지적 부하', 'energies', opts.energies || [], projNaEnergy, 'data-penergy')}
+        </div>
+
+        <div class="sb-pna-section">
+          <h3 class="sb-tpl-col-title">🔥 현재 수행 중인 할일 (${runningTasks.length}건 · 오늘 날짜와 기간 일치)</h3>
+          ${runningTasks.length === 0
+            ? `<div class="sb-empty-line"><span>오늘 수행 기간에 해당하는 할일이 없습니다. 할일에 시작일~종료일을 지정해 보세요.</span></div>`
+            : runningTasks.map((t) => `
+              <div class="sb-running-task-box" data-rtask="${esc(t.id)}">
+                <div class="sb-rtask-head">
+                  <strong>${esc(t.name.replace(/\.md$/i, ''))}</strong>
+                  <span class="sb-period-pill">${formatShortDate(t.startDate)}~${formatShortDate(t.endDate)}</span>
+                </div>
+                <form class="sb-rtask-na-form">
+                  <input type="text" class="sb-field-input sb-rtna-txt" placeholder="이 할일의 다음 액션 입력 (예: 시안 피드백 메일 발송)" required>
+                  <select class="sb-field-select sb-rtna-ctx">${(opts.contexts || []).map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}</select>
+                  <select class="sb-field-select sb-rtna-time">${(opts.times || []).map((tm) => `<option value="${esc(tm)}">${esc(tm)}</option>`).join('')}</select>
+                  <select class="sb-field-select sb-rtna-en">${(opts.energies || []).map((en) => `<option value="${esc(en)}">${esc(en)}</option>`).join('')}</select>
+                  <button type="submit" class="sb-btn-primary-sm">＋ 다음 행동</button>
+                </form>
+              </div>
+            `).join('')}
+        </div>
+
+        <div class="sb-pna-section">
+          <h3 class="sb-tpl-col-title">🎯 프로젝트 다음 행동 목록 (${entries.length}건)</h3>
+          ${entries.length === 0
+            ? `<div class="sb-empty-line"><span>필터에 해당하는 다음 행동이 없습니다.</span></div>`
+            : `<div class="sb-na-item-list">
+                ${entries.map((it) => `
+                  <div class="sb-na-row" data-pna-doc="${esc(it.doc.id)}" data-pna-id="${esc(it.id)}" data-pna-kind="${it.kind}">
+                    <button type="button" class="sb-checkbox-box" data-pna-done="1" title="완료">${svg('check', 11)}</button>
+                    <div class="sb-na-row-main">
+                      <div class="sb-na-text">${esc(it.text)} ${it.isRunningTask ? `<span class="sb-running-pill">현재 수행중</span>` : ''}</div>
+                      <div class="sb-na-meta">할일: ${esc(it.doc.name.replace(/\.md$/i, ''))}</div>
+                    </div>
+                    <div class="sb-na-tags">
+                      <span class="sb-gtd-tag is-ctx">${esc(it.context)}</span>
+                      <span class="sb-gtd-tag is-time">${esc(it.time)}</span>
+                      <span class="sb-gtd-tag is-en">${esc(it.energy)}</span>
+                    </div>
+                  </div>
+                `).join('')}
+              </div>`}
+        </div>
+
+        ${allTasks.length > 0 ? `
+          <form class="sb-pd-add-event-box" id="sb-pna-quick-form">
+            <div class="sb-pd-add-head">＋ 프로젝트 할일에 다음 행동 바로 등록</div>
+            <div class="sb-pd-add-grid-2">
+              <select id="sb-pna-target-doc" class="sb-field-select">
+                ${allTasks.map((t) => `<option value="${esc(t.id)}">${esc(t.name.replace(/\.md$/i, ''))}</option>`).join('')}
+              </select>
+              <input type="text" id="sb-pna-text" class="sb-field-input" placeholder="구체적 다음 행동..." required>
+              <select id="sb-pna-ctx" class="sb-field-select">${(opts.contexts || []).map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}</select>
+              <select id="sb-pna-time" class="sb-field-select">${(opts.times || []).map((tm) => `<option value="${esc(tm)}">${esc(tm)}</option>`).join('')}</select>
+              <select id="sb-pna-en" class="sb-field-select">${(opts.energies || []).map((en) => `<option value="${esc(en)}">${esc(en)}</option>`).join('')}</select>
+              <button type="submit" class="sb-btn-primary-sm">＋ 추가</button>
+            </div>
+          </form>
+        ` : ''}
+
+        ${missedTasks.length > 0 ? `
+          <div class="sb-pna-section sb-overdue-box">
+            <h3 class="sb-tpl-col-title" style="color:var(--danger);">⚠️ 수행일 누락 → 대기 목록 이동됨 (${missedTasks.length}건)</h3>
+            ${missedTasks.map((d) => `
+              <div class="sb-inbox-full-row is-overdue-row" data-mdoc="${esc(d.id)}">
+                <div class="sb-inbox-item-text">
+                  <div class="sb-inbox-item-title">${esc(d.name.replace(/\.md$/i, ''))}</div>
+                  <div class="sb-inbox-item-snippet">원래 마감일: ${esc(d.endDate)}</div>
+                </div>
+                <button type="button" class="sb-btn-subtle" data-mact="resched">마감 +3일 재설정 & 복귀</button>
+              </div>
+            `).join('')}
+          </div>
+        ` : ''}
+      `;
+
+      container.querySelectorAll('[data-pctx]').forEach((b) => b.addEventListener('click', () => { projNaCtx = b.dataset.pctx; rerender(); }));
+      container.querySelectorAll('[data-ptime]').forEach((b) => b.addEventListener('click', () => { projNaTime = b.dataset.ptime; rerender(); }));
+      container.querySelectorAll('[data-penergy]').forEach((b) => b.addEventListener('click', () => { projNaEnergy = b.dataset.penergy; rerender(); }));
+      container.querySelectorAll('[data-pna-addtag]').forEach((b) => b.addEventListener('click', () => {
+        const val = prompt('추가할 태그를 입력하세요 (예: @카페, @45분, @최상):');
+        if (!val || !val.trim()) return;
+        Store.addCustomGtdTag(b.dataset.pnaAddtag, val);
+        rerender();
+      }));
+
+      container.querySelectorAll('.sb-running-task-box').forEach((box) => {
+        const doc = Store.findNodeAndParent(box.dataset.rtask)?.node;
+        box.querySelector('.sb-rtask-na-form')?.addEventListener('submit', (e) => {
+          e.preventDefault();
+          if (!doc) return;
+          Store.addNextActionToDoc(doc, {
+            text: box.querySelector('.sb-rtna-txt')?.value || '',
+            context: box.querySelector('.sb-rtna-ctx')?.value || '@PC',
+            time: box.querySelector('.sb-rtna-time')?.value || '@30분',
+            energy: box.querySelector('.sb-rtna-en')?.value || '@중간'
+          });
+          hooks.saveAndRender();
+          rerender();
+        });
+      });
+
+      $('sb-pna-quick-form')?.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const doc = Store.findNodeAndParent($('sb-pna-target-doc')?.value)?.node;
+        if (!doc) return;
+        Store.addNextActionToDoc(doc, {
+          text: $('sb-pna-text')?.value || '',
+          context: $('sb-pna-ctx')?.value || '@PC',
+          time: $('sb-pna-time')?.value || '@30분',
+          energy: $('sb-pna-en')?.value || '@중간'
+        });
+        hooks.saveAndRender();
+        rerender();
+      });
+
+      container.querySelectorAll('.sb-na-row[data-pna-doc]').forEach((row) => {
+        const doc = Store.findNodeAndParent(row.dataset.pnaDoc)?.node;
+        row.querySelector('[data-pna-done]')?.addEventListener('click', () => {
+          if (!doc) return;
+          if (row.dataset.pnaKind === 'sub-action') Store.toggleNextActionOnDoc(doc, row.dataset.pnaId);
+          else { doc.completed = true; doc.completedAt = Date.now(); doc.gtdStatus = 'done'; Store.touchNode(doc); }
+          hooks.saveAndRender();
+          rerender();
+        });
+      });
+
+      container.querySelectorAll('[data-mdoc]').forEach((row) => {
+        const doc = Store.findNodeAndParent(row.dataset.mdoc)?.node;
+        row.querySelector('[data-mact="resched"]')?.addEventListener('click', () => {
+          if (!doc) return;
+          Store.updateCardSchedule(doc, { endDate: addDaysYmd(getTodayYmd(), 3), preservePlannedEnd: true });
+          doc.missedToWaiting = false;
+          doc.gtdStatus = 'next';
+          hooks.saveAndRender();
+          rerender();
+        });
+      });
+    }
+
+    // ---- Tab: Requirements (5-Why MD Editor + Keep/Reduce/Drop Cycle) + Deliverables + Evaluation Criteria ----
+    function bindReqModalOnce() {
+      const modal = $('req-editor-modal');
+      if (!modal || modal.dataset.bound === '1') return;
+      modal.dataset.bound = '1';
+      const close = () => { modal.style.display = 'none'; };
+      $('rem-close-btn')?.addEventListener('click', close);
+      $('rem-cancel-btn')?.addEventListener('click', close);
+      modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+
+      const saveCurrentReq = (advanceToNext = false) => {
+        const proj = Store.findParaEntity(reqEditProjectId);
+        if (!proj) return;
+        Store.normalizeParaEntityFields(proj);
+        const title = String($('rem-title-inp')?.value || '').trim() || '요구사항';
+        const content = String($('rem-md-editor')?.value || '');
+        const verdictEl = modal.querySelector('input[name="rem-verdict"]:checked');
+        const verdict = verdictEl ? verdictEl.value : 'pending';
+
+        let curIdx = proj.requirements.findIndex((r) => r.id === reqEditId);
+        if (curIdx >= 0) {
+          proj.requirements[curIdx] = { ...proj.requirements[curIdx], title, content, verdict, updatedAt: Date.now() };
+        } else {
+          const item = { id: `req-${Store.genId()}`, title, content, verdict, updatedAt: Date.now() };
+          proj.requirements.push(item);
+          reqEditId = item.id;
+          curIdx = proj.requirements.length - 1;
+        }
+        Store.persistParaEntities();
+        const vKo = { keep: '유지', reduce: '줄임', drop: '삭제(통과 못함)', pending: '보류' };
+        Store.logChange({ category: 'requirement', projectName: proj.name, message: `요구사항 판정 [${vKo[verdict]}]: "${title}"` });
+        hooks.saveAndRender();
+        reqEditOnSave?.();
+
+        if (advanceToNext) {
+          const nextReq = proj.requirements.find((r, i) => i > curIdx && r.verdict === 'pending')
+            || proj.requirements.find((r) => r.id !== reqEditId && r.verdict === 'pending');
+          if (nextReq) {
+            openRequirementEditorModal(proj.id, nextReq.id, reqEditOnSave);
+            hooks.showToast(`다음 요구사항("${nextReq.title}")으로 이동했습니다.`);
+            return;
+          }
+          hooks.showToast('모든 요구사항 판정 사이클을 완료했습니다! 산출물·평가 기준을 확인하세요.');
+        } else {
+          hooks.showToast(`요구사항 "${title}" 저장됨 (${vKo[verdict]})`);
+        }
+        close();
+      };
+
+      $('rem-save-btn')?.addEventListener('click', () => saveCurrentReq(false));
+      $('rem-save-next-btn')?.addEventListener('click', () => saveCurrentReq(true));
+    }
+
+    function openRequirementEditorModal(projectId, reqId = null, onSave = null) {
+      bindReqModalOnce();
+      const proj = Store.findParaEntity(projectId);
+      const modal = $('req-editor-modal');
+      if (!proj || !modal) return;
+      Store.normalizeParaEntityFields(proj);
+      reqEditProjectId = projectId;
+      reqEditId = reqId;
+      reqEditOnSave = onSave;
+
+      const existing = reqId ? proj.requirements.find((r) => r.id === reqId) : null;
+      if ($('rem-proj-badge')) $('rem-proj-badge').textContent = `${Store.getParaCode(proj)} ${proj.name}`;
+      if ($('rem-title-inp')) $('rem-title-inp').value = existing?.title || '';
+      if ($('rem-md-editor')) {
+        $('rem-md-editor').value = existing?.content || Store.createDefaultRequirementTemplate(existing?.title || '', proj.name);
+      }
+      const v = existing?.verdict || 'keep';
+      modal.querySelectorAll('input[name="rem-verdict"]').forEach((r) => { r.checked = r.value === v; });
+      modal.style.display = 'flex';
+      setTimeout(() => $('rem-title-inp')?.focus(), 20);
+    }
+
+    function renderProjectRequirementsTab(container, proj, rerender) {
+      Store.normalizeParaEntityFields(proj);
+      const reqs = proj.requirements || [];
+      const specs = proj.deliverableSpecs || [];
+      const evals = proj.evaluationCriteria || [];
+      const vBadge = {
+        keep: `<span class="sb-comp-badge">유지 (본질 일치)</span>`,
+        reduce: `<span class="sb-period-pill is-extended">줄임 (재작성)</span>`,
+        drop: `<span class="sb-overdue-badge">삭제 (제외됨)</span>`,
+        pending: `<span class="sb-status-pill is-hold">판정 대기</span>`
+      };
+
+      container.innerHTML = `
+        <!-- 1. 요구사항 분석 (5-Why + 판정 빼기 사이클) -->
+        <div class="sb-req-block">
+          <div class="sb-card-head">
+            <h3 class="sb-tpl-col-title" style="margin:0;">1. 요구사항 분석 (5-Why · 본질 요구 · 판정 빼기 사이클)</h3>
+            <button type="button" class="sb-btn-primary-sm" id="sb-req-add-btn">＋ 요구사항 추가 (5-Why MD 편집창)</button>
+          </div>
+          ${reqs.length === 0
+            ? `<div class="sb-empty-line"><span>등록된 요구사항이 없습니다. [＋ 요구사항 추가]를 눌러 5-Why 분석과 판정(유지/줄임/삭제)을 진행하세요.</span></div>`
+            : `<div class="sb-req-list">
+                ${reqs.map((r) => `
+                  <div class="sb-req-row${r.verdict === 'drop' ? ' is-dropped' : ''}" data-req-id="${esc(r.id)}">
+                    <div class="sb-req-main" data-ract="edit">
+                      <strong>${esc(r.title)}</strong>
+                      ${vBadge[r.verdict || 'pending']}
+                    </div>
+                    <div class="sb-flex-gap-xs">
+                      <button type="button" class="sb-btn-subtle" data-ract="edit">5-Why MD 편집 · 판정</button>
+                      <button type="button" class="sb-mini-icon-act is-del" data-ract="del">${svg('trash', 12)}</button>
+                    </div>
+                  </div>
+                `).join('')}
+              </div>`}
+        </div>
+
+        <!-- 2. 예상 산출물 정의 -->
+        <div class="sb-req-block">
+          <h3 class="sb-tpl-col-title">2. 예상 산출물 정의 (프로젝트 완료 시 해당 파일 업로드)</h3>
+          <div class="sb-req-list">
+            ${specs.map((s) => `
+              <div class="sb-req-row" data-spec-id="${esc(s.id)}">
+                <span>📦 <strong>${esc(s.title)}</strong> ${(s.uploadedDocIds?.length || 0) > 0 ? `<span class="sb-comp-badge">업로드 ${s.uploadedDocIds.length}건</span>` : ''}</span>
+                <button type="button" class="sb-mini-icon-act is-del" data-sdel="1">✕</button>
+              </div>
+            `).join('')}
+          </div>
+          <form class="sb-top3-quick-form" id="sb-spec-add-form">
+            <input type="text" id="sb-spec-title-inp" class="sb-inline-input" placeholder="예상 산출물 이름 (예: 3쪽 이내 최종 보고서 PDF, 테스트 결과 시트)" required>
+            <button type="submit" class="sb-btn-primary-sm">＋ 산출물 정의 추가</button>
+          </form>
+        </div>
+
+        <!-- 3. 평가 기준 (행동 동사 + 조건 + 성공 판별 분리 입력) -->
+        <div class="sb-req-block">
+          <h3 class="sb-tpl-col-title">3. 평가 기준 (행동 동사 + 조건 + 성공 판별)</h3>
+          <p class="sb-page-sub" style="margin:-4px 0 10px;">예시: 요구사항이 "팀장이 이해하기 쉬운 보고서"라면 → <b>행동 동사:</b> 제출하고 승인받는다 / <b>조건:</b> 금요일 회의 전까지 3쪽 이내 / <b>성공 판별:</b> 팀장이 추가 질문 없이 결정 사항 1개 승인</p>
+          <div class="sb-eval-list">
+            ${evals.map((ev) => `
+              <div class="sb-eval-card" data-eval-id="${esc(ev.id)}">
+                <div class="sb-eval-grid-view">
+                  <div><span class="sb-risk-lbl">행동 동사</span> ${esc(ev.verb)}</div>
+                  <div><span class="sb-risk-lbl">조건</span> ${esc(ev.condition)}</div>
+                  <div><span class="sb-risk-lbl">성공 판별</span> ${esc(ev.successCheck)}</div>
+                </div>
+                <button type="button" class="sb-mini-icon-act is-del" data-evdel="1">✕</button>
+              </div>
+            `).join('')}
+          </div>
+          <form class="sb-eval-add-form" id="sb-eval-add-form">
+            <input type="text" id="sb-ev-verb" class="sb-field-input" placeholder="행동 동사 (예: 보고서를 제출한다)" required>
+            <input type="text" id="sb-ev-cond" class="sb-field-input" placeholder="조건 (예: 금요일 회의 전까지 3쪽 이내)" required>
+            <input type="text" id="sb-ev-check" class="sb-field-input" placeholder="성공 판별 (예: 추가 질문 없이 결정 1건 승인)" required>
+            <button type="submit" class="sb-btn-primary-sm">＋ 평가 기준 추가</button>
+          </form>
+        </div>
+      `;
+
+      $('sb-req-add-btn')?.addEventListener('click', () => openRequirementEditorModal(proj.id, null, rerender));
+      container.querySelectorAll('.sb-req-row[data-req-id]').forEach((row) => {
+        const rid = row.dataset.reqId;
+        row.querySelectorAll('[data-ract="edit"]').forEach((b) => b.addEventListener('click', () => openRequirementEditorModal(proj.id, rid, rerender)));
+        row.querySelector('[data-ract="del"]')?.addEventListener('click', () => {
+          proj.requirements = proj.requirements.filter((r) => r.id !== rid);
+          Store.persistParaEntities();
+          rerender();
+        });
+      });
+
+      $('sb-spec-add-form')?.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const title = String($('sb-spec-title-inp')?.value || '').trim();
+        if (!title) return;
+        proj.deliverableSpecs.push({ id: `spec-${Store.genId()}`, title, uploadedDocIds: [] });
+        Store.persistParaEntities();
+        Store.logChange({ category: 'requirement', projectName: proj.name, message: `예상 산출물 정의 추가: "${title}"` });
+        rerender();
+      });
+      container.querySelectorAll('[data-spec-id]').forEach((row) => {
+        row.querySelector('[data-sdel]')?.addEventListener('click', () => {
+          proj.deliverableSpecs = proj.deliverableSpecs.filter((s) => s.id !== row.dataset.specId);
+          Store.persistParaEntities();
+          rerender();
+        });
+      });
+
+      $('sb-eval-add-form')?.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const verb = String($('sb-ev-verb')?.value || '').trim();
+        const condition = String($('sb-ev-cond')?.value || '').trim();
+        const successCheck = String($('sb-ev-check')?.value || '').trim();
+        if (!verb || !condition || !successCheck) return;
+        proj.evaluationCriteria.push({ id: `ev-${Store.genId()}`, verb, condition, successCheck, passed: false });
+        Store.persistParaEntities();
+        Store.logChange({ category: 'requirement', projectName: proj.name, message: `평가 기준 추가: ${verb} (${condition})` });
+        rerender();
+      });
+      container.querySelectorAll('[data-eval-id]').forEach((row) => {
+        row.querySelector('[data-evdel]')?.addEventListener('click', () => {
+          proj.evaluationCriteria = proj.evaluationCriteria.filter((x) => x.id !== row.dataset.evalId);
+          Store.persistParaEntities();
+          rerender();
+        });
+      });
+    }
+
+    // ---- Project Complete & Archive Modal (Deliverable Uploads + Evaluation + Next Project/Action Choice) ----
+    function bindProjectCompleteModalOnce() {
+      const modal = $('project-complete-modal');
+      if (!modal || modal.dataset.bound === '1') return;
+      modal.dataset.bound = '1';
+      const close = () => { modal.style.display = 'none'; completeStagedMap.clear(); };
+      $('pcm-close-btn')?.addEventListener('click', close);
+      $('pcm-cancel-btn')?.addEventListener('click', close);
+      modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+
+      modal.querySelectorAll('input[name="pcm-next-mode"]').forEach((r) => {
+        r.addEventListener('change', () => {
+          const val = modal.querySelector('input[name="pcm-next-mode"]:checked')?.value || 'archive-only';
+          $('pcm-existing-wrap')?.classList.toggle('is-hidden', val !== 'existing');
+          $('pcm-new-wrap')?.classList.toggle('is-hidden', val !== 'new');
+        });
+      });
+
+      $('pcm-confirm-btn')?.addEventListener('click', async () => {
+        const proj = Store.findParaEntity(completeProjId);
+        if (!proj) return;
+        Store.normalizeParaEntityFields(proj);
+        const folder = hooks.getOrCreateDailyMemoFolder();
+        if (!Array.isArray(folder.children)) folder.children = [];
+
+        // 1. Upload staged deliverable files
+        let uploadedTotal = 0;
+        for (const [specId, files] of completeStagedMap.entries()) {
+          const spec = (proj.deliverableSpecs || []).find((s) => s.id === specId);
+          for (const file of files) {
+            const isText = /\.(md|txt|csv|json|html?)$/i.test(file.name);
+            let summary = `프로젝트 완료 산출물: **${file.name}**`;
+            let b64 = '';
+            try {
+              if (isText) summary = await readFileAsText(file);
+              else b64 = await readFileAsBase64(file);
+            } catch (_) {}
+            const dot = file.name.lastIndexOf('.');
+            const uniqueName = hooks.getUniqueNameInFolder(folder, dot > 0 ? file.name.slice(0, dot) : file.name, dot > 0 ? file.name.slice(dot) : '');
+            const delivDoc = Store.touchNode({
+              id: Store.genId(),
+              type: 'doc',
+              name: uniqueName,
+              icon: '📦',
+              tag: `#산출물 #완료산출물`,
+              customTags: ['산출물', '완료산출물'],
+              cardRole: 'R',
+              cardKind: 'deliverable',
+              resultSubtype: 'output',
+              reuseCount: 0,
+              summary,
+              uploadedBlobBase64: b64 || undefined,
+              uploadedMime: file.type || 'application/octet-stream',
+              link: ''
+            });
+            folder.children.unshift(delivDoc);
+            Store.addRelation({ sourceId: delivDoc.id, targetId: proj.id, type: 'project', label: spec ? `산출물: ${spec.title}` : '완료 산출물' });
+            if (spec) {
+              if (!Array.isArray(spec.uploadedDocIds)) spec.uploadedDocIds = [];
+              spec.uploadedDocIds.push(delivDoc.id);
+            }
+            hooks.syncDocAfterSave?.(delivDoc);
+            uploadedTotal++;
+          }
+        }
+
+        // 2. Save evaluation checklist states
+        modal.querySelectorAll('[data-pcm-eval-id]').forEach((chk) => {
+          const ev = (proj.evaluationCriteria || []).find((x) => x.id === chk.dataset.pcmEvalId);
+          if (ev) ev.passed = Boolean(chk.checked);
+        });
+
+        // 3. Handle archive follow-up choice
+        const nextMode = modal.querySelector('input[name="pcm-next-mode"]:checked')?.value || 'archive-only';
+        let followMsg = '단순 보관';
+        if (nextMode === 'existing') {
+          const nextId = $('pcm-existing-proj-sel')?.value || '';
+          const nextEnt = Store.findParaEntity(nextId);
+          if (nextEnt) {
+            proj.nextProjectId = nextEnt.id;
+            followMsg = `후속 연결: ${nextEnt.name}`;
+          }
+        } else if (nextMode === 'new') {
+          const newName = String($('pcm-new-proj-name')?.value || '').trim();
+          const newAction = String($('pcm-new-first-action')?.value || '').trim();
+          if (newName) {
+            const nextProj = Store.declareParaEntity({ paraType: 'project', name: newName, status: 'active', lifeGoalId: proj.lifeGoalId || '' });
+            if (nextProj) {
+              proj.nextProjectId = nextProj.id;
+              if (newAction) {
+                const naDoc = createProjectCard(nextProj, { title: newAction, role: 'T', tagsRaw: '후속액션' });
+                if (naDoc) Store.addNextActionToDoc(naDoc, { text: newAction, context: '@PC', time: '@30분', energy: '@중간' });
+              }
+              followMsg = `후속 프로젝트 생성: ${nextProj.name}`;
+            }
+          }
+        }
+
+        Store.completeAndArchiveProject(proj.id);
+        Store.logChange({
+          category: 'archive',
+          projectName: proj.name,
+          message: `프로젝트 완료 → 아카이브 (산출물 ${uploadedTotal}건 업로드 · ${followMsg})`
+        });
+        close();
+        hooks.saveAndRender();
+        hooks.showToast(`📦 "${proj.name}" 완료 및 아카이브 처리되었습니다! (${followMsg})`);
+        completeProjOnDone?.();
+      });
+    }
+
+    function openProjectCompleteModal(proj, onDone = null) {
+      if (!proj) return;
+      bindProjectCompleteModalOnce();
+      const modal = $('project-complete-modal');
+      if (!modal) return;
+      Store.normalizeParaEntityFields(proj);
+      completeProjId = proj.id;
+      completeProjOnDone = onDone;
+      completeStagedMap = new Map();
+
+      if ($('pcm-proj-title')) $('pcm-proj-title').textContent = `${Store.getParaCode(proj)} ${proj.name}`;
+
+      // 1. Deliverables upload list
+      const specsWrap = $('pcm-deliverables-list');
+      const specs = (proj.deliverableSpecs || []).length > 0
+        ? proj.deliverableSpecs
+        : [{ id: 'spec-general', title: '최종 산출물 파일 (선택 업로드)' }];
+      if (specsWrap) {
+        specsWrap.innerHTML = specs.map((s) => `
+          <div class="sb-pcm-spec-row" data-pspec="${esc(s.id)}">
+            <div>
+              <strong>📦 ${esc(s.title)}</strong>
+              <div class="sb-pcm-file-hint" id="pcm-hint-${esc(s.id)}">파일 미선택</div>
+            </div>
+            <label class="sb-btn-subtle" style="cursor:pointer;">
+              파일 업로드
+              <input type="file" multiple style="display:none;" data-pspec-inp="${esc(s.id)}">
+            </label>
+          </div>
+        `).join('');
+        specsWrap.querySelectorAll('[data-pspec-inp]').forEach((inp) => {
+          inp.addEventListener('change', (e) => {
+            const sid = inp.dataset.pspecInp;
+            const list = Array.from(e.target.files || []);
+            completeStagedMap.set(sid, list);
+            const h = $(`pcm-hint-${sid}`);
+            if (h) h.textContent = list.length ? `선택됨: ${list.map((f) => f.name).join(', ')}` : '파일 미선택';
+          });
+        });
+      }
+
+      // 2. Evaluation criteria check
+      const evalWrap = $('pcm-eval-list');
+      const evals = proj.evaluationCriteria || [];
+      if (evalWrap) {
+        evalWrap.innerHTML = evals.length === 0
+          ? `<div class="sb-tcm-empty">등록된 평가 기준이 없습니다. (프로젝트 상세 &gt; 요구사항·평가 탭에서 추가 가능)</div>`
+          : evals.map((ev) => `
+            <label class="sb-pcm-eval-item">
+              <input type="checkbox" data-pcm-eval-id="${esc(ev.id)}"${ev.passed ? ' checked' : ''}>
+              <span><b>${esc(ev.verb)}</b> · 조건: ${esc(ev.condition)} · 판별: ${esc(ev.successCheck)}</span>
+            </label>
+          `).join('');
+      }
+
+      // 3. Existing projects dropdown
+      const exSel = $('pcm-existing-proj-sel');
+      if (exSel) {
+        const others = Store.getParaEntities('project', { onlyActive: true }).filter((p) => p.id !== proj.id);
+        exSel.innerHTML = `<option value="">-- 이어갈 프로젝트 선택 --</option>` +
+          others.map((p) => `<option value="${esc(p.id)}">${esc(Store.getParaCode(p))} ${esc(p.name)}</option>`).join('');
+      }
+
+      // Reset radio to archive-only
+      modal.querySelectorAll('input[name="pcm-next-mode"]').forEach((r) => { r.checked = r.value === 'archive-only'; });
+      $('pcm-existing-wrap')?.classList.add('is-hidden');
+      $('pcm-new-wrap')?.classList.add('is-hidden');
+      if ($('pcm-new-proj-name')) $('pcm-new-proj-name').value = '';
+      if ($('pcm-new-first-action')) $('pcm-new-first-action').value = '';
+
+      modal.style.display = 'flex';
+    }
+
     return {
       renderProjectDetailView,
       openTaskCompletionModal,
+      openRequirementEditorModal,
+      openProjectCompleteModal,
       syncProjectRiskMarkdownDoc,
       getRoleMeta,
       nextRoleCode,

@@ -200,6 +200,607 @@
     return Boolean(findMathAtCursor(text, caretPos));
   }
 
+  // ================= Naver-Style Equation Shortcut Engine (^, _, /, sqrt, Greek, Operators) =================
+  const NAVER_WORD_SHORTCUTS = {
+    sqrt: { text: '\\sqrt{}', cursorBack: 1 },
+    cbrt: { text: '\\sqrt[3]{}', cursorBack: 1 },
+    int: { text: '\\int_{}^{} ', cursorBack: 5 },
+    sum: { text: '\\sum_{i=}^{} ', cursorBack: 5 },
+    prod: { text: '\\prod_{i=}^{} ', cursorBack: 5 },
+    lim: { text: '\\lim_{\\to } ', cursorBack: 6 },
+    inf: { text: '\\infty ', cursorBack: 0 },
+    infty: { text: '\\infty ', cursorBack: 0 },
+    pi: { text: '\\pi ', cursorBack: 0 },
+    alpha: { text: '\\alpha ', cursorBack: 0 },
+    beta: { text: '\\beta ', cursorBack: 0 },
+    gamma: { text: '\\gamma ', cursorBack: 0 },
+    delta: { text: '\\delta ', cursorBack: 0 },
+    Delta: { text: '\\Delta ', cursorBack: 0 },
+    epsilon: { text: '\\varepsilon ', cursorBack: 0 },
+    zeta: { text: '\\zeta ', cursorBack: 0 },
+    eta: { text: '\\eta ', cursorBack: 0 },
+    theta: { text: '\\theta ', cursorBack: 0 },
+    lambda: { text: '\\lambda ', cursorBack: 0 },
+    mu: { text: '\\mu ', cursorBack: 0 },
+    rho: { text: '\\rho ', cursorBack: 0 },
+    sigma: { text: '\\sigma ', cursorBack: 0 },
+    tau: { text: '\\tau ', cursorBack: 0 },
+    phi: { text: '\\phi ', cursorBack: 0 },
+    Phi: { text: '\\Phi ', cursorBack: 0 },
+    psi: { text: '\\psi ', cursorBack: 0 },
+    omega: { text: '\\omega ', cursorBack: 0 },
+    Omega: { text: '\\Omega ', cursorBack: 0 },
+    sin: { text: '\\sin ', cursorBack: 0 },
+    cos: { text: '\\cos ', cursorBack: 0 },
+    tan: { text: '\\tan ', cursorBack: 0 },
+    log: { text: '\\log ', cursorBack: 0 },
+    ln: { text: '\\ln ', cursorBack: 0 },
+    exp: { text: '\\exp ', cursorBack: 0 }
+  };
+
+  const NAVER_OP_SHORTCUTS = [
+    ['<=', '\\le '],
+    ['>=', '\\ge '],
+    ['!=', '\\neq '],
+    ['->', '\\to '],
+    ['=>', '\\Rightarrow '],
+    ['+-', '\\pm '],
+    ['~=', '\\approx ']
+  ];
+
+  // Scan backwards from end of `before` to extract the mathematical numerator atom for `/` -> \frac{num}{den}
+  function extractNumeratorBeforeCaret(before) {
+    if (!before) return null;
+    let end = before.length;
+    // Forgive a single trailing space right after a closed group like `e^{5} /` or `(a+b) /`
+    if (end >= 2 && before[end - 1] === ' ' && (before[end - 2] === '}' || before[end - 2] === ')')) {
+      end -= 1;
+    }
+    if (end === 0) return null;
+    const lastCh = before[end - 1];
+    // Don't grab across operators, delimiters, or spaces
+    if (/[\s+\-=,;:{[(^_\\<>|]/.test(lastCh)) return null;
+
+    let i = end - 1;
+
+    // Helper: walk back over a balanced group (...) or {...} or [...]
+    const walkBalanced = (idx, openCh, closeCh) => {
+      let depth = 0;
+      let k = idx;
+      while (k >= 0) {
+        if (before[k] === closeCh) depth++;
+        else if (before[k] === openCh) {
+          depth--;
+          if (depth === 0) return k;
+        }
+        k--;
+      }
+      return -1;
+    };
+
+    // Case 1: Ends with ')' — check if grouping parens (a+b) or function call f(x) / \sin(x)
+    if (lastCh === ')') {
+      const openIdx = walkBalanced(i, '(', ')');
+      if (openIdx >= 0) {
+        // Check if preceded by function name (e.g. f(x), \sin(x))
+        let fnStart = openIdx;
+        while (fnStart > 0 && /[A-Za-z\\]/.test(before[fnStart - 1])) fnStart--;
+        const fnToken = before.slice(fnStart, openIdx);
+        if (fnToken && (/^\\[A-Za-z]+$/.test(fnToken) || /^(sin|cos|tan|log|ln|exp|f|g|h|G|H|C|R|Y|X)$/.test(fnToken))) {
+          return { start: fnStart, numerator: before.slice(fnStart, end) };
+        }
+        // Grouping parens: strip outer (...)
+        return { start: openIdx, numerator: before.slice(openIdx + 1, end - 1) };
+      }
+      return null;
+    }
+
+    // Case 2: Walk backwards over compound atoms (e.g. e^{5}, x_{1}^{2}, \sqrt{x}, 2x, \alpha)
+    let cur = end;
+    let guard = 0;
+    while (cur > 0 && guard++ < 12) {
+      const ch = before[cur - 1];
+      if (ch === '}') {
+        const openIdx = walkBalanced(cur - 1, '{', '}');
+        if (openIdx < 0) break;
+        cur = openIdx;
+        // Include preceding ^, _, or \command (like \sqrt, \frac{a}, \vec, etc.)
+        if (cur > 0 && (before[cur - 1] === '^' || before[cur - 1] === '_')) {
+          cur--;
+          continue;
+        }
+        if (cur > 0 && before[cur - 1] === ']') {
+          const brOpen = walkBalanced(cur - 1, '[', ']');
+          if (brOpen >= 0) cur = brOpen;
+        }
+        if (cur > 0 && before[cur - 1] === '}') {
+          continue; // e.g., \frac{a}{b}
+        }
+        let cmdStart = cur;
+        while (cmdStart > 0 && /[A-Za-z]/.test(before[cmdStart - 1])) cmdStart--;
+        if (cmdStart > 0 && before[cmdStart - 1] === '\\') {
+          cur = cmdStart - 1;
+          break;
+        }
+        break;
+      } else if (/[A-Za-z0-9.]/.test(ch)) {
+        while (cur > 0 && /[A-Za-z0-9.]/.test(before[cur - 1])) cur--;
+        if (cur > 0 && before[cur - 1] === '\\') cur--;
+        // Keep walking if this token is an exponent/subscript without braces (e.g. e^5)
+        if (cur > 0 && (before[cur - 1] === '^' || before[cur - 1] === '_')) {
+          cur--;
+          continue;
+        }
+        break;
+      } else {
+        break;
+      }
+    }
+
+    if (cur < end) {
+      return { start: cur, numerator: before.slice(cur, end) };
+    }
+    return null;
+  }
+
+  const STANDALONE_MATH_WORDS = {
+    sqrt: { text: '\\sqrt{}', cursorBack: 1 },
+    cbrt: { text: '\\sqrt[3]{}', cursorBack: 1 },
+    int: { text: '\\int_{}^{} ', cursorBack: 5 },
+    sum: { text: '\\sum_{i=}^{} ', cursorBack: 5 },
+    prod: { text: '\\prod_{i=}^{} ', cursorBack: 5 },
+    lim: { text: '\\lim_{\\to } ', cursorBack: 6 }
+  };
+
+  function isInsideCodeAt(text, pos) {
+    const before = text.slice(0, pos);
+    const fenceMatches = before.match(/^```/gm);
+    if (fenceMatches && fenceMatches.length % 2 === 1) return true;
+    const lineStart = before.lastIndexOf('\n') + 1;
+    const lineBefore = before.slice(lineStart);
+    const ticks = lineBefore.match(/`/g);
+    return Boolean(ticks && ticks.length % 2 === 1);
+  }
+
+  // Apply Naver-style text shortcut on `beforeinput` (insertText) directly in Markdown!
+  // Works seamlessly BOTH inside `$...$`/`$$...$$` AND directly in normal Markdown (auto-wrapping `$...$`).
+  function applyNaverMathBeforeInput(el, e, onChanged, pushTabStopFn, { insideMath = true } = {}) {
+    if (e.inputType !== 'insertText' || typeof e.data !== 'string' || e.data.length !== 1) return false;
+    const ch = e.data;
+    const val = el.value || '';
+    const start = el.selectionStart || 0;
+    const end = el.selectionEnd || 0;
+    const sel = val.slice(start, end);
+    const before = val.slice(0, start);
+    const after = val.slice(end);
+
+    if (!insideMath && isInsideCodeAt(val, start)) return false;
+
+    const setValAndCaret = (nextVal, caretStart, caretEnd = caretStart) => {
+      el.value = nextVal;
+      el.setSelectionRange(caretStart, caretEnd);
+      if (typeof onChanged === 'function') onChanged(false);
+    };
+
+    // 1. `^` (지수) and `_` (아래첨자)
+    if ((ch === '^' || ch === '_') && !before.endsWith('\\')) {
+      if (insideMath) {
+        e.preventDefault();
+        if (sel) {
+          const ins = `{${sel}}${ch}{}`;
+          setValAndCaret(before + ins + after, start + ins.length - 1);
+        } else {
+          const ins = `${ch}{}`;
+          setValAndCaret(before + ins + after, start + 2);
+        }
+        return true;
+      }
+      // Outside math: auto-wrap base atom like e^5 -> $e^{5}$, x_1 -> $x_{1}$ (skip Korean / markdown _italic_)
+      if (sel && /^[A-Za-z0-9()+\-*/.\s]+$/.test(sel)) {
+        e.preventDefault();
+        const ins = `$${sel}${ch}{}$`;
+        setValAndCaret(before + ins + after, start + ins.length - 2);
+        return true;
+      }
+      const baseInfo = extractNumeratorBeforeCaret(before);
+      if (baseInfo && baseInfo.numerator && /^[A-Za-z0-9().\\^_{}]+$/.test(baseInfo.numerator)) {
+        // For `_`, require a short math variable/symbol base (avoid snake_case identifiers like my_var_name)
+        if (ch === '_' && baseInfo.numerator.length > 4) return false;
+        e.preventDefault();
+        const prefix = before.slice(0, baseInfo.start);
+        const rawBase = before.slice(baseInfo.start, start).trimEnd();
+        const ins = `$${rawBase}${ch}{}$`;
+        setValAndCaret(prefix + ins + after, prefix.length + ins.length - 2);
+        return true;
+      }
+      return false;
+    }
+
+    // 2. `/` (분수식) -> a/b, (a+b)/c, e^{5}/2 -> \frac{num}{|} (auto-wrapped in $...$ if outside math)
+    if (ch === '/' && !before.endsWith('\\')) {
+      if (insideMath) {
+        e.preventDefault();
+        if (sel) {
+          const ins = `\\frac{${sel}}{}`;
+          setValAndCaret(before + ins + after, start + ins.length - 1);
+          return true;
+        }
+        const numInfo = extractNumeratorBeforeCaret(before);
+        if (numInfo && numInfo.numerator.length > 0) {
+          const prefix = before.slice(0, numInfo.start);
+          const ins = `\\frac{${numInfo.numerator}}{}`;
+          setValAndCaret(prefix + ins + after, prefix.length + ins.length - 1);
+        } else {
+          const ins = '\\frac{}{}';
+          const numCaret = start + 6;
+          const denCaret = start + 8;
+          if (typeof pushTabStopFn === 'function') pushTabStopFn({ start: denCaret, end: denCaret });
+          setValAndCaret(before + ins + after, numCaret);
+        }
+        return true;
+      }
+      // Outside math: ignore URLs (http:/, https:/, file:/), comments (//), 4-digit years (2026/), Korean words
+      if (/(https?:|file:|\/|:)$/i.test(before) || /\b\d{4}$/.test(before) || /[가-힣]$/.test(before)) {
+        return false;
+      }
+      if (sel && /^[A-Za-z0-9()+\-*/.\s]+$/.test(sel)) {
+        e.preventDefault();
+        const ins = `$\\frac{${sel}}{}$`;
+        setValAndCaret(before + ins + after, start + ins.length - 2);
+        return true;
+      }
+      const numInfo = extractNumeratorBeforeCaret(before);
+      if (numInfo && numInfo.numerator.length > 0 && /^[A-Za-z0-9()+\-.*\\^_{}\s]+$/.test(numInfo.numerator)) {
+        // Avoid triggering on plain English words >= 4 letters (like "and/or", "input/output")
+        if (/^[A-Za-z]{4,}$/.test(numInfo.numerator)) return false;
+        e.preventDefault();
+        const prefix = before.slice(0, numInfo.start);
+        const ins = `$\\frac{${numInfo.numerator}}{}$`;
+        setValAndCaret(prefix + ins + after, prefix.length + ins.length - 2);
+        return true;
+      }
+      return false;
+    }
+
+    // 3. `(` after `sqrt` -> \sqrt{|} (or $\sqrt{|}$ outside math)
+    if (ch === '(' && start === end) {
+      const mSqrt = before.match(/(^|[^\\A-Za-z])(sqrt)$/);
+      if (mSqrt) {
+        e.preventDefault();
+        const tokStart = start - 4;
+        const ins = insideMath ? '\\sqrt{}' : '$\\sqrt{}$';
+        const caret = insideMath ? tokStart + 6 : tokStart + 7;
+        setValAndCaret(val.slice(0, tokStart) + ins + after, caret);
+        return true;
+      }
+    }
+
+    // 4. `Space`: expand math words OR cleanly exit `}` / `$` block!
+    if (ch === ' ' && start === end) {
+      const wordMatch = before.match(/(^|[^\\A-Za-z])([A-Za-z]{2,8})$/);
+      if (wordMatch) {
+        const word = wordMatch[2];
+        const sc = insideMath ? NAVER_WORD_SHORTCUTS[word] : STANDALONE_MATH_WORDS[word];
+        if (sc) {
+          e.preventDefault();
+          const wStart = start - word.length;
+          if (insideMath) {
+            const nextVal = val.slice(0, wStart) + sc.text + after;
+            const caret = wStart + sc.text.length - sc.cursorBack;
+            setValAndCaret(nextVal, caret);
+          } else {
+            const wrapped = `$${sc.text.trimEnd()}$`;
+            const backAdjust = sc.cursorBack + (sc.text.endsWith(' ') ? 0 : 1);
+            const nextVal = val.slice(0, wStart) + wrapped + after;
+            const caret = wStart + wrapped.length - backAdjust;
+            setValAndCaret(nextVal, caret);
+          }
+          return true;
+        }
+      }
+      if (insideMath) {
+        if ((after.startsWith('}^{') || after.startsWith('}_{')) && before.length > 0 && !before.endsWith('{')) {
+          e.preventDefault();
+          el.setSelectionRange(start + 3, start + 3);
+          if (typeof onChanged === 'function') onChanged(true);
+          return true;
+        }
+        if (after.startsWith('}{') && before.length > 0 && !before.endsWith('{')) {
+          e.preventDefault();
+          el.setSelectionRange(start + 2, start + 2);
+          if (typeof onChanged === 'function') onChanged(true);
+          return true;
+        }
+        if (after.startsWith('}') && before.length > 0 && !before.endsWith('{')) {
+          e.preventDefault();
+          el.setSelectionRange(start + 1, start + 1);
+          if (typeof onChanged === 'function') onChanged(true);
+          return true;
+        }
+        // Pressing Space right before closing `$` exits inline math smoothly into normal text!
+        if (after.startsWith('$') && !after.startsWith('$$') && before.length > 0 && !before.endsWith('$')) {
+          e.preventDefault();
+          const nextVal = before + '$ ' + after.slice(1);
+          setValAndCaret(nextVal, start + 2);
+          return true;
+        }
+      }
+    }
+
+    // 5. Two-character math operators (inside math)
+    if (insideMath && start === end) {
+      const pair = (before.slice(-1) || '') + ch;
+      const foundOp = NAVER_OP_SHORTCUTS.find(([k]) => k === pair);
+      if (foundOp && !before.endsWith('\\' + pair[0])) {
+        e.preventDefault();
+        const opStart = start - 1;
+        const rep = foundOp[1];
+        setValAndCaret(val.slice(0, opStart) + rep + after, opStart + rep.length);
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  // Apply non-text navigation shortcuts on `keydown` (`Tab` word expansion + brace/math exit)
+  function applyNaverMathKeydown(el, e, onChanged, { insideMath = true } = {}) {
+    if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return false;
+    if (e.key !== 'Tab' || e.shiftKey) return false;
+    const val = el.value || '';
+    const start = el.selectionStart || 0;
+    const end = el.selectionEnd || 0;
+    if (start !== end) return false;
+    if (!insideMath && isInsideCodeAt(val, start)) return false;
+    const before = val.slice(0, start);
+    const after = val.slice(end);
+
+    const wordMatch = before.match(/(^|[^\\A-Za-z])([A-Za-z]{2,8})$/);
+    if (wordMatch) {
+      const word = wordMatch[2];
+      const sc = insideMath ? NAVER_WORD_SHORTCUTS[word] : STANDALONE_MATH_WORDS[word];
+      if (sc) {
+        e.preventDefault();
+        const wStart = start - word.length;
+        if (insideMath) {
+          el.value = val.slice(0, wStart) + sc.text + after;
+          const caret = wStart + sc.text.length - sc.cursorBack;
+          el.setSelectionRange(caret, caret);
+        } else {
+          const wrapped = `$${sc.text.trimEnd()}$`;
+          const backAdjust = sc.cursorBack + (sc.text.endsWith(' ') ? 0 : 1);
+          el.value = val.slice(0, wStart) + wrapped + after;
+          const caret = wStart + wrapped.length - backAdjust;
+          el.setSelectionRange(caret, caret);
+        }
+        if (typeof onChanged === 'function') onChanged(false);
+        return true;
+      }
+    }
+
+    if (insideMath) {
+      if (after.startsWith('}^{') || after.startsWith('}_{')) {
+        e.preventDefault();
+        el.setSelectionRange(start + 3, start + 3);
+        if (typeof onChanged === 'function') onChanged(true);
+        return true;
+      }
+      if (after.startsWith('}{')) {
+        e.preventDefault();
+        el.setSelectionRange(start + 2, start + 2);
+        if (typeof onChanged === 'function') onChanged(true);
+        return true;
+      }
+      if (after.startsWith('}')) {
+        e.preventDefault();
+        el.setSelectionRange(start + 1, start + 1);
+        if (typeof onChanged === 'function') onChanged(true);
+        return true;
+      }
+      if (after.startsWith('$') && !after.startsWith('$$')) {
+        e.preventDefault();
+        el.setSelectionRange(start + 1, start + 1);
+        if (typeof onChanged === 'function') onChanged(true);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // ================= Word (MathML) & HWP (한글 수식 스크립트) Converters =================
+  function readBalancedGroup(str, openIdx, openCh = '{', closeCh = '}') {
+    if (str[openIdx] !== openCh) return null;
+    let depth = 0;
+    for (let i = openIdx; i < str.length; i++) {
+      if (str[i] === openCh) depth++;
+      else if (str[i] === closeCh) {
+        depth--;
+        if (depth === 0) return { start: openIdx + 1, end: i, value: str.slice(openIdx + 1, i), nextIdx: i + 1 };
+      }
+    }
+    return null;
+  }
+
+  function convertLatexToHwp(tex) {
+    let s = String(tex || '').trim();
+    // Convert \frac{a}{b} -> {a} over {b} (iteratively handles nested fractions)
+    for (let pass = 0; pass < 6; pass++) {
+      const idx = s.indexOf('\\frac');
+      if (idx < 0) break;
+      let p = idx + 5;
+      while (p < s.length && s[p] === ' ') p++;
+      const g1 = readBalancedGroup(s, p);
+      if (!g1) break;
+      let p2 = g1.nextIdx;
+      while (p2 < s.length && s[p2] === ' ') p2++;
+      const g2 = readBalancedGroup(s, p2);
+      if (!g2) break;
+      s = s.slice(0, idx) + `{${g1.value}} over {${g2.value}}` + s.slice(g2.nextIdx);
+    }
+    // Convert \sqrt[n]{x} -> root {n} of {x} and \sqrt{x} -> sqrt {x}
+    s = s.replace(/\\sqrt\[([^\]]+)\]\{([^{}]*)\}/g, 'root {$1} of {$2}');
+    s = s.replace(/\\sqrt\{([^{}]*)\}/g, 'sqrt {$1}');
+    // Matrix / Cases environments
+    s = s.replace(/\\begin\{bmatrix\}([\s\S]*?)\\end\{bmatrix\}/g, (_, body) =>
+      `left [ matrix{${body.trim().replace(/\\\\/g, ' # ').replace(/&/g, ' & ')}} right ]`
+    );
+    s = s.replace(/\\begin\{pmatrix\}([\s\S]*?)\\end\{pmatrix\}/g, (_, body) =>
+      `left ( matrix{${body.trim().replace(/\\\\/g, ' # ').replace(/&/g, ' & ')}} right )`
+    );
+    s = s.replace(/\\begin\{cases\}([\s\S]*?)\\end\{cases\}/g, (_, body) =>
+      `cases{${body.trim().replace(/\\\\/g, ' # ').replace(/&/g, ' & ')}}`
+    );
+    // Common LaTeX commands -> HWP equation keywords
+    const map = [
+      [/\\iint/g, 'dint'], [/\\oint/g, 'oint'], [/\\int/g, 'int'],
+      [/\\sum/g, 'sum'], [/\\prod/g, 'prod'], [/\\lim/g, 'lim'],
+      [/\\infty/g, 'inf'], [/\\partial/g, 'partial'], [/\\nabla/g, 'nabla'],
+      [/\\times/g, 'times'], [/\\cdot/g, 'cdot'], [/\\pm/g, '+-'],
+      [/\\leq?/g, '<='], [/\\geq?/g, '>='], [/\\neq/g, '!='],
+      [/\\approx/g, 'approx'], [/\\equiv/g, 'equiv'], [/\\propto/g, 'prop'],
+      [/\\Rightarrow/g, '=>'], [/\\Leftrightarrow/g, '<=>'], [/\\to/g, '->'],
+      [/\\forall/g, 'forall'], [/\\exists/g, 'exists'], [/\\in\b/g, 'in'],
+      [/\\left\(/g, 'left ('], [/\\right\)/g, 'right )'],
+      [/\\left\[/g, 'left ['], [/\\right\]/g, 'right ]'],
+      [/\\text\{([^{}]*)\}/g, '"$1"'],
+      [/\\overline\{([^{}]*)\}/g, 'bar {$1}'],
+      [/\\vec\{([^{}]*)\}/g, 'vec {$1}'],
+      [/\\hat\{([^{}]*)\}/g, 'hat {$1}'],
+      [/\\dot\{([^{}]*)\}/g, 'dot {$1}'],
+      [/\\ddot\{([^{}]*)\}/g, 'ddot {$1}'],
+      [/\\varepsilon/g, 'epsilon'],
+      [/\\(alpha|beta|gamma|delta|Delta|zeta|eta|theta|lambda|mu|pi|rho|sigma|tau|phi|Phi|psi|omega|Omega|sin|cos|tan|log|ln|exp)\b/g, '$1'],
+      [/\\,/g, ' ']
+    ];
+    map.forEach(([re, rep]) => { s = s.replace(re, rep); });
+    return s.replace(/\s{2,}/g, ' ').trim();
+  }
+
+  // ================= Formula Slot Parser (for Mouse Click-to-Edit in Live Preview) =================
+  function extractFormulaSlots(expr) {
+    const slots = [];
+    const s = String(expr || '');
+    let i = 0;
+
+    while (i < s.length) {
+      // 1. \int, \iint, \oint, \sum, \prod with optional _{lower} and ^{upper}
+      const opM = s.slice(i).match(/^\\(iint|oint|int|sum|prod|lim)(?![A-Za-z])/);
+      if (opM) {
+        const opName = opM[1];
+        const opKor = opName === 'lim' ? '극한' : (opName === 'sum' ? '시그마' : (opName === 'prod' ? '곱' : '적분'));
+        let p = i + opM[0].length;
+        for (let pass = 0; pass < 2; pass++) {
+          while (p < s.length && s[p] === ' ') p++;
+          if (s[p] === '_' || s[p] === '^') {
+            const isSup = s[p] === '^';
+            p++;
+            while (p < s.length && s[p] === ' ') p++;
+            if (s[p] === '{') {
+              const g = readBalancedGroup(s, p);
+              if (g) {
+                slots.push({
+                  kind: isSup ? 'op-upper' : 'op-lower',
+                  label: opName === 'lim' ? '극한 조건' : `${opKor} ${isSup ? '상한(위)' : '하한(아래)'}`,
+                  start: g.start,
+                  end: g.end,
+                  value: g.value
+                });
+                p = g.nextIdx;
+              }
+            } else if (p < s.length) {
+              slots.push({
+                kind: isSup ? 'op-upper' : 'op-lower',
+                label: opName === 'lim' ? '극한 조건' : `${opKor} ${isSup ? '상한(위)' : '하한(아래)'}`,
+                start: p,
+                end: p + 1,
+                value: s[p],
+                wrapBraces: true
+              });
+              p++;
+            }
+          }
+        }
+        i = p;
+        continue;
+      }
+
+      // 2. \frac{num}{den}
+      if (s.startsWith('\\frac', i)) {
+        let p = i + 5;
+        while (p < s.length && s[p] === ' ') p++;
+        const g1 = readBalancedGroup(s, p);
+        if (g1) {
+          slots.push({ kind: 'frac-num', label: '분자 (위)', start: g1.start, end: g1.end, value: g1.value });
+          let p2 = g1.nextIdx;
+          while (p2 < s.length && s[p2] === ' ') p2++;
+          const g2 = readBalancedGroup(s, p2);
+          if (g2) {
+            slots.push({ kind: 'frac-den', label: '분모 (아래)', start: g2.start, end: g2.end, value: g2.value });
+          }
+          i += 5;
+          continue;
+        }
+      }
+
+      // 3. \sqrt[n]{body} or \sqrt{body}
+      if (s.startsWith('\\sqrt', i)) {
+        let p = i + 5;
+        while (p < s.length && s[p] === ' ') p++;
+        if (s[p] === '[') {
+          const gn = readBalancedGroup(s, p, '[', ']');
+          if (gn) {
+            slots.push({ kind: 'sqrt-n', label: '제곱근 차수', start: gn.start, end: gn.end, value: gn.value });
+            p = gn.nextIdx;
+          }
+        }
+        while (p < s.length && s[p] === ' ') p++;
+        const gb = readBalancedGroup(s, p);
+        if (gb) {
+          slots.push({ kind: 'sqrt-body', label: '루트 내부', start: gb.start, end: gb.end, value: gb.value });
+        }
+        i += 5;
+        continue;
+      }
+
+      // 4. General superscript `^{...}` or subscript `_{...}`
+      if ((s[i] === '^' || s[i] === '_') && s[i - 1] !== '\\') {
+        const isSup = s[i] === '^';
+        let p = i + 1;
+        while (p < s.length && s[p] === ' ') p++;
+        if (s[p] === '{') {
+          const g = readBalancedGroup(s, p);
+          if (g) {
+            const already = slots.some((sl) => sl.start === g.start && sl.end === g.end);
+            if (!already) {
+              slots.push({
+                kind: isSup ? 'sup' : 'sub',
+                label: isSup ? '지수 (위첨자)' : '아래첨자',
+                start: g.start,
+                end: g.end,
+                value: g.value
+              });
+            }
+          }
+        } else if (p < s.length && /[A-Za-z0-9]/.test(s[p])) {
+          const already = slots.some((sl) => sl.start === p && sl.end === p + 1);
+          if (!already) {
+            slots.push({
+              kind: isSup ? 'sup' : 'sub',
+              label: isSup ? '지수 (위첨자)' : '아래첨자',
+              start: p,
+              end: p + 1,
+              value: s[p],
+              wrapBraces: true
+            });
+          }
+        }
+      }
+
+      i++;
+    }
+    return slots;
+  }
+
   function toggleCheckboxInMarkdown(mdText, targetIndex) {
     let idx = 0;
     return String(mdText || '').replace(/^(\s*[-*]\s+\[)([ xX])(\]\s+)/gm, (match, prefix, mark, suffix) => {
@@ -306,9 +907,13 @@ ${isForPrint ? '<script>window.addEventListener("load", function(){ setTimeout(f
   function mountMathMarkdownEditor(container, options = {}) {
     const MD = global.BrainMarkdown;
     let currentMode = options.initialMode || 'split'; // 'edit' | 'split' | 'view'
-    let showToc = true;
-    let showPalette = currentMode !== 'view';
+    let showLeftPanel = true;
+    let leftPanelTab = currentMode === 'view' ? 'toc' : 'palette'; // 'palette' | 'toc'
+    let naverShortcutInMd = true;   // enable ^, _, /, sqrt, int, sum shortcuts directly in Markdown
+    let topPaneHeightPx = null;     // user-dragged height of Top Live Preview pane
     let activePaletteCat = PALETTE_CATEGORIES[0].id;
+    let renderedMathList = [];      // [{ idx, start, end, expr, displayMode }]
+    let activeSlotPopover = null;
     let isDirty = false;
     let previewFontSize = 14;
     let editorFontSize = 13.5;
@@ -343,11 +948,11 @@ ${isForPrint ? '<script>window.addEventListener("load", function(){ setTimeout(f
         <div class="mmd-tb-group">
           <div class="md-mode-tabs">
             <button type="button" class="md-mode-btn" data-mode="edit" title="에디터 단독">✏️ 편집</button>
-            <button type="button" class="md-mode-btn" data-mode="split" title="좌우 분할 뷰">⚡ 분할</button>
+            <button type="button" class="md-mode-btn" data-mode="split" title="상하 실시간 분할">⚡ 분할</button>
             <button type="button" class="md-mode-btn" data-mode="view" title="프리뷰 단독">📖 프리뷰</button>
           </div>
-          <button type="button" class="mmd-btn active" data-cmd="toggle-toc" title="목차(TOC) 사이드바 토글">📑 목차</button>
-          <button type="button" class="mmd-btn active" data-cmd="toggle-palette" title="비주얼 수식 팔레트 토글">∑ 팔레트</button>
+          <button type="button" class="mmd-btn active" data-cmd="toggle-left" title="좌측 수식·목차 패널 토글">∑ 수식·목차</button>
+          <button type="button" class="mmd-btn" data-cmd="toggle-postits" title="문서 포스트잇 노트 목록 열기/닫기">📌 포스트잇 (${(options.item?.postits || []).length})</button>
           <button type="button" class="mmd-btn" data-cmd="toggle-find" title="검색 및 치환 (Ctrl+F / Ctrl+H)">🔍 찾기</button>
         </div>
 
@@ -379,17 +984,6 @@ ${isForPrint ? '<script>window.addEventListener("load", function(){ setTimeout(f
           <span class="md-save-indicator" data-role="save-ind">저장됨</span>
         </div>
       </div>
-    `;
-
-    // 1b. Collapsible Visual Formula Palette Bar (MT-03)
-    const paletteBar = document.createElement('div');
-    paletteBar.className = 'mmd-palette-bar';
-    const paletteTabsHtml = PALETTE_CATEGORIES.map((c) =>
-      `<button type="button" class="mmd-ptab${c.id === activePaletteCat ? ' active' : ''}" data-pcat="${c.id}">${c.label}</button>`
-    ).join('');
-    paletteBar.innerHTML = `
-      <div class="mmd-palette-tabs">${paletteTabsHtml}</div>
-      <div class="mmd-palette-items" data-role="palette-items"></div>
     `;
 
     // 1c. Find & Replace Bar (ED-05)
@@ -435,22 +1029,74 @@ ${isForPrint ? '<script>window.addEventListener("load", function(){ setTimeout(f
       <div class="mmd-tw-grid">${gridCellsHtml}</div>
     `;
 
-    // 2. Main 3-Column Body (Left: TOC | Center-Left: Editor | Center-Right: Preview)
+    // 2. Main Body (Left: Equation/TOC Studio | Center: Top Preview ↕ Bottom Markdown | Right: Post-it Notes)
     const workspace = document.createElement('div');
     workspace.className = 'mmd-workspace';
     workspace.dataset.mode = currentMode;
 
-    // 2a. Left TOC Sidebar
+    // 2a. Left Studio Sidebar (Tabbed: ∑ 수식·특수문자 팔레트 | 📑 문서 목차)
     const tocPane = document.createElement('aside');
-    tocPane.className = 'mmd-toc-pane';
+    tocPane.className = 'mmd-toc-pane mmd-left-studio';
+    const paletteTabsHtml = PALETTE_CATEGORIES.map((c) =>
+      `<button type="button" class="mmd-ptab${c.id === activePaletteCat ? ' active' : ''}" data-pcat="${c.id}">${c.label}</button>`
+    ).join('');
     tocPane.innerHTML = `
-      <div class="mmd-toc-head">📑 문서 목차 (TOC)</div>
-      <div class="mmd-toc-list" data-role="toc-list"></div>
+      <div class="mmd-left-tabs">
+        <button type="button" class="mmd-ltab${leftPanelTab === 'palette' ? ' active' : ''}" data-ltab="palette">∑ 수식 · 기호</button>
+        <button type="button" class="mmd-ltab${leftPanelTab === 'toc' ? ' active' : ''}" data-ltab="toc">📑 목차</button>
+      </div>
+      <div class="mmd-left-body" data-lpanel="palette" style="display:${leftPanelTab === 'palette' ? 'flex' : 'none'};">
+        <div class="mmd-palette-cats">${paletteTabsHtml}</div>
+        <div class="mmd-palette-grid" data-role="palette-items"></div>
+      </div>
+      <div class="mmd-left-body" data-lpanel="toc" style="display:${leftPanelTab === 'toc' ? 'flex' : 'none'};">
+        <div class="mmd-toc-list" data-role="toc-list"></div>
+      </div>
     `;
 
-    // 2b. Center-Left Editor Pane (Gutter + Textarea + Autocomplete + Cursor Mini Preview)
+    // Keep paletteBar ref pointing inside tocPane for clean compatibility
+    const paletteBar = tocPane.querySelector('[data-lpanel="palette"]');
+
+    // 2b. Unified Vertical Split Studio (Top: Live Math+MD Preview ↕ Draggable Resizer ↕ Bottom: Markdown Editor with Instant Shortcuts)
     const editorPane = document.createElement('div');
-    editorPane.className = 'mmd-editor-pane';
+    editorPane.className = 'mmd-editor-pane mmd-vsplit-pane';
+
+    // 2b-1. TOP Pane: Live Math & Document Preview (Clean Notion/Typora paper look + Mouse-Clickable Formula Slots!)
+    const previewPane = document.createElement('div');
+    previewPane.className = 'mmd-preview-pane mmd-top-preview-pane';
+    const previewHeader = document.createElement('div');
+    previewHeader.className = 'mmd-top-preview-bar';
+    previewHeader.innerHTML = `
+      <span class="mmd-tp-title">✨ 실시간 문서 · 수식 편집 미리보기</span>
+      <span class="mmd-tp-tip">클릭해 커서 이동 · 직접 입력 가능 · 수식 클릭 시 상/하한·분자·분모 편집 · 우클릭 Word/한글 복사</span>
+    `;
+    const previewScrollArea = document.createElement('div');
+    previewScrollArea.className = 'mmd-top-preview-scroll';
+    const viewerInner = document.createElement('div');
+    viewerInner.className = 'mmd-preview-inner markdown-body mmd-preview-editable';
+    viewerInner.contentEditable = 'true';
+    viewerInner.spellcheck = false;
+    viewerInner.setAttribute('data-placeholder', '여기에 커서를 두고 바로 문서·수식을 입력하거나 아래 마크다운 창에서 작성하세요...');
+    previewScrollArea.appendChild(viewerInner);
+    previewPane.appendChild(previewHeader);
+    previewPane.appendChild(previewScrollArea);
+
+    // 2b-2. Draggable Horizontal Resizer Bar between Top Preview and Bottom Markdown Editor
+    const vResizer = document.createElement('div');
+    vResizer.className = 'mmd-v-resizer';
+    vResizer.title = '위/아래 창 크기 드래그 조절';
+    vResizer.innerHTML = `<span class="mmd-v-resizer-grip"></span>`;
+
+    // 2b-3. Bottom Section Header + Markdown Editor
+    const mdSectionBar = document.createElement('div');
+    mdSectionBar.className = 'mmd-md-divider';
+    mdSectionBar.innerHTML = `
+      <span>📝 마크다운 언어 작성 (Markdown)</span>
+      <label class="mmd-neq-md-sc-toggle" title="마크다운 입력 중 e^5, a/b, sqrt, int 등을 바로 수식으로 자동 변환합니다">
+        <input type="checkbox" data-role="md-math-sc" checked>
+        <span>수식 즉시 단축키 (^, _, /, sqrt, int)</span>
+      </label>
+    `;
 
     const editorScrollWrap = document.createElement('div');
     editorScrollWrap.className = 'mmd-editor-wrap';
@@ -461,34 +1107,29 @@ ${isForPrint ? '<script>window.addEventListener("load", function(){ setTimeout(f
     const textarea = document.createElement('textarea');
     textarea.className = 'mmd-textarea';
     textarea.spellcheck = false;
-    textarea.placeholder = '# 제목을 입력하고 수식($E = mc^2$, $$\\mathcal{L}\\{f(t)\\}$$)과 다이어그램을 작성해 보세요...';
+    textarea.placeholder = '# 여기에 마크다운을 작성하세요 — e^5, a/b, (a+b)/c, sqrt+Space, int+Space 입력 시 바로 수식이 위 창에 실시간 표시됩니다!';
 
     // MT-02: Autocomplete dropdown
     const acPopup = document.createElement('div');
     acPopup.className = 'mmd-ac-popup';
     acPopup.style.display = 'none';
 
-    // MT-04: Cursor mini math preview tooltip
+    // MT-04: Cursor mini math preview tooltip (shown in edit-only mode)
     const mathTooltip = document.createElement('div');
     mathTooltip.className = 'mmd-math-tooltip';
     mathTooltip.style.display = 'none';
 
     editorScrollWrap.appendChild(gutter);
     editorScrollWrap.appendChild(textarea);
+    editorPane.appendChild(previewPane);
+    editorPane.appendChild(vResizer);
+    editorPane.appendChild(mdSectionBar);
     editorPane.appendChild(editorScrollWrap);
     editorPane.appendChild(acPopup);
     editorPane.appendChild(mathTooltip);
 
-    // 2c. Center-Right Live Preview Pane
-    const previewPane = document.createElement('div');
-    previewPane.className = 'mmd-preview-pane';
-    const viewerInner = document.createElement('div');
-    viewerInner.className = 'mmd-preview-inner markdown-body';
-    previewPane.appendChild(viewerInner);
-
     workspace.appendChild(tocPane);
     workspace.appendChild(editorPane);
-    workspace.appendChild(previewPane);
 
     // 3. Bottom Status Bar (Stats + Math Error Alert + KaTeX Engine Status)
     const statusBar = document.createElement('div');
@@ -508,13 +1149,55 @@ ${isForPrint ? '<script>window.addEventListener("load", function(){ setTimeout(f
     openFileInput.style.display = 'none';
 
     root.appendChild(toolbar);
-    root.appendChild(paletteBar);
     root.appendChild(findBar);
     root.appendChild(tableWizard);
     root.appendChild(workspace);
     root.appendChild(statusBar);
     root.appendChild(openFileInput);
     container.appendChild(root);
+
+    // Mount Right-Side Post-it Notes Drawer (PDF/HTML/MD Unified Sticky Notes)
+    const elBtnPostits = toolbar.querySelector('[data-cmd="toggle-postits"]');
+    const mdPostitCtrl = (global.BrainDocPostits && options.item)
+      ? global.BrainDocPostits.mountPostitSidebar(workspace, {
+          item: options.item,
+          viewerType: 'markdown',
+          initialOpen: false,
+          getCurrentAnchor: () => {
+            const val = textarea.value || '';
+            const pos = textarea.selectionStart || 0;
+            const line = val.slice(0, pos).split('\n').length;
+            const lineTxt = (val.split('\n')[line - 1] || '').replace(/^#+\s*/, '').trim().slice(0, 14);
+            return {
+              label: lineTxt ? `L.${line} · ${lineTxt}` : `L.${line}`,
+              line,
+              scrollTop: textarea.scrollTop || 0
+            };
+          },
+          onJumpToAnchor: (note) => {
+            if (currentMode === 'view') setMode('split');
+            jumpToEditorLine(note.line || 1);
+          },
+          onPersist: () => {
+            if (typeof options.onPersistPostits === 'function') options.onPersistPostits(options.item);
+          },
+          onCountChange: (cnt) => {
+            if (elBtnPostits) elBtnPostits.textContent = `📌 포스트잇 (${cnt})`;
+          },
+          onToast: options.onToast
+        })
+      : null;
+
+    // Left panel tab switcher (∑ 수식 · 기호 <-> 📑 목차)
+    tocPane.querySelectorAll('[data-ltab]').forEach((tabBtn) => {
+      tabBtn.addEventListener('click', () => {
+        leftPanelTab = tabBtn.dataset.ltab || 'palette';
+        tocPane.querySelectorAll('[data-ltab]').forEach((b) => b.classList.toggle('active', b === tabBtn));
+        tocPane.querySelectorAll('[data-lpanel]').forEach((p) => {
+          p.style.display = p.dataset.lpanel === leftPanelTab ? 'flex' : 'none';
+        });
+      });
+    });
 
     const elPaletteItems = paletteBar.querySelector('[data-role="palette-items"]');
     const elTocList = tocPane.querySelector('[data-role="toc-list"]');
@@ -526,20 +1209,314 @@ ${isForPrint ? '<script>window.addEventListener("load", function(){ setTimeout(f
     const elReplaceQ = findBar.querySelector('[data-role="replace-q"]');
     const elFindCount = findBar.querySelector('[data-role="find-count"]');
     const elFmtGroup = toolbar.querySelector('.mmd-fmt-group');
+    const elMdMathScChk = mdSectionBar.querySelector('[data-role="md-math-sc"]');
+
+    elMdMathScChk?.addEventListener('change', () => {
+      naverShortcutInMd = Boolean(elMdMathScChk.checked);
+    });
+
+    // Clicking outer paper margin of Top Preview focuses editable viewerInner smoothly
+    previewScrollArea.addEventListener('click', (e) => {
+      if (e.target === previewScrollArea) {
+        viewerInner.focus();
+      }
+    });
+
+    // ---- Two-Way Direct Editing inside Top Live Preview (`viewerInner`) ----
+    let isSyncingFromPreview = false;
+
+    function serializeInlineNodes(node) {
+      if (!node) return '';
+      if (node.nodeType === Node.TEXT_NODE) {
+        return String(node.nodeValue || '').replace(/\u00a0/g, ' ').replace(/\u200b/g, '');
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return '';
+      const el = node;
+      if (el.classList.contains('mmd-live-math')) {
+        return el.dataset.rawTex || '';
+      }
+      if (el.classList.contains('mmd-pi-inline-arrow')) {
+        return '';
+      }
+      const tag = el.tagName.toLowerCase();
+      if (tag === 'br') return '\n';
+      const inner = Array.from(el.childNodes).map(serializeInlineNodes).join('');
+      if (tag === 'strong' || tag === 'b') return inner ? `**${inner}**` : '';
+      if (tag === 'em' || tag === 'i') return inner ? `*${inner}*` : '';
+      if (tag === 'del' || tag === 's') return inner ? `~~${inner}~~` : '';
+      if (tag === 'code') return `\`${inner}\``;
+      if (tag === 'a') {
+        const href = el.getAttribute('href') || '';
+        return href ? `[${inner}](${href})` : inner;
+      }
+      return inner;
+    }
+
+    function serializePreviewDomToMarkdown(rootEl) {
+      const blocks = [];
+      const walkBlock = (node) => {
+        if (!node) return;
+        if (node.nodeType === Node.TEXT_NODE) {
+          const t = String(node.nodeValue || '').replace(/\u00a0/g, ' ').replace(/\u200b/g, '');
+          if (t.trim()) blocks.push(t);
+          return;
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) return;
+        const el = node;
+        if (el.classList.contains('mmd-pi-inline-arrow')) return;
+        if (el.classList.contains('mmd-live-math')) {
+          blocks.push(el.dataset.rawTex || '');
+          return;
+        }
+        const tag = el.tagName.toLowerCase();
+        if (/^h[1-6]$/.test(tag)) {
+          const lvl = Number(tag[1]);
+          blocks.push(`${'#'.repeat(lvl)} ${serializeInlineNodes(el).trim()}`);
+          return;
+        }
+        if (tag === 'hr') {
+          blocks.push('---');
+          return;
+        }
+        if (tag === 'pre') {
+          const codeEl = el.querySelector('code');
+          const cls = codeEl?.className || '';
+          const langM = cls.match(/language-([A-Za-z0-9_-]+)/);
+          const lang = langM ? langM[1] : '';
+          blocks.push(`\`\`\`${lang}\n${(codeEl || el).textContent || ''}\n\`\`\``);
+          return;
+        }
+        if (tag === 'blockquote') {
+          const txt = serializeInlineNodes(el).trim().split('\n').map((l) => `> ${l}`).join('\n');
+          blocks.push(txt);
+          return;
+        }
+        if (tag === 'ul' || tag === 'ol') {
+          const items = Array.from(el.children).filter((c) => c.tagName.toLowerCase() === 'li');
+          const lines = items.map((li, i) => {
+            const chk = li.querySelector('input[type="checkbox"]');
+            if (chk) {
+              const clone = li.cloneNode(true);
+              clone.querySelector('input[type="checkbox"]')?.remove();
+              return `- [${chk.checked ? 'x' : ' '}] ${serializeInlineNodes(clone).trim()}`;
+            }
+            const prefix = tag === 'ol' ? `${i + 1}. ` : '- ';
+            return prefix + serializeInlineNodes(li).trim();
+          });
+          blocks.push(lines.join('\n'));
+          return;
+        }
+        if (tag === 'table') {
+          const rows = Array.from(el.querySelectorAll('tr')).map((tr) =>
+            Array.from(tr.children).map((td) => serializeInlineNodes(td).trim())
+          );
+          if (rows.length > 0) {
+            const head = `| ${rows[0].join(' | ')} |`;
+            const sep = `| ${rows[0].map(() => '---').join(' | ')} |`;
+            const body = rows.slice(1).map((r) => `| ${r.join(' | ')} |`);
+            blocks.push([head, sep, ...body].join('\n'));
+          }
+          return;
+        }
+        if (tag === 'p' || tag === 'div') {
+          const line = serializeInlineNodes(el).replace(/\n$/, '');
+          blocks.push(line);
+          return;
+        }
+        const fallback = serializeInlineNodes(el);
+        if (fallback) blocks.push(fallback);
+      };
+
+      Array.from(rootEl.childNodes).forEach(walkBlock);
+      return blocks.join('\n').replace(/\n{3,}/g, '\n\n').replace(/^\n+|\n+$/g, '');
+    }
+
+    function tryConvertInlineMathInPreviewCaret() {
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount || !sel.isCollapsed) return false;
+      const range = sel.getRangeAt(0);
+      const node = range.startContainer;
+      if (!node || node.nodeType !== Node.TEXT_NODE || !viewerInner.contains(node)) return false;
+      const offset = range.startOffset;
+      const text = node.nodeValue || '';
+      const before = text.slice(0, offset);
+      const after = text.slice(offset);
+
+      let matchStart = -1;
+      let texExpr = '';
+      let trailing = '';
+
+      // Pattern 1: Complete inline `$expr$`
+      const mDollar = before.match(/(^|[^\\])\$([^\n$]+?)\$$/);
+      if (mDollar) {
+        matchStart = before.length - mDollar[0].length + mDollar[1].length;
+        texExpr = mDollar[2].trim();
+        trailing = '';
+      } else if (naverShortcutInMd && before.endsWith(' ')) {
+        // Pattern 2: Quick shortcut + Space right inside Live Preview (`e^5 `, `(a+b)/c `, `a/b `, `sqrt(x) `)
+        const trimmed = before.slice(0, -1);
+        const mFrac = trimmed.match(/(\([^()]+\)|[A-Za-z0-9]+)\/(\([^()]+\)|[A-Za-z0-9]+)$/);
+        const mPow = trimmed.match(/([A-Za-z0-9)])\^(\{[^{}]+\}|[A-Za-z0-9+-]+)$/);
+        const mSqrt = trimmed.match(/sqrt\(([^()]+)\)$/);
+        if (mFrac && !/https?:|file:/i.test(trimmed)) {
+          matchStart = trimmed.length - mFrac[0].length;
+          const num = mFrac[1].replace(/^\((.*)\)$/, '$1');
+          const den = mFrac[2].replace(/^\((.*)\)$/, '$1');
+          texExpr = `\\frac{${num}}{${den}}`;
+          trailing = ' ';
+        } else if (mPow) {
+          matchStart = trimmed.length - mPow[0].length;
+          const exp = mPow[2].replace(/^\{(.*)\}$/, '$1');
+          texExpr = `${mPow[1]}^{${exp}}`;
+          trailing = ' ';
+        } else if (mSqrt) {
+          matchStart = trimmed.length - mSqrt[0].length;
+          texExpr = `\\sqrt{${mSqrt[1]}}`;
+          trailing = ' ';
+        }
+      }
+
+      if (matchStart < 0 || !texExpr) return false;
+
+      const rawTex = `$${texExpr}$`;
+      const span = document.createElement('span');
+      span.className = 'mmd-live-math';
+      span.contentEditable = 'false';
+      span.dataset.rawTex = rawTex;
+      span.title = '클릭하여 수식(적분 상·하한, 분자·분모, 지수 등) 바로 편집';
+      span.innerHTML = MD.renderLatexToHtml(texExpr, false);
+
+      const prefixNode = document.createTextNode(before.slice(0, matchStart));
+      const suffixNode = document.createTextNode((trailing || '\u00a0') + after);
+      const parent = node.parentNode;
+      if (!parent) return false;
+      parent.insertBefore(prefixNode, node);
+      parent.insertBefore(span, node);
+      parent.insertBefore(suffixNode, node);
+      parent.removeChild(node);
+
+      const nextRange = document.createRange();
+      nextRange.setStart(suffixNode, trailing ? trailing.length : 1);
+      nextRange.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(nextRange);
+      return true;
+    }
+
+    viewerInner.addEventListener('input', () => {
+      if (isSyncingFromPreview) return;
+      isSyncingFromPreview = true;
+      try {
+        const converted = tryConvertInlineMathInPreviewCaret();
+        const nextMd = serializePreviewDomToMarkdown(viewerInner);
+        if (textarea.value !== nextMd) {
+          textarea.value = nextMd;
+          setDirty(true);
+          updateGutter();
+          updateToc();
+          updateCursorStatus();
+          if (autoSaveTimer) clearTimeout(autoSaveTimer);
+          autoSaveTimer = setTimeout(() => triggerSave(true), 1000);
+        }
+        if (converted) {
+          // Re-index renderedMathList so newly created inline formula is immediately clickable!
+          const savedSel = window.getSelection();
+          let anchorInfo = null;
+          if (savedSel && savedSel.rangeCount) {
+            anchorInfo = { node: savedSel.getRangeAt(0).startContainer, off: savedSel.getRangeAt(0).startOffset };
+          }
+          // Sync data-m-idx against current markdown without rebuilding DOM
+          renderedMathList = [];
+          const mathRe = /\$\$([\s\S]*?)\$\$|(?<!\\)\$([^\n$]+?)(?<!\\)\$/g;
+          let mm;
+          while ((mm = mathRe.exec(textarea.value)) !== null) {
+            const isD = mm[1] !== undefined;
+            renderedMathList.push({
+              idx: renderedMathList.length,
+              start: mm.index,
+              end: mm.index + mm[0].length,
+              expr: isD ? mm[1] : mm[2],
+              displayMode: isD
+            });
+          }
+          viewerInner.querySelectorAll('.mmd-live-math').forEach((mEl, i) => {
+            mEl.dataset.mIdx = String(i);
+          });
+          bindInteractiveMathSlots();
+          if (anchorInfo && viewerInner.contains(anchorInfo.node)) {
+            const r = document.createRange();
+            r.setStart(anchorInfo.node, Math.min(anchorInfo.off, anchorInfo.node.length || 0));
+            r.collapse(true);
+            savedSel.removeAllRanges();
+            savedSel.addRange(r);
+          }
+        }
+      } finally {
+        isSyncingFromPreview = false;
+      }
+    });
+
+    viewerInner.addEventListener('blur', () => {
+      if (!activeSlotPopover) {
+        renderPreviewImmediate();
+      }
+    });
+
+    // Draggable Horizontal Resizer between Top Preview and Bottom Markdown Editor
+    let isDraggingVResizer = false;
+    let vDragStartY = 0;
+    let vDragStartH = 0;
+
+    const onVResizeMove = (e) => {
+      if (!isDraggingVResizer) return;
+      const totalH = editorPane.clientHeight || 500;
+      const deltaY = e.clientY - vDragStartY;
+      const minTop = 90;
+      const maxTop = Math.max(minTop + 40, totalH - 130);
+      const nextH = Math.max(minTop, Math.min(maxTop, vDragStartH + deltaY));
+      topPaneHeightPx = nextH;
+      previewPane.style.flex = `0 0 ${nextH}px`;
+      previewPane.style.height = `${nextH}px`;
+    };
+
+    const onVResizeUp = () => {
+      if (!isDraggingVResizer) return;
+      isDraggingVResizer = false;
+      vResizer.classList.remove('is-dragging');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    vResizer.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      isDraggingVResizer = true;
+      vDragStartY = e.clientY;
+      vDragStartH = previewPane.getBoundingClientRect().height;
+      vResizer.classList.add('is-dragging');
+      document.body.style.cursor = 'ns-resize';
+      document.body.style.userSelect = 'none';
+    });
+    document.addEventListener('mousemove', onVResizeMove);
+    document.addEventListener('mouseup', onVResizeUp);
 
     let findCaseSensitive = false;
     let findUseRegex = false;
     let latestMathErrors = [];
 
-    // ---- Render Palette Buttons ----
+    // ---- Render Stylish Left-Side Equation & Symbol Palette Cards ----
     function renderPaletteButtons() {
       const cat = PALETTE_CATEGORIES.find((c) => c.id === activePaletteCat) || PALETTE_CATEGORIES[0];
+      const isWideCat = cat.id === 'calculus' || cat.id === 'matrix';
+      elPaletteItems.className = `mmd-palette-grid${isWideCat ? ' is-wide' : ''}`;
       elPaletteItems.innerHTML = '';
       cat.items.forEach((it) => {
         const b = document.createElement('button');
         b.type = 'button';
-        b.className = 'mmd-pitem';
-        b.textContent = it.label;
+        b.className = `mmd-pitem-card${isWideCat ? ' is-wide' : ''}`;
+        const shortDesc = String(it.title || '').split('(')[0].trim();
+        b.innerHTML = isWideCat
+          ? `<span class="mmd-pi-sym">${MD.escapeHtml(it.label)}</span><span class="mmd-pi-sub">${MD.escapeHtml(shortDesc)}</span>`
+          : `<span class="mmd-pi-sym">${MD.escapeHtml(it.label)}</span>`;
         b.title = `${it.title}  (${it.snippet.replace(/\$\d/g, '□')})`;
         b.addEventListener('click', () => insertPaletteSnippet(it.snippet));
         elPaletteItems.appendChild(b);
@@ -670,7 +1647,8 @@ ${isForPrint ? '<script>window.addEventListener("load", function(){ setTimeout(f
     }
 
     function updateCursorMathTooltip(val, pos, lineNum) {
-      if (currentMode === 'view' || document.activeElement !== textarea) {
+      // In split mode, the Top Preview Pane already renders live math continuously; only show floating tooltip in edit-only mode
+      if (currentMode !== 'edit' || document.activeElement !== textarea) {
         mathTooltip.style.display = 'none';
         return;
       }
@@ -683,9 +1661,10 @@ ${isForPrint ? '<script>window.addEventListener("load", function(){ setTimeout(f
       const rendered = MD.renderLatexToHtml(mathInfo.expr, mathInfo.displayMode);
       mathTooltip.innerHTML = `<div class="mmd-mt-lbl">${mathInfo.displayMode ? '블록 수식 미리보기' : '인라인 수식 미리보기'}</div><div class="mmd-mt-body">${rendered}</div>`;
       const lineHeight = editorFontSize * 1.62;
-      const approxY = (lineNum * lineHeight) - textarea.scrollTop + 14;
-      const maxTop = Math.max(20, editorPane.clientHeight - 110);
-      mathTooltip.style.top = `${Math.max(12, Math.min(maxTop, approxY))}px`;
+      const offsetTop = editorScrollWrap.offsetTop || 0;
+      const approxY = offsetTop + (lineNum * lineHeight) - textarea.scrollTop + 14;
+      const maxTop = Math.max(offsetTop + 10, editorPane.clientHeight - 110);
+      mathTooltip.style.top = `${Math.max(offsetTop + 10, Math.min(maxTop, approxY))}px`;
       mathTooltip.style.display = 'block';
     }
 
@@ -729,9 +1708,10 @@ ${isForPrint ? '<script>window.addEventListener("load", function(){ setTimeout(f
 
       const lineNum = textarea.value.slice(0, textarea.selectionStart).split('\n').length;
       const lineHeight = editorFontSize * 1.62;
-      const approxY = (lineNum * lineHeight) - textarea.scrollTop + 14;
-      const maxTop = Math.max(20, editorPane.clientHeight - 190);
-      acPopup.style.top = `${Math.max(10, Math.min(maxTop, approxY))}px`;
+      const offsetTop = editorScrollWrap.offsetTop || 0;
+      const approxY = offsetTop + (lineNum * lineHeight) - textarea.scrollTop + 14;
+      const maxTop = Math.max(offsetTop + 10, editorPane.clientHeight - 190);
+      acPopup.style.top = `${Math.max(offsetTop + 10, Math.min(maxTop, approxY))}px`;
       acPopup.style.display = 'flex';
     }
 
@@ -742,11 +1722,265 @@ ${isForPrint ? '<script>window.addEventListener("load", function(){ setTimeout(f
       insertCompiledSnippet(item.snippet, acTokenStart, pos, false);
     }
 
+    // ---- Interactive Formula Slot Popover (Click Integral Upper/Lower, Fraction Num/Den, Exponent, Sqrt!) ----
+    function closeSlotPopover() {
+      if (activeSlotPopover) {
+        activeSlotPopover.remove();
+        activeSlotPopover = null;
+      }
+    }
+
+    function openFormulaSlotPopover(mathIdx, initialSlotIdx, anchorRect) {
+      closeSlotPopover();
+      const entry = renderedMathList[mathIdx];
+      if (!entry) return;
+      let curExpr = entry.expr;
+      let slots = extractFormulaSlots(curExpr);
+      let activeIdx = (typeof initialSlotIdx === 'number' && initialSlotIdx >= 0 && initialSlotIdx < slots.length)
+        ? initialSlotIdx
+        : (slots.length > 0 ? 0 : -1); // -1 = full formula
+
+      const pop = document.createElement('div');
+      pop.className = 'mmd-slot-popover';
+      document.body.appendChild(pop);
+      activeSlotPopover = pop;
+
+      const renderPop = () => {
+        const curSlot = activeIdx >= 0 && slots[activeIdx] ? slots[activeIdx] : null;
+        const curVal = curSlot ? curSlot.value : curExpr;
+        pop.innerHTML = `
+          <div class="mmd-sp-head">
+            <span>✏️ ${MD.escapeHtml(curSlot ? curSlot.label : '전체 수식 편집')}</span>
+            <button type="button" class="sb-icon-btn-xs" data-sp-close="1">✕</button>
+          </div>
+          ${slots.length > 0 ? `
+            <div class="mmd-sp-tabs">
+              ${slots.map((sl, si) => `
+                <button type="button" class="mmd-sp-tab${si === activeIdx ? ' active' : ''}" data-sp-slot="${si}">
+                  ${MD.escapeHtml(sl.label)}: <b>${MD.escapeHtml(sl.value || '□')}</b>
+                </button>
+              `).join('')}
+              <button type="button" class="mmd-sp-tab${activeIdx === -1 ? ' active' : ''}" data-sp-slot="-1">전체</button>
+            </div>
+          ` : ''}
+          <div class="mmd-sp-input-row">
+            <input type="text" class="mmd-sp-input" value="${MD.escapeHtml(curVal)}" spellcheck="false" autocomplete="off" placeholder="값 입력 (예: 0, 1, \\infty, 2x)...">
+            <button type="button" class="sb-btn-primary-xs" data-sp-done="1">완료</button>
+          </div>
+        `;
+
+        const inp = pop.querySelector('.mmd-sp-input');
+        pop.querySelector('[data-sp-close]')?.addEventListener('click', closeSlotPopover);
+        pop.querySelector('[data-sp-done]')?.addEventListener('click', closeSlotPopover);
+        pop.querySelectorAll('[data-sp-slot]').forEach((b) => {
+          b.addEventListener('click', () => {
+            activeIdx = Number(b.dataset.spSlot);
+            renderPop();
+          });
+        });
+
+        const applyEdit = (newVal) => {
+          const oldFull = textarea.value || '';
+          let nextExpr;
+          if (activeIdx >= 0 && slots[activeIdx]) {
+            const sl = slots[activeIdx];
+            const rep = sl.wrapBraces ? `{${newVal}}` : newVal;
+            nextExpr = curExpr.slice(0, sl.start) + rep + curExpr.slice(sl.end);
+          } else {
+            nextExpr = newVal;
+          }
+          const delim = entry.displayMode ? '$$' : '$';
+          const replacement = entry.displayMode ? `$$\n${nextExpr.trim()}\n$$` : `$${nextExpr}$`;
+          const nextDoc = oldFull.slice(0, entry.start) + replacement + oldFull.slice(entry.end);
+          entry.end = entry.start + replacement.length;
+          entry.expr = nextExpr;
+          curExpr = nextExpr;
+          slots = extractFormulaSlots(curExpr);
+          textarea.value = nextDoc;
+          setDirty(true);
+          renderPreviewImmediate();
+          // Keep slot tab labels live-updated
+          pop.querySelectorAll('[data-sp-slot]').forEach((tb) => {
+            const idxNum = Number(tb.dataset.spSlot);
+            if (idxNum >= 0 && slots[idxNum]) {
+              const bEl = tb.querySelector('b');
+              if (bEl) bEl.textContent = slots[idxNum].value || '□';
+            }
+          });
+        };
+
+        inp?.addEventListener('input', () => applyEdit(inp.value));
+        inp?.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === 'Escape') {
+            e.preventDefault();
+            closeSlotPopover();
+            return;
+          }
+          if (e.key === 'Tab' && slots.length > 1) {
+            e.preventDefault();
+            activeIdx = (activeIdx + (e.shiftKey ? -1 : 1) + slots.length) % slots.length;
+            renderPop();
+          }
+        });
+        setTimeout(() => { inp?.focus(); inp?.select(); }, 0);
+      };
+
+      const left = Math.max(12, Math.min(window.innerWidth - 330, (anchorRect?.left || 200)));
+      const top = Math.max(12, Math.min(window.innerHeight - 160, (anchorRect?.bottom || 180) + 8));
+      pop.style.left = `${left}px`;
+      pop.style.top = `${top}px`;
+      pop.addEventListener('click', (e) => e.stopPropagation());
+      renderPop();
+    }
+
+    // ---- Render Markdown with Exact Source-Mapped Clickable Formulas ----
+    function renderMarkdownWithInteractiveMath(mdText) {
+      renderedMathList = [];
+      const src = String(mdText || '');
+      const placeholders = [];
+
+      // Protect code fences and inline code first so `$` in code is never treated as math
+      const codeMasks = [];
+      let masked = src.replace(/```[\s\S]*?```|`[^`\n]+`/g, (m, offset) => {
+        const key = `%%MMD_CODE_${codeMasks.length}%%`;
+        codeMasks.push({ key, raw: m, offset });
+        return key;
+      });
+
+      // Scan math expressions directly on original `src` (skipping code spans) for exact source indices!
+      const codeRanges = [];
+      const codeRe = /```[\s\S]*?```|`[^`\n]+`/g;
+      let cm;
+      while ((cm = codeRe.exec(src)) !== null) {
+        codeRanges.push([cm.index, cm.index + cm[0].length]);
+      }
+      const inCode = (pos) => codeRanges.some(([a, b]) => pos >= a && pos < b);
+
+      let outSrc = '';
+      let cursor = 0;
+      const mathRe = /\$\$([\s\S]*?)\$\$|(?<!\\)\$([^\n$]+?)(?<!\\)\$/g;
+      let mm;
+      while ((mm = mathRe.exec(src)) !== null) {
+        if (inCode(mm.index)) continue;
+        const isDisplay = mm[1] !== undefined;
+        const expr = isDisplay ? mm[1] : mm[2];
+        const idx = renderedMathList.length;
+        renderedMathList.push({
+          idx,
+          start: mm.index,
+          end: mm.index + mm[0].length,
+          expr,
+          displayMode: isDisplay
+        });
+        const tok = `MMD_IMATH_TOK_${idx}_END`;
+        placeholders.push({ tok, idx, expr, isDisplay });
+        outSrc += src.slice(cursor, mm.index) + (isDisplay ? `\n\n${tok}\n\n` : tok);
+        cursor = mm.index + mm[0].length;
+      }
+      outSrc += src.slice(cursor);
+
+      let html = MD.render(outSrc);
+      placeholders.forEach(({ tok, idx, expr, isDisplay }) => {
+        const rendered = MD.renderLatexToHtml(expr.trim(), isDisplay);
+        const tag = isDisplay ? 'div' : 'span';
+        const rawTex = isDisplay ? `$$\n${expr.trim()}\n$$` : `$${expr}$`;
+        const wrapped = `<${tag} class="mmd-live-math${isDisplay ? ' is-display' : ''}" contenteditable="false" data-m-idx="${idx}" data-raw-tex="${MD.escapeHtml(rawTex)}" title="클릭하여 수식(적분 상·하한, 분자·분모, 지수 등) 바로 편집">${rendered}</${tag}>`;
+        html = html.replace(new RegExp(`<p>${tok}</p>`, 'g'), wrapped).replace(tok, wrapped);
+      });
+      return html || '<p><br></p>';
+    }
+
+    function bindInteractiveMathSlots() {
+      viewerInner.querySelectorAll('.mmd-live-math[data-m-idx]').forEach((el) => {
+        const idx = Number(el.dataset.mIdx);
+        const entry = renderedMathList[idx];
+        if (!entry) return;
+        const slots = extractFormulaSlots(entry.expr);
+
+        // Map visual KaTeX sub-elements directly to slots for direct mouse clicking!
+        const bindSubHit = (domEl, slotIdx) => {
+          if (!domEl || slotIdx < 0 || !slots[slotIdx] || domEl.dataset.slotBound) return;
+          domEl.dataset.slotBound = '1';
+          domEl.classList.add('mmd-math-slot-hit');
+          domEl.title = `클릭하여 [${slots[slotIdx].label}] 직접 수정`;
+          domEl.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openFormulaSlotPopover(idx, slotIdx, domEl.getBoundingClientRect());
+          });
+        };
+
+        // 1. Integral / Sum / Prod upper & lower limits + general sup/sub
+        const msupsubs = Array.from(el.querySelectorAll('.msupsub, .op-limits'));
+        const supSlots = slots.map((sl, si) => ({ sl, si })).filter((x) => x.sl.kind === 'op-upper' || x.sl.kind === 'sup');
+        const subSlots = slots.map((sl, si) => ({ sl, si })).filter((x) => x.sl.kind === 'op-lower' || x.sl.kind === 'sub');
+        let supPtr = 0;
+        let subPtr = 0;
+        msupsubs.forEach((box) => {
+          const rows = Array.from(box.querySelectorAll('.vlist > span'));
+          if (rows.length >= 2) {
+            const curSupIdx = supPtr++;
+            const curSubIdx = subPtr++;
+            rows.forEach((rEl) => {
+              rEl.classList.add('mmd-math-slot-hit');
+              rEl.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const boxRect = box.getBoundingClientRect();
+                const clickRelY = e.clientY - boxRect.top;
+                const isUpperClick = clickRelY < boxRect.height * 0.5;
+                const chosen = isUpperClick
+                  ? (supSlots[curSupIdx]?.si ?? supSlots[0]?.si ?? subSlots[curSubIdx]?.si ?? 0)
+                  : (subSlots[curSubIdx]?.si ?? subSlots[0]?.si ?? supSlots[curSupIdx]?.si ?? 0);
+                openFormulaSlotPopover(idx, chosen, rEl.getBoundingClientRect());
+              });
+            });
+          } else if (rows.length === 1) {
+            const isLikelySub = box.querySelector('.sizing')?.closest('.vlist-r') && !supSlots[supPtr];
+            const targetSlot = isLikelySub
+              ? (subSlots[subPtr++]?.si ?? supSlots[supPtr++]?.si ?? 0)
+              : (supSlots[supPtr++]?.si ?? subSlots[subPtr++]?.si ?? 0);
+            bindSubHit(rows[0], targetSlot);
+          }
+        });
+
+        // 2. Fraction numerator (top) & denominator (bottom)
+        const numSlots = slots.map((sl, si) => ({ sl, si })).filter((x) => x.sl.kind === 'frac-num');
+        const denSlots = slots.map((sl, si) => ({ sl, si })).filter((x) => x.sl.kind === 'frac-den');
+        el.querySelectorAll('.mfrac').forEach((fracEl, fIdx) => {
+          fracEl.classList.add('mmd-math-slot-hit');
+          fracEl.addEventListener('click', (e) => {
+            if (e.target.closest('.msupsub')) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const r = fracEl.getBoundingClientRect();
+            const isTop = (e.clientY - r.top) < r.height * 0.5;
+            const slotIdx = isTop ? (numSlots[fIdx]?.si ?? 0) : (denSlots[fIdx]?.si ?? 1);
+            openFormulaSlotPopover(idx, slotIdx, r);
+          });
+        });
+
+        // 3. Sqrt body
+        const sqrtSlots = slots.map((sl, si) => ({ sl, si })).filter((x) => x.sl.kind === 'sqrt-body');
+        el.querySelectorAll('.sqrt').forEach((sqEl, sIdx) => {
+          bindSubHit(sqEl, sqrtSlots[sIdx]?.si ?? 0);
+        });
+
+        // Fallback click anywhere on the formula -> open slot editor
+        el.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          openFormulaSlotPopover(idx, 0, el.getBoundingClientRect());
+        });
+      });
+    }
+
     // ---- Performance-Optimized Preview Rendering ----
     function renderPreviewImmediate() {
       const md = textarea.value || '';
       latestMathErrors = MD.validateMathSyntax(md);
-      viewerInner.innerHTML = MD.render(md);
+      viewerInner.innerHTML = renderMarkdownWithInteractiveMath(md);
+      bindInteractiveMathSlots();
       updateGutter();
       updateToc();
       updateCursorStatus();
@@ -757,6 +1991,130 @@ ${isForPrint ? '<script>window.addEventListener("load", function(){ setTimeout(f
         MD.renderMermaidBlocks(viewerInner).catch(() => {});
       }, 280);
     }
+
+    // ---- Right-Click Context Menu: Copy for Word (MathML/HTML) or HWP (한글 수식 문법) ----
+    let copyCtxMenu = null;
+    function closeCopyCtxMenu() {
+      if (copyCtxMenu) { copyCtxMenu.remove(); copyCtxMenu = null; }
+    }
+
+    async function copySelectionForWord(mdSlice) {
+      const src = String(mdSlice || textarea.value || '');
+      // Convert LaTeX to native MathML (which MS Word pastes as editable Word equations!)
+      const withMathMl = src.replace(/\$\$([\s\S]*?)\$\$|(?<!\\)\$([^\n$]+?)(?<!\\)\$/g, (_, blockExpr, inlineExpr) => {
+        const expr = (blockExpr !== undefined ? blockExpr : inlineExpr).trim();
+        const isBlock = blockExpr !== undefined;
+        if (global.katex) {
+          try {
+            const mml = global.katex.renderToString(expr, { output: 'mathml', displayMode: isBlock, throwOnError: false });
+            return isBlock ? `<p style="text-align:center;">${mml}</p>` : mml;
+          } catch (_) {}
+        }
+        return isBlock ? `<p style="text-align:center;">${MD.escapeHtml(expr)}</p>` : MD.escapeHtml(expr);
+      });
+      const bodyHtml = MD.render(withMathMl);
+      const wordHtml = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word"><body style="font-family:'Malgun Gothic',Calibri,sans-serif;font-size:11pt;line-height:1.6;">${bodyHtml}</body></html>`;
+      try {
+        if (navigator.clipboard && global.ClipboardItem) {
+          await navigator.clipboard.write([
+            new ClipboardItem({
+              'text/html': new Blob([wordHtml], { type: 'text/html' }),
+              'text/plain': new Blob([src], { type: 'text/plain' })
+            })
+          ]);
+        } else {
+          await navigator.clipboard.writeText(src);
+        }
+        options.onToast?.('📘 Word(MS 워드) 호환 형식(편집 가능 MathML 수식 포함)으로 복사했습니다.');
+      } catch (_) {
+        await navigator.clipboard?.writeText(src).catch(() => {});
+        options.onToast?.('📘 Word 호환 텍스트로 복사했습니다.');
+      }
+    }
+
+    async function copySelectionForHwp(mdSlice, eqOnly = false) {
+      const src = String(mdSlice || textarea.value || '');
+      if (eqOnly) {
+        const eqs = [];
+        src.replace(/\$\$([\s\S]*?)\$\$|(?<!\\)\$([^\n$]+?)(?<!\\)\$/g, (_, b, i) => {
+          eqs.push(convertLatexToHwp(b !== undefined ? b : i));
+          return '';
+        });
+        const out = eqs.length ? eqs.join('\n') : convertLatexToHwp(src);
+        await navigator.clipboard?.writeText(out).catch(() => {});
+        options.onToast?.('∑ 한글(HWP) 수식 편집기용 스크립트를 복사했습니다. (한글에서 Ctrl+N,M 후 붙여넣기)');
+        return;
+      }
+      const hwpPlain = src
+        .replace(/\$\$([\s\S]*?)\$\$|(?<!\\)\$([^\n$]+?)(?<!\\)\$/g, (_, b, i) => convertLatexToHwp(b !== undefined ? b : i))
+        .replace(/^#{1,6}\s+/gm, '')
+        .replace(/\*\*(.+?)\*\*/g, '$1')
+        .replace(/\*(.+?)\*/g, '$1');
+      const hwpHtmlBody = MD.render(
+        src.replace(/\$\$([\s\S]*?)\$\$|(?<!\\)\$([^\n$]+?)(?<!\\)\$/g, (_, b, i) => `<code>${MD.escapeHtml(convertLatexToHwp(b !== undefined ? b : i))}</code>`)
+      );
+      const hwpHtml = `<html><body style="font-family:'함초롬바탕','맑은 고딕',sans-serif;font-size:10.5pt;line-height:1.6;">${hwpHtmlBody}</body></html>`;
+      try {
+        if (navigator.clipboard && global.ClipboardItem) {
+          await navigator.clipboard.write([
+            new ClipboardItem({
+              'text/html': new Blob([hwpHtml], { type: 'text/html' }),
+              'text/plain': new Blob([hwpPlain], { type: 'text/plain' })
+            })
+          ]);
+        } else {
+          await navigator.clipboard.writeText(hwpPlain);
+        }
+        options.onToast?.('📄 한글(HWP) 호환 형식(한글 수식 문법 변환)으로 복사했습니다.');
+      } catch (_) {
+        await navigator.clipboard?.writeText(hwpPlain).catch(() => {});
+        options.onToast?.('📄 한글(HWP) 호환 텍스트로 복사했습니다.');
+      }
+    }
+
+    function openCopyContextMenu(e, selectedMd) {
+      e.preventDefault();
+      closeCopyCtxMenu();
+      const hasSel = Boolean(selectedMd && selectedMd.trim());
+      const targetText = hasSel ? selectedMd : (textarea.value || '');
+      const menu = document.createElement('div');
+      menu.className = 'mmd-copy-ctxmenu';
+      menu.innerHTML = `
+        <div class="mmd-ctx-title">${hasSel ? '선택 영역 복사 형식 선택' : '문서 전체 복사 형식 선택'}</div>
+        <button type="button" data-cact="word">📘 Word(MS 워드) 호환 복사 <small>MathML 수식</small></button>
+        <button type="button" data-cact="hwp">📄 한글(HWP) 호환 복사 <small>한글 수식 문법</small></button>
+        <button type="button" data-cact="hwp-eq">∑ 한글 수식 스크립트만 복사 <small>Ctrl+N,M용</small></button>
+        <button type="button" data-cact="raw">📋 마크다운 원문 복사</button>
+      `;
+      document.body.appendChild(menu);
+      menu.style.left = `${Math.min(window.innerWidth - 260, e.clientX)}px`;
+      menu.style.top = `${Math.min(window.innerHeight - 170, e.clientY)}px`;
+      menu.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const btn = ev.target.closest('[data-cact]');
+        if (!btn) return;
+        const act = btn.dataset.cact;
+        closeCopyCtxMenu();
+        if (act === 'word') copySelectionForWord(targetText);
+        else if (act === 'hwp') copySelectionForHwp(targetText, false);
+        else if (act === 'hwp-eq') copySelectionForHwp(targetText, true);
+        else {
+          navigator.clipboard?.writeText(targetText).catch(() => {});
+          options.onToast?.('📋 마크다운 원문을 복사했습니다.');
+        }
+      });
+      copyCtxMenu = menu;
+    }
+
+    textarea.addEventListener('contextmenu', (e) => {
+      const sel = textarea.value.slice(textarea.selectionStart || 0, textarea.selectionEnd || 0);
+      openCopyContextMenu(e, sel);
+    });
+
+    previewScrollArea.addEventListener('contextmenu', (e) => {
+      const winSel = window.getSelection()?.toString() || '';
+      openCopyContextMenu(e, winSel ? textarea.value : textarea.value);
+    });
 
     function schedulePreviewRender() {
       if (renderDebounceTimer) clearTimeout(renderDebounceTimer);
@@ -803,16 +2161,16 @@ ${isForPrint ? '<script>window.addEventListener("load", function(){ setTimeout(f
       scrollSyncLock = 'editor';
       const maxEd = Math.max(1, textarea.scrollHeight - textarea.clientHeight);
       const ratio = textarea.scrollTop / maxEd;
-      const maxPr = Math.max(0, previewPane.scrollHeight - previewPane.clientHeight);
-      previewPane.scrollTop = ratio * maxPr;
+      const maxPr = Math.max(0, previewScrollArea.scrollHeight - previewScrollArea.clientHeight);
+      previewScrollArea.scrollTop = ratio * maxPr;
       requestAnimationFrame(() => { if (scrollSyncLock === 'editor') scrollSyncLock = null; });
     });
 
-    previewPane.addEventListener('scroll', () => {
+    previewScrollArea.addEventListener('scroll', () => {
       if (currentMode !== 'split' || scrollSyncLock === 'editor') return;
       scrollSyncLock = 'preview';
-      const maxPr = Math.max(1, previewPane.scrollHeight - previewPane.clientHeight);
-      const ratio = previewPane.scrollTop / maxPr;
+      const maxPr = Math.max(1, previewScrollArea.scrollHeight - previewScrollArea.clientHeight);
+      const ratio = previewScrollArea.scrollTop / maxPr;
       const maxEd = Math.max(0, textarea.scrollHeight - textarea.clientHeight);
       textarea.scrollTop = ratio * maxEd;
       gutter.scrollTop = textarea.scrollTop;
@@ -1009,6 +2367,22 @@ ${isForPrint ? '<script>window.addEventListener("load", function(){ setTimeout(f
       }
     }
 
+    // ---- Direct Naver-style math shortcuts on `beforeinput` in Markdown textarea (BOTH inside & outside $...$) ----
+    textarea.addEventListener('beforeinput', (e) => {
+      if (!naverShortcutInMd) return;
+      const insideMath = isCursorInsideMath(textarea.value || '', textarea.selectionStart || 0);
+      applyNaverMathBeforeInput(
+        textarea,
+        e,
+        (cursorOnly) => {
+          if (cursorOnly) updateCursorStatus();
+          else handleEditorInput();
+        },
+        (stop) => pendingTabStops.unshift(stop),
+        { insideMath }
+      );
+    });
+
     // ---- Keyboard Handling (ED-04, MT-02 Tab-Stops) ----
     textarea.addEventListener('keydown', (e) => {
       // Autocomplete navigation
@@ -1035,6 +2409,21 @@ ${isForPrint ? '<script>window.addEventListener("load", function(){ setTimeout(f
           hideAutocomplete();
           return;
         }
+      }
+
+      // Direct Naver-style Tab shortcuts in Markdown textarea (inside & outside math)
+      if (naverShortcutInMd) {
+        const insideMath = isCursorInsideMath(textarea.value || '', textarea.selectionStart || 0);
+        const handled = applyNaverMathKeydown(
+          textarea,
+          e,
+          (cursorOnly) => {
+            if (cursorOnly) updateCursorStatus();
+            else handleEditorInput();
+          },
+          { insideMath }
+        );
+        if (handled) return;
       }
 
       // Tab key: jump to next snippet tab stop OR insert 2 spaces
@@ -1120,10 +2509,31 @@ ${isForPrint ? '<script>window.addEventListener("load", function(){ setTimeout(f
       toolbar.querySelectorAll('.md-mode-btn').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
       elFmtGroup.style.display = mode === 'view' ? 'none' : 'flex';
       if (mode === 'view') {
-        paletteBar.style.display = 'none';
+        previewPane.style.display = 'flex';
+        previewPane.style.flex = '1 1 auto';
+        previewPane.style.height = 'auto';
+        vResizer.style.display = 'none';
+        mdSectionBar.style.display = 'none';
+        editorScrollWrap.style.display = 'none';
         mathTooltip.style.display = 'none';
+      } else if (mode === 'edit') {
+        previewPane.style.display = 'none';
+        vResizer.style.display = 'none';
+        mdSectionBar.style.display = 'flex';
+        editorScrollWrap.style.display = 'flex';
+        textarea.focus();
       } else {
-        paletteBar.style.display = showPalette ? 'flex' : 'none';
+        previewPane.style.display = 'flex';
+        if (topPaneHeightPx) {
+          previewPane.style.flex = `0 0 ${topPaneHeightPx}px`;
+          previewPane.style.height = `${topPaneHeightPx}px`;
+        } else {
+          previewPane.style.flex = '0 0 48%';
+          previewPane.style.height = '48%';
+        }
+        vResizer.style.display = 'flex';
+        mdSectionBar.style.display = 'flex';
+        editorScrollWrap.style.display = 'flex';
         textarea.focus();
       }
       renderPreviewImmediate();
@@ -1196,14 +2606,13 @@ ${isForPrint ? '<script>window.addEventListener("load", function(){ setTimeout(f
       if (!cmdBtn) return;
       const cmd = cmdBtn.dataset.cmd;
 
-      if (cmd === 'toggle-toc') {
-        showToc = !showToc;
-        tocPane.style.display = showToc ? 'flex' : 'none';
-        cmdBtn.classList.toggle('active', showToc);
-      } else if (cmd === 'toggle-palette') {
-        showPalette = !showPalette;
-        paletteBar.style.display = showPalette && currentMode !== 'view' ? 'flex' : 'none';
-        cmdBtn.classList.toggle('active', showPalette);
+      if (cmd === 'toggle-left') {
+        showLeftPanel = !showLeftPanel;
+        tocPane.style.display = showLeftPanel ? 'flex' : 'none';
+        cmdBtn.classList.toggle('active', showLeftPanel);
+      } else if (cmd === 'toggle-postits') {
+        const opened = mdPostitCtrl?.toggle();
+        cmdBtn.classList.toggle('active', Boolean(opened));
       } else if (cmd === 'toggle-find') {
         if (findBar.style.display === 'none') openFindBar(false);
         else { findBar.style.display = 'none'; textarea.focus(); }
@@ -1246,6 +2655,12 @@ ${isForPrint ? '<script>window.addEventListener("load", function(){ setTimeout(f
       if (!e.target.closest('.mmd-table-wizard') && !e.target.closest('[data-cmd="table-wizard"]')) {
         tableWizard.style.display = 'none';
       }
+      if (!e.target.closest('.mmd-slot-popover') && !e.target.closest('.mmd-live-math')) {
+        closeSlotPopover();
+      }
+      if (!e.target.closest('.mmd-copy-ctxmenu')) {
+        closeCopyCtxMenu();
+      }
     };
     document.addEventListener('click', onOutsideClick);
 
@@ -1275,6 +2690,10 @@ ${isForPrint ? '<script>window.addEventListener("load", function(){ setTimeout(f
         if (mermaidDebounceTimer) clearTimeout(mermaidDebounceTimer);
         if (autoSaveTimer) clearTimeout(autoSaveTimer);
         document.removeEventListener('click', onOutsideClick);
+        document.removeEventListener('mousemove', onVResizeMove);
+        document.removeEventListener('mouseup', onVResizeUp);
+        closeSlotPopover();
+        closeCopyCtxMenu();
       }
     };
   }

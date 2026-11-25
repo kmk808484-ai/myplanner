@@ -13,7 +13,6 @@
   const BrainSecurity = window.BrainSecurity;
   const BrainBackup = window.BrainBackup;
   const BrainIcons = window.BrainIcons;
-  const BrainSbMirror = window.BrainSbMirror;
 
   let isEditing = false;
   let isSendingChat = false;
@@ -549,19 +548,19 @@
     );
   }
 
-  function getSbMirrorHooks() {
-    return {
-      isItemVisible,
-      getLocalFileNameForItem,
-      serializeItemForLocalFile,
-      getRelativeFolderPathForItem
-    };
-  }
+  let relationsSaveTimer = null;
 
   function triggerSbMirrorSync(opts = {}) {
-    if (BrainSbMirror && BrainLocalFolder?.isConnected()) {
-      BrainSbMirror.scheduleSbMirrorSync(getSbMirrorHooks(), opts);
-    }
+    // SB 사본 복사 대신: 지정한 로컬 폴더 내에 관계 파일(.secondbrain-relations.json)만 깔끔하게 추출 저장
+    if (!BrainLocalFolder || !BrainLocalFolder.isConnected()) return;
+    if (relationsSaveTimer) clearTimeout(relationsSaveTimer);
+    relationsSaveTimer = setTimeout(() => {
+      relationsSaveTimer = null;
+      try {
+        const payload = window.BrainStore.buildRelationsExportPayload();
+        BrainLocalFolder.writeTextFile([], '.secondbrain-relations.json', JSON.stringify(payload, null, 2), { silent: true }).catch(() => {});
+      } catch (_) {}
+    }, opts.immediate ? 80 : 600);
   }
 
   function saveAndRender(options = {}) {
@@ -2842,12 +2841,16 @@
     const exportFs = isOwnerAuthenticated() ? state.fileSystem : stripLocalItemsForExport(state.fileSystem);
     return {
       exportedAt: new Date().toISOString(),
-      version: '7.1',
+      version: '7.2',
       fileSystem: exportFs,
       paraEntities: state.paraEntities || [],
       relations: state.relations || [],
       pinnedAppIds: state.pinnedAppIds || [],
       globalTemplates: state.globalTemplates || [],
+      lifeGoals: state.lifeGoals || [],
+      gtdTagOptions: state.gtdTagOptions || null,
+      weeklyReviewConfig: state.weeklyReviewConfig || null,
+      changeLogs: state.changeLogs || [],
       dfpState: typeof loadDfpState === 'function' ? loadDfpState() : null,
       chatHistory: state.chatHistory || []
     };
@@ -2885,6 +2888,19 @@
     if (Array.isArray(parsed.globalTemplates)) {
       state.globalTemplates = parsed.globalTemplates;
       window.BrainStore.persistGlobalTemplates();
+    }
+    if (Array.isArray(parsed.lifeGoals) && parsed.lifeGoals.length === 5) {
+      window.BrainStore.saveLifeGoals(parsed.lifeGoals);
+    }
+    if (parsed.gtdTagOptions && typeof parsed.gtdTagOptions === 'object') {
+      state.gtdTagOptions = parsed.gtdTagOptions;
+      window.BrainStore.persistGtdTagOptions();
+    }
+    if (parsed.weeklyReviewConfig && typeof parsed.weeklyReviewConfig === 'object') {
+      window.BrainStore.updateWeeklyReviewConfig(parsed.weeklyReviewConfig);
+    }
+    if (Array.isArray(parsed.changeLogs)) {
+      state.changeLogs = parsed.changeLogs;
     }
     if (parsed.dfpState && typeof parsed.dfpState === 'object' && typeof saveDfpState === 'function') {
       saveDfpState(parsed.dfpState);
@@ -4114,9 +4130,7 @@
 
     await walk(node);
     await BrainLocalFolder.saveWorkspaceMeta(state.fileSystem);
-    if (BrainSbMirror) {
-      await BrainSbMirror.syncAllSbMirrors(getSbMirrorHooks(), { force: true }).catch(() => {});
-    }
+    triggerSbMirrorSync({ immediate: true });
     return savedCount;
   }
 
@@ -4542,6 +4556,51 @@
   $('btn-lf-sync-import')?.addEventListener('click', async () => {
     await importFromLocalFolder();
     renderLocalFolderModal();
+  });
+
+  // 로컬 폴더 관계 파일 추출(저장) / 불러오기 (미존재 파일은 조용히 무시하고 넘어감)
+  $('btn-lf-export-relations')?.addEventListener('click', async () => {
+    const payload = window.BrainStore.buildRelationsExportPayload();
+    const jsonText = JSON.stringify(payload, null, 2);
+    let savedToFolder = false;
+    if (BrainLocalFolder?.isConnected()) {
+      const res = await BrainLocalFolder.writeTextFile([], '.secondbrain-relations.json', jsonText, { silent: false });
+      savedToFolder = Boolean(res?.ok);
+    }
+    const blob = new Blob([jsonText], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `secondbrain-relations-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast(
+      savedToFolder
+        ? `🔗 관계 파일(${payload.relations.length}건)을 로컬 폴더(.secondbrain-relations.json) 및 PC에 추출했습니다.`
+        : `🔗 관계 파일(${payload.relations.length}건)이 다운로드되었습니다.`
+    );
+  });
+
+  $('btn-lf-import-relations')?.addEventListener('click', () => $('lf-import-relations-input')?.click());
+  $('lf-import-relations-input')?.addEventListener('change', (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result));
+        const res = window.BrainStore.importRelationsExportPayload(parsed);
+        saveAndRender();
+        showToast(
+          `🔗 관계 ${res.relRestored}건 복원 완료!` +
+          (res.relSkippedMissing > 0 ? ` (폴더에 없는 파일 관계 ${res.relSkippedMissing}건은 자동 무시됨)` : '')
+        );
+      } catch (err) {
+        showToast(`⚠️ 관계 불러오기 실패: ${err.message}`);
+      }
+    };
+    reader.readAsText(file, 'utf-8');
+    e.target.value = '';
   });
 
   $('btn-lf-disconnect')?.addEventListener('click', async () => {
@@ -5178,10 +5237,15 @@
     hostEl.style.height = '100%';
 
     const controller = window.BrainMathMarkdown.mountMathMarkdownEditor(hostEl, {
+      item,
       initialContent: item.summary || '',
       initialMode,
       fileName: item.name,
       onToast: showToast,
+      onPersistPostits() {
+        touchNode(item);
+        persistFS();
+      },
       onSave(newVal, silent) {
         if (newVal === (item.summary || '') && silent) return;
         saveStateForUndo();
@@ -5635,6 +5699,33 @@
       }
     });
 
+    const htmlPostitCtrl = window.BrainDocPostits
+      ? window.BrainDocPostits.mountPostitSidebar(root.querySelector('.html-iframe-wrap'), {
+          item,
+          viewerType: 'html',
+          initialOpen: (item.postits || []).length > 0,
+          getCurrentAnchor: () => {
+            try {
+              const sy = Math.round(iframe.contentWindow?.scrollY || 0);
+              const approxPage = Math.max(1, Math.floor(sy / 700) + 1);
+              return { label: `p.${approxPage} (${sy}px)`, page: approxPage, scrollTop: sy };
+            } catch (_) {
+              return { label: '상단', page: 1, scrollTop: 0 };
+            }
+          },
+          onJumpToAnchor: (note) => {
+            try {
+              iframe.contentWindow?.scrollTo({ top: Number(note.scrollTop || 0), behavior: 'smooth' });
+            } catch (_) {}
+          },
+          onPersist: () => {
+            touchNode(item);
+            persistFS();
+          },
+          onToast: showToast
+        })
+      : null;
+
     iframe.src = blobUrl;
 
     WinManager.openWindow({
@@ -5642,10 +5733,15 @@
       title: item.name || 'HTML 미리보기',
       icon: item.icon || '🌐',
       meta: 'HTML',
-      width: 980,
+      width: 1020,
       height: 700,
       contentEl: root,
       headerActions: [
+        {
+          label: `📌 포스트잇 (${(item.postits || []).length})`,
+          title: 'HTML 문서에 포스트잇 노트 붙이기 / 목록 열기',
+          onClick: () => htmlPostitCtrl?.toggle()
+        },
         {
           label: '↗ 새 탭',
           title: '브라우저 새 탭으로 열기',
@@ -5737,10 +5833,25 @@
           img.alt = df.name || item.name;
           win.setBody(img);
         } else if (cat === 'pdf') {
-          const iframe = document.createElement('iframe');
-          iframe.src = entry.url;
-          iframe.title = df.name || item.name;
-          win.setBody(iframe);
+          if (window.BrainDocPostits && typeof window.BrainDocPostits.mountPdfViewerWithPostits === 'function') {
+            const pdfHost = document.createElement('div');
+            pdfHost.style.cssText = 'width:100%; height:100%;';
+            win.setBody(pdfHost);
+            window.BrainDocPostits.mountPdfViewerWithPostits(pdfHost, {
+              pdfUrl: entry.url,
+              item,
+              onPersist: () => {
+                touchNode(item);
+                persistFS();
+              },
+              onToast: showToast
+            });
+          } else {
+            const iframe = document.createElement('iframe');
+            iframe.src = entry.url;
+            iframe.title = df.name || item.name;
+            win.setBody(iframe);
+          }
         } else if (cat === 'video') {
           const video = document.createElement('video');
           video.src = entry.url;
@@ -5912,11 +6023,22 @@
       id: winId,
       title: item.name,
       icon: item.icon || '📊',
-      meta: 'Excel · Origin 분석기',
+      meta: item.isUnsavedDraft ? '임시 초안 (다른 이름으로 저장 시 로컬 저장)' : 'Excel · Origin 분석기',
       width: 1180,
       height: 720,
       bodyClass: 'sb-sheet-win-body',
       contentHtml: `<div class="drive-preview-loading">📊 스프레드시트 불러오는 중...</div>`,
+      headerActions: [
+        {
+          label: '💾 다른 이름으로 저장',
+          title: '파일 이름을 지정해 설정된 로컬 폴더 및 워크스페이스에 저장합니다',
+          onClick: () => {
+            if (sheetController && typeof sheetController.saveAs === 'function') {
+              sheetController.saveAs();
+            }
+          }
+        }
+      ],
       onClose() {
         if (sheetController && typeof sheetController.destroy === 'function') {
           sheetController.destroy();
@@ -5979,7 +6101,11 @@
       hideAI: isGuestMode,
       onToast: showToast,
       onDirtyChange(dirty) {
-        win.setMeta(dirty ? '● 수정됨' : 'Excel · Origin 분석기');
+        if (item.isUnsavedDraft) {
+          win.setMeta(dirty ? '● 임시 초안 (미저장)' : '임시 초안 (다른 이름으로 저장 시 로컬 저장)');
+        } else {
+          win.setMeta(dirty ? '● 수정됨' : 'Excel · Origin 분석기');
+        }
       },
       onWorkbookMutate(updatedWb) {
         item.sheetData = updatedWb;
@@ -6018,6 +6144,8 @@
       onAutoSave(updatedWb, mdSummary) {
         item.sheetData = updatedWb;
         item.summary = mdSummary;
+        // 앱 메뉴에서 연 임시 초안은 사용자가 [다른 이름으로 저장] 하기 전까지 로컬 폴더/FS에 저장하지 않음
+        if (item.isUnsavedDraft) return;
         touchNode(item);
         persistFS();
         scheduleItemSyncToLocalFolder(item, false);
@@ -6025,7 +6153,85 @@
           $('p-summary').innerHTML = renderMarkdown(item.summary);
         }
       },
+      async onSaveAs(updatedWb, mdSummary) {
+        const defaultBase = item.isUnsavedDraft
+          ? (opts.initialAppMode === 'origin' ? 'Origin_그래프' : '새_스프레드시트')
+          : `${String(item.name || '스프레드시트').replace(/\.(xlsx|xls|csv)$/i, '')}_사본`;
+        const entered = prompt('로컬 폴더에 저장할 파일 이름을 입력하세요:', defaultBase);
+        if (entered === null) return { cancelled: true };
+        const cleanBase = entered.trim().replace(/\.(xlsx|xls|csv)$/i, '');
+        if (!cleanBase) {
+          showToast('파일 이름을 입력해 주세요.');
+          return { cancelled: true };
+        }
+        const finalName = getUniqueNameInFolder(state.currentFolder, cleanBase, '.xlsx');
+        saveStateForUndo();
+
+        let targetItem = item;
+        if (item.isUnsavedDraft) {
+          // 임시 초안을 실제 파일 노드로 승격
+          const oldId = item.id;
+          item.id = genId();
+          item.name = finalName;
+          item.isUnsavedDraft = false;
+          item.sheetData = updatedWb;
+          item.summary = mdSummary;
+          touchNode(item, { isNew: true });
+          if (!state.currentFolder.children) state.currentFolder.children = [];
+          state.currentFolder.children.push(item);
+          const oldSet = openSheetViews.get(oldId);
+          if (oldSet) {
+            openSheetViews.delete(oldId);
+            openSheetViews.set(item.id, oldSet);
+          }
+          win.setTitle(item.name);
+        } else {
+          // 기존 파일의 경우 새 이름으로 복제 저장
+          targetItem = touchNode({
+            id: genId(),
+            type: 'doc',
+            name: finalName,
+            icon: item.icon || '📊',
+            tag: item.tag || '#Excel #시트',
+            summary: mdSummary,
+            link: '',
+            sheetData: updatedWb
+          }, { isNew: true });
+          if (!state.currentFolder.children) state.currentFolder.children = [];
+          state.currentFolder.children.push(targetItem);
+        }
+
+        selectedItemIds = new Set([targetItem.id]);
+        lastClickedItemId = targetItem.id;
+        saveAndRender();
+        win.setMeta('저장됨');
+
+        let syncedDrive = false;
+        if (BrainAuth.getDriveAccessToken() && isOwnerAuthenticated()) {
+          try {
+            await syncSpreadsheetToDriveNow(targetItem);
+            syncedDrive = true;
+          } catch (err) {
+            handleDriveError(err);
+          }
+        }
+        const lfRes = await syncItemToLocalFolderNow(targetItem, { allowAutoDownload: true });
+        const lf = BrainLocalFolder?.getStatus();
+        if (syncedDrive && lf?.connected && lfRes?.ok) {
+          showToast(`☁️ "${targetItem.name}" Drive 및 로컬 폴더(${lf.folderName}) 저장 완료`);
+        } else if (lf?.connected && lfRes?.ok) {
+          showToast(`📂 "${targetItem.name}" 로컬 폴더(${lf.folderName})에 저장 완료`);
+        } else if (lfRes?.downloaded) {
+          showToast(`💾 "${targetItem.name}" 저장 및 PC 다운로드 완료`);
+        } else {
+          showToast(`💾 "${targetItem.name}" 이름으로 저장되었습니다.`);
+        }
+        return { fileName: targetItem.name };
+      },
       async onSave(updatedWb, mdSummary) {
+        if (item.isUnsavedDraft) {
+          return this.onSaveAs(updatedWb, mdSummary);
+        }
         saveStateForUndo();
         item.sheetData = updatedWb;
         item.summary = mdSummary;
@@ -6236,6 +6442,67 @@
     updateCardSelectionClasses();
   }
 
+  function openLocalMediaViewer(item) {
+    if (!item || !item.localDataUrl) return;
+    const winId = `file-${item.id}`;
+    const existing = WinManager.getWindow(winId);
+    if (existing) { existing.restore(); return; }
+
+    const isPdf = /\.pdf$/i.test(item.name || '') || String(item.localDataUrl).startsWith('data:application/pdf');
+    const host = document.createElement('div');
+    host.style.cssText = 'width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:#111827;';
+
+    let blobUrl = '';
+    if (isPdf) {
+      const b64 = String(item.localDataUrl).split(',')[1] || '';
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      blobUrl = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+    }
+
+    WinManager.openWindow({
+      id: winId,
+      title: item.name || '문서 뷰어',
+      icon: isPdf ? '📕' : '🖼️',
+      meta: isPdf ? 'PDF · 포스트잇 뷰어' : '이미지 뷰어',
+      width: isPdf ? 1040 : 880,
+      height: 700,
+      contentEl: host,
+      headerActions: [
+        {
+          label: '⬇️ 다운로드',
+          title: '파일 다운로드',
+          onClick: () => {
+            const a = document.createElement('a');
+            a.href = blobUrl || item.localDataUrl;
+            a.download = item.name || 'file';
+            a.click();
+          }
+        }
+      ],
+      onClose: () => {
+        if (blobUrl) { try { URL.revokeObjectURL(blobUrl); } catch (_) {} }
+      }
+    });
+
+    if (isPdf && window.BrainDocPostits) {
+      window.BrainDocPostits.mountPdfViewerWithPostits(host, {
+        pdfUrl: blobUrl,
+        item,
+        onPersist: () => {
+          touchNode(item);
+          persistFS();
+        },
+        onToast: showToast
+      });
+    } else if (isPdf) {
+      host.innerHTML = `<iframe src="${blobUrl}" style="width:100%; height:100%; border:none;"></iframe>`;
+    } else {
+      host.innerHTML = `<img src="${item.localDataUrl}" alt="${escapeHtml(item.name)}" style="max-width:100%; max-height:100%; object-fit:contain;">`;
+    }
+  }
+
   function launchItemDirectly(item) {
     if (!item || !isItemVisible(item)) return;
     const paraEnt = (item.isVirtual || item.type === 'para-entity') ? item : findParaEntity(item.id);
@@ -6252,6 +6519,8 @@
       renderTree(state.fileSystem, elTreeRoot, true);
     } else if (isSpreadsheetItem(item)) {
       openSpreadsheetWindow(item);
+    } else if (item.localDataUrl) {
+      openLocalMediaViewer(item);
     } else if (item.driveFile && item.driveFile.id) {
       openDriveFileViewer(item);
     } else if (item.link && LocalBridge.isWebUrl(item.link)) {
@@ -6847,23 +7116,24 @@
 
       propsEl.innerHTML = '';
 
-      // 자료형태 (T: 할일 / S: 자료 / R: 산출물) — SB 폴더 파일명 규칙(P-01-T-파일명)에 자동 반영
+      // 자료형태 (T: 할일 / S: 자료 / R: 산출물 / M: 마일스톤)
       if (item.type === 'doc') {
         const roleRow = document.createElement('div');
         roleRow.className = 'reldb-prop-row';
         const curRole = window.BrainStore.getCardRole(item);
         roleRow.innerHTML =
-          `<div class="reldb-prop-key">🏷️ 자료형태</div>` +
+          `<div class="reldb-prop-key">🏷️ 카드 유형</div>` +
           `<div class="reldb-prop-val sb-reldb-role-btns">` +
           `  <button type="button" class="reldb-quick-btn${curRole === 'T' ? ' active' : ''}" data-set-role="T">T 할일</button>` +
           `  <button type="button" class="reldb-quick-btn${curRole === 'S' ? ' active' : ''}" data-set-role="S">S 자료</button>` +
           `  <button type="button" class="reldb-quick-btn${curRole === 'R' ? ' active' : ''}" data-set-role="R">R 산출물</button>` +
+          `  <button type="button" class="reldb-quick-btn${curRole === 'M' ? ' active' : ''}" data-set-role="M">◆ M 마일스톤</button>` +
           `</div>`;
         roleRow.querySelectorAll('[data-set-role]').forEach((rb) => {
           rb.addEventListener('click', () => {
             window.BrainStore.setCardRole(item, rb.dataset.setRole);
             saveAndRender();
-            showToast(`자료형태가 ${rb.dataset.setRole}로 변경되었습니다. (SB 폴더명 자동 동기화)`);
+            showToast(`카드 유형이 ${rb.dataset.setRole}로 변경되었습니다.`);
           });
         });
         propsEl.appendChild(roleRow);
@@ -7080,8 +7350,21 @@
       unassigned: '#fb7185',
       parent: '#c084fc',
       related: '#38bdf8',
-      reference: '#fb923c'
+      reference: '#fb923c',
+      card_T: '#60a5fa',
+      card_S: '#c084fc',
+      card_R: '#34d399',
+      card_M: '#fbbf24'
     };
+
+    const CARD_TYPE_GROUP_DEFS = {
+      T: { code: 'T', icon: '☑️', name: 'T 할일', color: '#60a5fa', glow: 'rgba(96,165,250,0.40)' },
+      S: { code: 'S', icon: '📄', name: 'S 자료', color: '#c084fc', glow: 'rgba(192,132,252,0.40)' },
+      R: { code: 'R', icon: '📦', name: 'R 산출물', color: '#34d399', glow: 'rgba(52,211,153,0.40)' },
+      M: { code: 'M', icon: '◆', name: 'M 마일스톤', color: '#fbbf24', glow: 'rgba(251,191,36,0.42)' }
+    };
+    const CARD_ROLE_ORDER = ['T', 'S', 'R', 'M'];
+    let typeGroupMeta = new Map(); // pgrp:<projId>:<role> -> { projId, projName, role, def, memberIds: [] }
 
     let viewMode = 'fruit'; // 'fruit' | 'obsidian'
     let catFilter = 'all';  // 'all' | 'project' | 'area' | 'resource' | 'parent'
@@ -7132,6 +7415,7 @@
     function rebuildGraphData(spawnFromId = null) {
       allValidRels = getFilteredRels();
       adjMap = new Map();
+      typeGroupMeta = new Map();
       const memberSets = { project: new Set(), area: new Set(), resource: new Set(), unassigned: new Set() };
 
       const pushAdj = (aId, bId, relObj) => {
@@ -7146,6 +7430,45 @@
         }
       };
 
+      // 같은 프로젝트 내 카드를 카드유형(T/S/R/M)별 그룹 노드로 묶어 연결
+      const linkDocIntoProjectTypeGroup = (projNode, docNode) => {
+        if (!projNode || !docNode || docNode.type !== 'doc') return;
+        const role = (window.BrainStore && typeof window.BrainStore.getCardRole === 'function')
+          ? window.BrainStore.getCardRole(docNode)
+          : (docNode.cardRole || 'S');
+        const safeRole = CARD_TYPE_GROUP_DEFS[role] ? role : 'S';
+        const def = CARD_TYPE_GROUP_DEFS[safeRole];
+        const gid = `pgrp:${projNode.id}:${safeRole}`;
+        if (!typeGroupMeta.has(gid)) {
+          typeGroupMeta.set(gid, {
+            id: gid,
+            projId: projNode.id,
+            projName: projNode.name,
+            role: safeRole,
+            def,
+            memberIds: []
+          });
+        }
+        const meta = typeGroupMeta.get(gid);
+        if (!meta.memberIds.includes(docNode.id)) {
+          meta.memberIds.push(docNode.id);
+        }
+        pushAdj(projNode.id, gid, {
+          id: `pgrp-edge:${projNode.id}:${safeRole}`,
+          sourceId: projNode.id,
+          targetId: gid,
+          type: `card_${safeRole}`,
+          label: ''
+        });
+        pushAdj(gid, docNode.id, {
+          id: `pgrp-card:${gid}:${docNode.id}`,
+          sourceId: gid,
+          targetId: docNode.id,
+          type: `card_${safeRole}`,
+          label: ''
+        });
+      };
+
       // 1) 프로젝트 · 영역 · 리소스 허브 하위에는 PARA로 선언된 엔티티 폴더만 직접 연결
       ['project', 'area', 'resource'].forEach((pType) => {
         if (catFilter !== 'all' && catFilter !== pType) return;
@@ -7156,7 +7479,11 @@
           if (Array.isArray(ent.children)) {
             ent.children.forEach((child) => {
               if (child && isItemVisible(child)) {
-                pushAdj(ent.id, child.id, { id: `folder:${ent.id}:${child.id}`, sourceId: ent.id, targetId: child.id, type: pType, label: '' });
+                if (pType === 'project' && child.type === 'doc') {
+                  linkDocIntoProjectTypeGroup(ent, child);
+                } else {
+                  pushAdj(ent.id, child.id, { id: `folder:${ent.id}:${child.id}`, sourceId: ent.id, targetId: child.id, type: pType, label: '' });
+                }
               }
             });
           }
@@ -7170,8 +7497,18 @@
         });
       }
 
-      // 3) DB에 저장된 명시적 연결 관계는 각 엔티티/파일 간 2차·3차 연쇄 연결로만 반영 (허브에 일반 파일을 직접 붙이지 않음)
+      // 3) DB에 저장된 명시적 연결 관계 반영 (프로젝트↔카드 연결은 같은 프로젝트 내에서 카드유형별로 묶음)
       allValidRels.forEach((rel) => {
+        const sNode = resolveAnyNode(rel.sourceId);
+        const tNode = resolveAnyNode(rel.targetId);
+        if (rel.type === 'project' && sNode && tNode) {
+          const projEnt = sNode.paraType === 'project' ? sNode : (tNode.paraType === 'project' ? tNode : null);
+          const docNode = sNode.type === 'doc' ? sNode : (tNode.type === 'doc' ? tNode : null);
+          if (projEnt && docNode) {
+            linkDocIntoProjectTypeGroup(projEnt, docNode);
+            return;
+          }
+        }
         pushAdj(rel.sourceId, rel.targetId, rel);
       });
 
@@ -7194,10 +7531,61 @@
       };
 
       const ensureFileNode = (id, parentId, tx, ty) => {
+        // 프로젝트 내부 카드유형별 묶음 노드(pgrp:<projId>:<role>)
+        if (String(id).startsWith('pgrp:')) {
+          const meta = typeGroupMeta.get(id);
+          if (!meta) return null;
+          let st = nodeState.get(id);
+          const lbl = `${meta.def.name} (${meta.memberIds.length})`;
+          if (!st) {
+            const spawnParent = (spawnFromId && nodeState.get(spawnFromId)) || (parentId && nodeState.get(parentId));
+            st = {
+              id,
+              isHub: false,
+              isTypeGroup: true,
+              typeGroupMeta: meta,
+              icon: meta.def.icon,
+              name: lbl,
+              color: meta.def.color,
+              glow: meta.def.glow,
+              r: 24,
+              x: spawnParent ? spawnParent.x : tx,
+              y: spawnParent ? spawnParent.y : ty,
+              tx,
+              ty,
+              scale: 0.2,
+              alpha: 0,
+              pinned: false,
+              fsNode: null,
+              parentId,
+              hiddenCount: 0
+            };
+            nodeState.set(id, st);
+          } else {
+            st.isTypeGroup = true;
+            st.typeGroupMeta = meta;
+            st.icon = meta.def.icon;
+            st.name = lbl;
+            st.color = meta.def.color;
+            st.glow = meta.def.glow;
+            st.r = 24;
+            if (!st.pinned) {
+              st.tx = tx;
+              st.ty = ty;
+            }
+          }
+          nextVisible.add(id);
+          return st;
+        }
+
         const fsNode = resolveAnyNode(id);
         if (!fsNode) return null;
         const deg = (adjMap.get(id) || []).length;
-        const palette = getPrimaryColorForNode(id);
+        const roleCode = fsNode.type === 'doc' && window.BrainStore?.getCardRole ? window.BrainStore.getCardRole(fsNode) : '';
+        const roleDef = roleCode ? CARD_TYPE_GROUP_DEFS[roleCode] : null;
+        const palette = roleDef && fsNode.type === 'doc'
+          ? { color: roleDef.color, glow: roleDef.glow }
+          : getPrimaryColorForNode(id);
         const radius = Math.min(25, 16 + Math.min(6, deg) * 1.4);
         let st = nodeState.get(id);
         if (!st) {
@@ -7207,7 +7595,8 @@
           st = {
             id,
             isHub: false,
-            icon: fsNode.icon || (fsNode.type === 'folder' ? '📁' : '📄'),
+            isTypeGroup: false,
+            icon: fsNode.icon || (roleDef ? roleDef.icon : (fsNode.type === 'folder' ? '📁' : '📄')),
             name: fsNode.name,
             color: palette.color,
             glow: palette.glow,
@@ -7225,7 +7614,7 @@
           };
           nodeState.set(id, st);
         } else {
-          st.icon = fsNode.icon || (fsNode.type === 'folder' ? '📁' : '📄');
+          st.icon = fsNode.icon || (roleDef ? roleDef.icon : (fsNode.type === 'folder' ? '📁' : '📄'));
           st.name = fsNode.name;
           st.color = palette.color;
           st.glow = palette.glow;
@@ -7357,20 +7746,64 @@
           });
         });
       } else {
-        // 전체 옵시디언 모드: 선언된 PARA 엔티티 + 미분류 파일 + 연결된 모든 노드를 방사형 별자리로 배치
+        // 전체 옵시디언 모드: 프로젝트 중심 클러스터링 → 프로젝트 내 카드유형별 묶음(T/S/R/M) → 카드 배치
+        const placed = new Set();
+        const projects = (hubMembers.project || []);
+        const pCount = projects.length;
+        const pRingR = pCount <= 1 ? 0 : Math.max(210, pCount * 58);
+
+        projects.forEach((pid, pIdx) => {
+          const pAng = pCount <= 1 ? 0 : (pIdx * 2 * Math.PI) / pCount - Math.PI / 2;
+          const px = Math.cos(pAng) * pRingR;
+          const py = Math.sin(pAng) * pRingR;
+          ensureFileNode(pid, null, px, py);
+          placed.add(pid);
+
+          const groupsForProj = CARD_ROLE_ORDER
+            .map((rc) => typeGroupMeta.get(`pgrp:${pid}:${rc}`))
+            .filter(Boolean);
+          const gCount = groupsForProj.length;
+          groupsForProj.forEach((meta, gIdx) => {
+            const gAng = gCount === 1
+              ? pAng
+              : pAng - Math.PI * 0.6 + (gIdx * Math.PI * 1.2) / Math.max(1, gCount - 1);
+            const gDist = 115;
+            const gx = px + Math.cos(gAng) * gDist;
+            const gy = py + Math.sin(gAng) * gDist;
+            ensureFileNode(meta.id, pid, gx, gy);
+            placed.add(meta.id);
+
+            const mCount = meta.memberIds.length;
+            meta.memberIds.forEach((docId, mIdx) => {
+              if (placed.has(docId)) return;
+              const mSpan = Math.min(Math.PI * 1.1, Math.max(0.55, mCount * 0.42));
+              const mAng = mCount === 1
+                ? gAng
+                : gAng - mSpan / 2 + (mIdx * mSpan) / Math.max(1, mCount - 1);
+              const mDist = Math.max(85, Math.min(135, 75 + mCount * 10));
+              ensureFileNode(docId, meta.id, gx + Math.cos(mAng) * mDist, gy + Math.sin(mAng) * mDist);
+              placed.add(docId);
+            });
+          });
+        });
+
+        // 나머지 엔티티(영역·리소스·미분류) 및 프로젝트 외 노드 배치
         const allIdSet = new Set(adjMap.keys());
         ['project', 'area', 'resource', 'unassigned'].forEach((pType) => {
           (hubMembers[pType] || []).forEach((id) => allIdSet.add(id));
         });
-        const allIds = Array.from(allIdSet);
-        // 연결 수(degree) 높은 허브 노드를 안쪽 링에 배치
-        allIds.sort((a, b) => (adjMap.get(b)?.length || 0) - (adjMap.get(a)?.length || 0));
-        allIds.forEach((nid, idx) => {
-          const ring = idx === 0 && allIds.length > 4 ? 0 : (idx < 7 ? 1 : (idx < 20 ? 2 : 3));
-          const ringR = ring === 0 ? 0 : ring === 1 ? 140 : ring === 2 ? 255 : 365;
-          const ang = idx * 2.3999632; // 황금각 방사형 분포
+        const remaining = Array.from(allIdSet).filter((id) => !placed.has(id));
+        remaining.sort((a, b) => (adjMap.get(b)?.length || 0) - (adjMap.get(a)?.length || 0));
+        const outerBase = pCount > 0 ? pRingR + 240 : 140;
+        remaining.forEach((nid, idx) => {
+          const ring = pCount > 0 ? (idx < 10 ? 0 : 1) : (idx === 0 && remaining.length > 4 ? 0 : (idx < 7 ? 1 : 2));
+          const ringR = pCount > 0
+            ? outerBase + ring * 125
+            : (ring === 0 ? 0 : ring === 1 ? 140 : 260);
+          const ang = idx * 2.3999632;
           ensureFileNode(nid, null, Math.cos(ang) * ringR, Math.sin(ang) * ringR);
         });
+
         adjMap.forEach((links, nodeId) => {
           if (!nextVisible.has(nodeId)) return;
           links.forEach(({ neighborId, rel }) => {
@@ -7414,10 +7847,24 @@
         return;
       }
       const st = nodeState.get(selectedId);
-      if (!st || !st.fsNode) {
+      if (!st) {
         inspector.style.display = 'none';
         return;
       }
+      const inspActions = inspector.querySelector('.relmap-insp-actions');
+      if (st.isTypeGroup && st.typeGroupMeta) {
+        const m = st.typeGroupMeta;
+        inspTitle.textContent = `${m.def.icon} ${m.def.name} 묶음`;
+        inspSub.textContent = `🚀 프로젝트 [${m.projName}] 내 ${m.def.name} 카드 ${m.memberIds.length}건`;
+        if (inspActions) inspActions.style.display = 'none';
+        inspector.style.display = 'flex';
+        return;
+      }
+      if (!st.fsNode) {
+        inspector.style.display = 'none';
+        return;
+      }
+      if (inspActions) inspActions.style.display = 'flex';
       const rels = getRelationsForNode(st.fsNode.id);
       const pCnt = (rels.projects || []).length;
       const aCnt = (rels.areas || []).length;
@@ -7525,6 +7972,32 @@
           if (e.to === focusId) connectedToFocus.add(e.from);
         });
       }
+
+      // 0. Draw soft cluster halos for Project -> Card-Type groups (T/S/R/M)
+      visibleNodeIds.forEach((id) => {
+        const gNode = nodeState.get(id);
+        if (!gNode || !gNode.isTypeGroup || !gNode.typeGroupMeta) return;
+        const memberNodes = gNode.typeGroupMeta.memberIds
+          .map((mid) => nodeState.get(mid))
+          .filter((mn) => mn && visibleNodeIds.has(mn.id));
+        if (memberNodes.length === 0) return;
+        const pts = [gNode, ...memberNodes];
+        const cx = pts.reduce((acc, p) => acc + p.x, 0) / pts.length;
+        const cy = pts.reduce((acc, p) => acc + p.y, 0) / pts.length;
+        const maxD = Math.max(...pts.map((p) => Math.hypot(p.x - cx, p.y - cy) + p.r)) + 26;
+        ctx.save();
+        ctx.globalAlpha = 0.12 * gNode.alpha;
+        ctx.fillStyle = gNode.color;
+        ctx.beginPath();
+        ctx.arc(cx, cy, maxD, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 0.32 * gNode.alpha;
+        ctx.strokeStyle = gNode.color;
+        ctx.lineWidth = 1.4;
+        ctx.setLineDash([6, 5]);
+        ctx.stroke();
+        ctx.restore();
+      });
 
       // 1. Draw curved glowing edges
       visibleEdges.forEach((e) => {
@@ -7818,6 +8291,10 @@
 
     wrap.querySelector('[data-act="expand-all"]').addEventListener('click', () => {
       HUB_DEFS.forEach((h) => expandedIds.add(h.id));
+      ['project', 'area', 'resource'].forEach((k) => {
+        (hubMembers[k] || []).forEach((id) => expandedIds.add(id));
+      });
+      typeGroupMeta.forEach((_, gid) => expandedIds.add(gid));
       allValidRels.forEach((r) => {
         expandedIds.add(r.sourceId);
         expandedIds.add(r.targetId);
@@ -7957,13 +8434,261 @@
     if (menu) menu.style.display = 'none';
   }
 
+  function openOcrExtractorWindow() {
+    const winId = 'app-ocr-extractor';
+    const existing = WinManager.getWindow(winId);
+    if (existing) {
+      existing.restore();
+      return;
+    }
+
+    const appUrl = 'apps/ocr-extractor/index.html';
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'width:100%; height:100%; display:flex; flex-direction:column; background:#f8fafc;';
+
+    if (window.location.protocol === 'file:') {
+      const notice = document.createElement('div');
+      notice.style.cssText = 'padding:7px 14px; font-size:12px; background:#fffbeb; color:#92400e; border-bottom:1px solid #fde68a; flex-shrink:0;';
+      notice.textContent = 'ℹ️ file:// 직접 실행에서는 브라우저 보안상 WASM OCR이 제한될 수 있습니다. 이미지 OCR까지 100% 쓰려면 로컬연결_실행.bat으로 실행해 주세요.';
+      wrap.appendChild(notice);
+    }
+
+    const iframe = document.createElement('iframe');
+    iframe.src = appUrl;
+    iframe.title = 'OCR 추출기 (HWP · PPTX · PDF)';
+    iframe.style.cssText = 'flex:1; width:100%; height:100%; border:none; background:#ffffff;';
+    wrap.appendChild(iframe);
+
+    WinManager.openWindow({
+      id: winId,
+      title: 'OCR 추출기 (HWP · PPTX · PDF)',
+      icon: '📄',
+      meta: '폐쇄망 100% 오프라인 · Llama 전처리',
+      width: 1220,
+      height: 780,
+      contentEl: wrap,
+      headerActions: [
+        {
+          label: '📝 결과 노트로 저장',
+          title: '추출된 텍스트/마크다운을 세컨드 브레인 자료(S) 노트로 바로 저장합니다',
+          onClick: () => {
+            try {
+              const doc = iframe.contentDocument;
+              const mainOut = doc?.getElementById('outputTextarea')?.value?.trim() || '';
+              const cropOut = doc?.getElementById('cropResultTextarea')?.value?.trim() || '';
+              const text = mainOut || cropOut;
+              if (!text) {
+                showToast('먼저 OCR 추출기에서 문서를 추출해 주세요.');
+                return;
+              }
+              const targetFolder = getOrCreateDailyMemoFolder() || state.currentFolder;
+              const stamp = getTodayYMD();
+              const noteName = getUniqueNameInFolder(targetFolder, `OCR_추출_${stamp}`, '.md');
+              saveStateForUndo();
+              const newItem = touchNode({
+                id: genId(),
+                type: 'doc',
+                name: noteName,
+                icon: '📄',
+                tag: '#OCR #추출 #자료',
+                cardRole: 'S',
+                extractStage: 1,
+                summary: text,
+                link: ''
+              }, { isNew: true });
+              if (!targetFolder.children) targetFolder.children = [];
+              targetFolder.children.unshift(newItem);
+              saveAndRender();
+              scheduleDocFileSyncToDrive(newItem, true);
+              scheduleItemSyncToLocalFolder(newItem, false, { allowAutoDownload: false });
+              openMarkdownWindow(newItem, 'split');
+              showToast(`📝 추출 결과를 자료(S) 노트 "${noteName}"로 저장했습니다.`);
+            } catch (err) {
+              showToast(`노트 저장 실패: ${err.message || err}`);
+            }
+          }
+        },
+        {
+          label: '🔄 새로고침',
+          title: 'OCR 추출기 새로고침',
+          onClick: () => {
+            iframe.src = appUrl;
+          }
+        },
+        {
+          label: '↗ 새 탭',
+          title: '브라우저 새 탭으로 전체 화면 열기',
+          onClick: () => {
+            window.open(appUrl, '_blank', 'noopener');
+          }
+        }
+      ]
+    });
+  }
+
+  function openDraftSpreadsheetWindow(initialAppMode = 'excel') {
+    const emptyWb = BrainSheet.createEmptyWorkbook('Sheet1');
+    const draftItem = {
+      id: `draft-${genId()}`,
+      type: 'doc',
+      name: initialAppMode === 'origin' ? 'Origin 그래프 (임시 초안)' : '엑셀 시트 (임시 초안)',
+      icon: initialAppMode === 'origin' ? '📈' : '📊',
+      tag: '#Excel #시트',
+      summary: '',
+      link: '',
+      sheetData: emptyWb,
+      isUnsavedDraft: true
+    };
+    openSpreadsheetWindow(draftItem, { allowMultiple: true, initialAppMode });
+    showToast(`💡 임시 초안으로 열렸습니다. [💾 다른 이름으로 저장] 시 로컬 폴더에 저장됩니다.`);
+  }
+
+  function openPdfConverterWindow() {
+    const winId = 'app-pdf-converter';
+    const existing = WinManager.getWindow(winId);
+    if (existing) { existing.restore(); return; }
+    if (!window.BrainPdfConverter) {
+      showToast('PDF 변환기 모듈을 불러오지 못했습니다.');
+      return;
+    }
+    const host = document.createElement('div');
+    host.style.cssText = 'width:100%; height:100%; overflow:auto;';
+    window.BrainPdfConverter.mountPdfConverterApp(host, {
+      showToast,
+      async onSavePdfToWorkspace(pdfBlob, fileName) {
+        const reader = new FileReader();
+        const dataUrl = await new Promise((resolve) => {
+          reader.onload = () => resolve(String(reader.result || ''));
+          reader.readAsDataURL(pdfBlob);
+        });
+        const targetFolder = state.currentFolder || state.fileSystem;
+        const uniqueName = getUniqueNameInFolder(targetFolder, fileName.replace(/\.pdf$/i, ''), '.pdf');
+        const b64 = dataUrl.split(',')[1] || '';
+        const newItem = touchNode({
+          id: genId(),
+          type: 'doc',
+          name: uniqueName,
+          icon: '📕',
+          tag: '#PDF #변환',
+          cardRole: 'S',
+          summary: `PDF 변환기로 생성된 파일 (${uniqueName})`,
+          link: '',
+          localDataUrl: dataUrl
+        }, { isNew: true });
+        if (!targetFolder.children) targetFolder.children = [];
+        targetFolder.children.unshift(newItem);
+        saveAndRender();
+        // Write real binary PDF to connected local folder if connected
+        const lf = BrainLocalFolder?.getStatus();
+        if (lf?.connected && BrainLocalFolder?.writeBinaryFile) {
+          try {
+            await BrainLocalFolder.writeBinaryFile(getRelativeFolderPathForItem(newItem.id), uniqueName, pdfBlob);
+          } catch (_) {}
+        } else if (window.location.protocol.startsWith('http')) {
+          try {
+            const token = await LocalBridge.fetchBridgeSessionToken(window.location.origin);
+            if (token) {
+              await fetch(`${window.location.origin}/offline-fs/write`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Bridge-Token': token },
+                body: JSON.stringify({ folderPath: getRelativeFolderPathForItem(newItem.id), fileName: uniqueName, content: b64, isBase64: true })
+              });
+            }
+          } catch (_) {}
+        }
+        showToast(`📕 "${uniqueName}" 로컬 폴더 및 워크스페이스에 저장 완료!`);
+        openLocalMediaViewer(newItem);
+      }
+    });
+    WinManager.openWindow({
+      id: winId,
+      title: 'PDF 변환기 (PPTX · HWP · Word · HTML · TXT · 이미지)',
+      icon: '📕',
+      meta: '100% 오프라인 변환',
+      width: 920,
+      height: 660,
+      contentEl: host
+    });
+  }
+
+  function openScreenCaptureWindow() {
+    const winId = 'app-screen-capture';
+    const existing = WinManager.getWindow(winId);
+    if (existing) { existing.restore(); return; }
+    if (!window.BrainScreenCapture) {
+      showToast('화면 캡처 모듈을 불러오지 못했습니다.');
+      return;
+    }
+    const host = document.createElement('div');
+    host.style.cssText = 'width:100%; height:100%; overflow:auto;';
+    const ctrl = window.BrainScreenCapture.mountScreenCaptureApp(host, {
+      showToast,
+      getBridgeBaseUrl: () => state.settings.bridgeUrl || (window.location.protocol.startsWith('http') ? window.location.origin : ''),
+      async onSaveCaptureToLocal(blob, dataUrl, fileName) {
+        const targetFolder = getOrCreateDailyMemoFolder() || state.currentFolder || state.fileSystem;
+        const uniqueName = getUniqueNameInFolder(targetFolder, fileName.replace(/\.png$/i, ''), '.png');
+        const b64 = String(dataUrl || '').split(',')[1] || '';
+        const newItem = touchNode({
+          id: genId(),
+          type: 'doc',
+          name: uniqueName,
+          icon: '🖼️',
+          tag: '#캡처 #스크린샷',
+          cardRole: 'S',
+          summary: `![${uniqueName}](${dataUrl})`,
+          link: '',
+          localDataUrl: dataUrl
+        }, { isNew: true });
+        if (!targetFolder.children) targetFolder.children = [];
+        targetFolder.children.unshift(newItem);
+        saveAndRender();
+        const lf = BrainLocalFolder?.getStatus();
+        if (lf?.connected && BrainLocalFolder?.writeBinaryFile) {
+          try {
+            await BrainLocalFolder.writeBinaryFile(getRelativeFolderPathForItem(newItem.id), uniqueName, blob);
+          } catch (_) {}
+        } else if (window.location.protocol.startsWith('http')) {
+          try {
+            const token = await LocalBridge.fetchBridgeSessionToken(window.location.origin);
+            if (token) {
+              await fetch(`${window.location.origin}/offline-fs/write`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Bridge-Token': token },
+                body: JSON.stringify({ folderPath: getRelativeFolderPathForItem(newItem.id), fileName: uniqueName, content: b64, isBase64: true })
+              });
+            }
+          } catch (_) {}
+        }
+        showToast(`📸 "${uniqueName}" 로컬 폴더에 저장되었습니다.`);
+      }
+    });
+    WinManager.openWindow({
+      id: winId,
+      title: '화면 캡처 (PrintScreen · 영역 지정)',
+      icon: '📸',
+      meta: '로컬 폴더 즉시 저장',
+      width: 820,
+      height: 580,
+      contentEl: host,
+      onClose: () => ctrl?.destroy?.()
+    });
+  }
+
   function launchBuiltinApp(app) {
     if (app === 'explorer') {
       setHomeMode(false);
     } else if (app === 'markdown') {
       createNew('doc');
-    } else if (app === 'spreadsheet' || app === 'origin') {
-      createNew('sheet');
+    } else if (app === 'spreadsheet') {
+      openDraftSpreadsheetWindow('excel');
+    } else if (app === 'origin') {
+      openDraftSpreadsheetWindow('origin');
+    } else if (app === 'ocr-extractor') {
+      openOcrExtractorWindow();
+    } else if (app === 'pdf-converter') {
+      openPdfConverterWindow();
+    } else if (app === 'screen-capture') {
+      openScreenCaptureWindow();
     } else if (app === 'relation-map') {
       openRelationMapWindow();
     } else if (app === 'ai-chat') {
@@ -8753,6 +9478,15 @@
     return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   }
 
+  function isScheduleTaggedCard(doc) {
+    if (!doc || doc.type !== 'doc') return false;
+    if (doc.isSchedule) return true;
+    const tags = BrainStore.getCardTags ? BrainStore.getCardTags(doc) : [];
+    if (tags.some((t) => /^(일정|스케줄|schedule)$/i.test(String(t || '').trim()))) return true;
+    if (/#(일정|스케줄|schedule)\b/i.test(String(doc.tag || ''))) return true;
+    return false;
+  }
+
   function computeNextScheduleInstance(dfp, now = new Date()) {
     const candidates = [];
     (dfp.schedules || []).forEach((s) => {
@@ -8769,7 +9503,7 @@
           const instKey = `${s.id}@${getTodayYMD(d)}`;
           if ((s.completedInstances || []).includes(instKey)) continue;
           if (d.getTime() + 15 * 60000 < now.getTime()) continue;
-          candidates.push({ sched: s, arrival: d, instKey, travel, prep, buffer });
+          candidates.push({ source: 'dfp', sched: s, arrival: d, instKey, travel, prep, buffer });
           break;
         }
       } else if (s.date) {
@@ -8778,8 +9512,46 @@
         const instKey = `${s.id}@${s.date}`;
         if ((s.completedInstances || []).includes(instKey)) return;
         if (d.getTime() + 15 * 60000 < now.getTime()) return;
-        candidates.push({ sched: s, arrival: d, instKey, travel, prep, buffer });
+        candidates.push({ source: 'dfp', sched: s, arrival: d, instKey, travel, prep, buffer });
       }
+    });
+
+    // 5시간 이내 '일정(스케줄)' 태그 카드 자동 수집 → 일정 신호등 실시간 연동
+    const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
+    const allDocs = BrainStore.collectAllNodes(BrainStore.state.fileSystem || { children: [] })
+      .filter((n) => n && n.type === 'doc' && !n.completed && isItemVisible(n) && isScheduleTaggedCard(n));
+
+    allDocs.forEach((doc) => {
+      const dateStr = doc.startDate || doc.endDate || '';
+      const timeStr = String(doc.startTime || doc.coreTime || '').trim();
+      if (!dateStr || !/^\d{1,2}:\d{2}$/.test(timeStr)) return;
+      const [y, m, day] = dateStr.split('-').map(Number);
+      const [hh, mm] = timeStr.split(':').map(Number);
+      if (!y || !m || !day) return;
+      const arrival = new Date(y, m - 1, day, hh || 0, mm || 0, 0, 0);
+      const diffMs = arrival.getTime() - now.getTime();
+      if (diffMs > FIVE_HOURS_MS || diffMs < -15 * 60000) return;
+
+      const instKey = `card:${doc.id}@${dateStr}T${timeStr}`;
+      if (doc.scheduleDepartedKey === instKey) return;
+
+      const travel = Number.isFinite(Number(doc.travelMins)) ? Number(doc.travelMins) : 30;
+      const buffer = Number.isFinite(Number(doc.bufferMins)) ? Number(doc.bufferMins) : 10;
+      const prep = Number.isFinite(Number(doc.prepMins)) ? Number(doc.prepMins) : 15;
+      candidates.push({
+        source: 'card',
+        doc,
+        sched: {
+          id: `card:${doc.id}`,
+          title: `📅 ${String(doc.name || '일정').replace(/\.md$/i, '')}`,
+          time: timeStr
+        },
+        arrival,
+        instKey,
+        travel,
+        prep,
+        buffer
+      });
     });
 
     candidates.sort((a, b) => a.arrival.getTime() - b.arrival.getTime());
@@ -8825,15 +9597,21 @@
 
     if (!bar) return;
 
+    const calcRow = $('dfp-live-calc-row');
+    const travelInp = $('dfp-live-travel');
+    const bufferInp = $('dfp-live-buffer');
+    const departOut = $('dfp-live-depart-time');
+
     if (!next) {
       bar.className = 'dfp-traffic-banner bar-safe';
       if (bGreen) bGreen.className = 'dfp-bulb bulb-green-on';
       if (bYellow) bYellow.className = 'dfp-bulb bulb-yellow-off';
       if (bRed) bRed.className = 'dfp-bulb bulb-red-off';
       if (badge) { badge.textContent = '여유'; badge.style.background = '#d1fae5'; badge.style.color = '#065f46'; }
-      if (headline) headline.textContent = '예정된 일정 없음';
+      if (headline) headline.textContent = '예정된 일정 없음 (5시간 이내 #일정 카드 자동 연동)';
       if (progress) { progress.style.width = '100%'; progress.style.background = '#10b981'; }
       if (timeline) timeline.textContent = '';
+      if (calcRow) calcRow.classList.add('is-hidden');
       if (headerBadge) headerBadge.textContent = '일정 없음';
       if (departBtn) {
         departBtn.classList.add('is-hidden');
@@ -8847,6 +9625,36 @@
     const minsToDepart = Math.round((departTime.getTime() - now.getTime()) / 60000);
     const minsToPrep = Math.round((prepStartTime.getTime() - now.getTime()) / 60000);
 
+    if (calcRow) {
+      calcRow.classList.remove('is-hidden');
+      if (travelInp && document.activeElement !== travelInp) travelInp.value = String(next.travel);
+      if (bufferInp && document.activeElement !== bufferInp) bufferInp.value = String(next.buffer);
+      if (departOut) departOut.textContent = formatHHMM(departTime);
+
+      const onLiveAdjust = () => {
+        const nextTravel = Math.max(0, Math.min(300, Number(travelInp?.value || 0)));
+        const nextBuffer = Math.max(0, Math.min(180, Number(bufferInp?.value || 0)));
+        if (next.source === 'card' && next.doc) {
+          next.doc.travelMins = nextTravel;
+          next.doc.bufferMins = nextBuffer;
+          BrainStore.touchNode(next.doc);
+          BrainStore.persistFS();
+        } else {
+          const cur = loadDfpState();
+          const target = (cur.schedules || []).find((s) => s.id === next.sched.id);
+          if (target) {
+            target.travelMins = nextTravel;
+            target.bufferMins = nextBuffer;
+            saveDfpState(cur);
+          }
+        }
+        if (paraDashboard) paraDashboard.refreshTrafficLightVisuals();
+        else renderDfpTrafficLight();
+      };
+      if (travelInp) travelInp.oninput = onLiveAdjust;
+      if (bufferInp) bufferInp.oninput = onLiveAdjust;
+    }
+
     if (headerBadge) {
       headerBadge.textContent = `${next.sched.title} · ${formatHHMM(departTime)} 출발`;
     }
@@ -8854,6 +9662,15 @@
       departBtn.classList.remove('is-hidden');
       departBtn.style.display = 'inline-flex';
       departBtn.onclick = () => {
+        if (next.source === 'card' && next.doc) {
+          next.doc.scheduleDepartedKey = next.instKey;
+          BrainStore.touchNode(next.doc);
+          BrainStore.persistFS();
+          showToast(`✅ "${next.sched.title}" 출발 완료 처리됨`);
+          if (paraDashboard) paraDashboard.renderAll();
+          else renderDfpTrafficLight();
+          return;
+        }
         const cur = loadDfpState();
         const target = cur.schedules.find((s) => s.id === next.sched.id);
         if (target) {
@@ -8867,10 +9684,14 @@
     }
 
     if (timeline) {
+      const sourceBadge = next.source === 'card'
+        ? `<span class="dfp-card-src-badge">5시간 이내 #일정 카드</span>`
+        : '';
       timeline.innerHTML =
+        `${sourceBadge}` +
         `<span>준비 <b>${formatHHMM(prepStartTime)}</b></span>` +
-        `<span>· 출발 <b>${formatHHMM(departTime)}</b></span>` +
-        `<span>· 도착 <b>${formatHHMM(next.arrival)}</b></span>`;
+        `<span>· 출발시작 <b>${formatHHMM(departTime)}</b></span>` +
+        `<span>· 일정시작 <b>${formatHHMM(next.arrival)}</b></span>`;
     }
 
     if (minsToDepart <= 0) {

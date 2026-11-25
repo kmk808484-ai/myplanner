@@ -175,6 +175,49 @@
     return String(fileName || '').replace(/^[PRA]-\d{2}-[TSR]-/i, '');
   }
 
+  const DEFAULT_GTD_TAG_OPTIONS = {
+    contexts: ['@PC', '@폰', '@외출', '@집'],
+    times: ['@15분', '@30분', '@1시간', '@2시간'],
+    energies: ['@높음', '@중간', '@낮음']
+  };
+
+  const DEFAULT_LIFE_GOALS = [
+    { id: 'lg-1', title: '', desc: '', color: '#4f46e5' },
+    { id: 'lg-2', title: '', desc: '', color: '#0ea5e9' },
+    { id: 'lg-3', title: '', desc: '', color: '#10b981' },
+    { id: 'lg-4', title: '', desc: '', color: '#f59e0b' },
+    { id: 'lg-5', title: '', desc: '', color: '#e11d48' }
+  ];
+
+  const DEFAULT_WEEKLY_REVIEW_CONFIG = {
+    reviewWeekday: 0, // 0=일, 1=월 ... 6=토
+    checklist: { inbox: false, waiting: false, someday: false },
+    lastReviewedDate: ''
+  };
+
+  function createDefaultRequirementTemplate(title = '', projectName = '') {
+    const t = String(title || '').trim() || '(처음 떠오른 요구 한 줄)';
+    const p = String(projectName || '').trim();
+    return (
+      `# 요구사항: ${t}\n\n` +
+      `- 요청자: \n` +
+      `- 구분: 필수 / 내가 덧붙임\n` +
+      `- 관련 프로젝트: ${p}\n\n` +
+      `## 다섯 번 질문 (답은 매번 한 문장)\n` +
+      `1. 왜? \n` +
+      `2. 왜? \n` +
+      `3. 왜? \n` +
+      `4. 왜? \n` +
+      `5. 왜? \n` +
+      `## 막혔을 때 (3번 이후 답이 안 나오면 여기로)\n` +
+      `- 막힌 단계: \n` +
+      `- 대안 질문: 어떻게 하면 되지? / 다른 방법은? / 이게 없으면? / 누가 이미 해결했지?\n` +
+      `- 답 (한 문장): \n` +
+      `## 본질 요구 (5번 답을 요구로 다시 쓰기)\n` +
+      `- \n`
+    );
+  }
+
   function normalizeParaEntityFields(e) {
     if (!e || typeof e !== 'object') return e;
     if (e.paraType === 'archive') {
@@ -206,6 +249,13 @@
       if (!Array.isArray(e.templates)) e.templates = [];
       if (!Array.isArray(e.risks)) e.risks = [];
       if (typeof e.riskDocId !== 'string') e.riskDocId = '';
+      if (typeof e.lifeGoalId !== 'string') e.lifeGoalId = '';
+      if (typeof e.parentProjectId !== 'string') e.parentProjectId = '';
+      if (!Array.isArray(e.requirements)) e.requirements = [];
+      if (!Array.isArray(e.deliverableSpecs)) e.deliverableSpecs = [];
+      if (!Array.isArray(e.evaluationCriteria)) e.evaluationCriteria = [];
+      if (typeof e.ganttOrder !== 'number' || !Number.isFinite(e.ganttOrder)) e.ganttOrder = e.paraNumber || 0;
+      if (typeof e.nextProjectId !== 'string') e.nextProjectId = '';
     }
     return e;
   }
@@ -217,7 +267,9 @@
     archived = false,
     status = '',
     dueDate = '',
-    progress = 0
+    progress = 0,
+    lifeGoalId = '',
+    parentProjectId = ''
   }) {
     const isArchiveCall = paraType === 'archive';
     const cleanType = ['project', 'area', 'resource'].includes(paraType) ? paraType : 'project';
@@ -263,6 +315,8 @@
       progress: cleanType === 'project'
         ? (isArchived ? 100 : Math.max(0, Math.min(100, Math.round(Number(progress) || 0))))
         : undefined,
+      lifeGoalId: cleanType === 'project' ? String(lifeGoalId || '').trim() : undefined,
+      parentProjectId: cleanType === 'project' ? String(parentProjectId || '').trim() : undefined,
       name: cleanName,
       icon: iconMap[cleanType],
       tag: tagMap[cleanType],
@@ -272,6 +326,11 @@
     });
     state.paraEntities.push(entity);
     persistParaEntities();
+    logChange({
+      category: 'project',
+      projectName: entity.name,
+      message: `${getParaCode(entity)} "${entity.name}" (${cleanType === 'project' ? '프로젝트' : (cleanType === 'area' ? '영역' : '자료')}) 생성`
+    });
     return entity;
   }
 
@@ -297,6 +356,13 @@
       if (patch.progress !== undefined && Number.isFinite(Number(patch.progress))) {
         ent.progress = Math.max(0, Math.min(100, Math.round(Number(patch.progress))));
       }
+      if (patch.lifeGoalId !== undefined) ent.lifeGoalId = String(patch.lifeGoalId || '').trim();
+      if (patch.parentProjectId !== undefined) ent.parentProjectId = String(patch.parentProjectId || '').trim();
+      if (Array.isArray(patch.requirements)) ent.requirements = patch.requirements;
+      if (Array.isArray(patch.deliverableSpecs)) ent.deliverableSpecs = patch.deliverableSpecs;
+      if (Array.isArray(patch.evaluationCriteria)) ent.evaluationCriteria = patch.evaluationCriteria;
+      if (patch.ganttOrder !== undefined && Number.isFinite(Number(patch.ganttOrder))) ent.ganttOrder = Number(patch.ganttOrder);
+      if (patch.nextProjectId !== undefined) ent.nextProjectId = String(patch.nextProjectId || '').trim();
     }
     if (patch.archived !== undefined) {
       ent.archived = Boolean(patch.archived);
@@ -558,7 +624,11 @@
       paraEntities: `${prefix}para_entities`,
       pinnedApps: `${prefix}pinned_apps`,
       syncMeta: `${prefix}sync_meta`,
-      globalTemplates: `${prefix}global_templates`
+      globalTemplates: `${prefix}global_templates`,
+      lifeGoals: `${prefix}life_goals`,
+      gtdTagOptions: `${prefix}gtd_tags`,
+      weeklyReview: `${prefix}weekly_review`,
+      changeLogs: `${prefix}change_logs`
     };
   }
 
@@ -639,6 +709,10 @@
     paraEntities: [],
     pinnedAppIds: [],
     globalTemplates: [],
+    lifeGoals: JSON.parse(JSON.stringify(DEFAULT_LIFE_GOALS)),
+    gtdTagOptions: JSON.parse(JSON.stringify(DEFAULT_GTD_TAG_OPTIONS)),
+    weeklyReviewConfig: JSON.parse(JSON.stringify(DEFAULT_WEEKLY_REVIEW_CONFIG)),
+    changeLogs: [],
     attachedContextIds: []
   };
   state.currentFolder = state.fileSystem;
@@ -730,22 +804,18 @@
     let loadedPinnedApps = [];
     let loadedParaEntities = [];
     let loadedGlobalTemplates = null;
-    try {
-      const rawRel = localStorage.getItem(keys.relations);
-      if (rawRel) loadedRelations = JSON.parse(rawRel) || [];
-    } catch (_) {}
-    try {
-      const rawPinned = localStorage.getItem(keys.pinnedApps);
-      if (rawPinned) loadedPinnedApps = JSON.parse(rawPinned) || [];
-    } catch (_) {}
-    try {
-      const rawPara = localStorage.getItem(keys.paraEntities);
-      if (rawPara) loadedParaEntities = JSON.parse(rawPara) || [];
-    } catch (_) {}
-    try {
-      const rawTpls = localStorage.getItem(keys.globalTemplates);
-      if (rawTpls) loadedGlobalTemplates = JSON.parse(rawTpls);
-    } catch (_) {}
+    let loadedLifeGoals = null;
+    let loadedGtdTags = null;
+    let loadedWeeklyReview = null;
+    let loadedChangeLogs = [];
+    try { const r = localStorage.getItem(keys.relations); if (r) loadedRelations = JSON.parse(r) || []; } catch (_) {}
+    try { const r = localStorage.getItem(keys.pinnedApps); if (r) loadedPinnedApps = JSON.parse(r) || []; } catch (_) {}
+    try { const r = localStorage.getItem(keys.paraEntities); if (r) loadedParaEntities = JSON.parse(r) || []; } catch (_) {}
+    try { const r = localStorage.getItem(keys.globalTemplates); if (r) loadedGlobalTemplates = JSON.parse(r); } catch (_) {}
+    try { const r = localStorage.getItem(keys.lifeGoals); if (r) loadedLifeGoals = JSON.parse(r); } catch (_) {}
+    try { const r = localStorage.getItem(keys.gtdTagOptions); if (r) loadedGtdTags = JSON.parse(r); } catch (_) {}
+    try { const r = localStorage.getItem(keys.weeklyReview); if (r) loadedWeeklyReview = JSON.parse(r); } catch (_) {}
+    try { const r = localStorage.getItem(keys.changeLogs); if (r) loadedChangeLogs = JSON.parse(r) || []; } catch (_) {}
 
     state.fileSystem = loadedFS;
     state.currentFolder = state.fileSystem;
@@ -759,6 +829,24 @@
     state.globalTemplates = Array.isArray(loadedGlobalTemplates)
       ? loadedGlobalTemplates
       : JSON.parse(JSON.stringify(DEFAULT_GLOBAL_TEMPLATES));
+    state.lifeGoals = Array.isArray(loadedLifeGoals) && loadedLifeGoals.length === 5
+      ? loadedLifeGoals
+      : JSON.parse(JSON.stringify(DEFAULT_LIFE_GOALS));
+    state.gtdTagOptions = loadedGtdTags && typeof loadedGtdTags === 'object'
+      ? {
+          contexts: Array.isArray(loadedGtdTags.contexts) && loadedGtdTags.contexts.length ? loadedGtdTags.contexts : [...DEFAULT_GTD_TAG_OPTIONS.contexts],
+          times: Array.isArray(loadedGtdTags.times) && loadedGtdTags.times.length ? loadedGtdTags.times : [...DEFAULT_GTD_TAG_OPTIONS.times],
+          energies: Array.isArray(loadedGtdTags.energies) && loadedGtdTags.energies.length ? loadedGtdTags.energies : [...DEFAULT_GTD_TAG_OPTIONS.energies]
+        }
+      : JSON.parse(JSON.stringify(DEFAULT_GTD_TAG_OPTIONS));
+    state.weeklyReviewConfig = loadedWeeklyReview && typeof loadedWeeklyReview === 'object'
+      ? {
+          ...DEFAULT_WEEKLY_REVIEW_CONFIG,
+          ...loadedWeeklyReview,
+          checklist: { ...DEFAULT_WEEKLY_REVIEW_CONFIG.checklist, ...(loadedWeeklyReview.checklist || {}) }
+        }
+      : JSON.parse(JSON.stringify(DEFAULT_WEEKLY_REVIEW_CONFIG));
+    state.changeLogs = Array.isArray(loadedChangeLogs) ? loadedChangeLogs : [];
     state.attachedContextIds = [];
 
     // 이전 버전(폴더형 PARA) → 가상 PARA 엔티티 구조로 자동 마이그레이션 & 고유 넘버링 보장
@@ -791,6 +879,10 @@
     state.paraEntities = [];
     state.pinnedAppIds = [];
     state.globalTemplates = [];
+    state.lifeGoals = JSON.parse(JSON.stringify(DEFAULT_LIFE_GOALS));
+    state.gtdTagOptions = JSON.parse(JSON.stringify(DEFAULT_GTD_TAG_OPTIONS));
+    state.weeklyReviewConfig = JSON.parse(JSON.stringify(DEFAULT_WEEKLY_REVIEW_CONFIG));
+    state.changeLogs = [];
     state.attachedContextIds = [];
   }
 
@@ -874,7 +966,9 @@
   const SYMMETRIC_REL_TYPES = ['project', 'area', 'resource', 'archive', 'related'];
   const VALID_REL_TYPES = ['project', 'area', 'resource', 'archive', 'parent', 'related', 'reference'];
 
-  function addRelation({ sourceId, targetId, type = 'project', label = '' }) {
+  let _isPropagatingPara = false;
+
+  function addRelation({ sourceId, targetId, type = 'project', label = '', skipPropagate = false }) {
     if (!sourceId || !targetId || sourceId === targetId) return null;
     const cleanType = VALID_REL_TYPES.includes(type) ? type : 'related';
     const cleanLabel = String(label || '').trim();
@@ -888,31 +982,87 @@
       }
       return r.type === cleanType && r.sourceId === sourceId && r.targetId === targetId;
     });
+    const sNode = resolveAnyNode(sourceId);
+    const tNode = resolveAnyNode(targetId);
+    let rel = dup;
     if (dup) {
       if (cleanLabel) {
         dup.label = cleanLabel;
         persistRelations();
       }
-      return dup;
+    } else {
+      rel = {
+        id: `rel-${genId()}`,
+        sourceId,
+        targetId,
+        type: cleanType,
+        label: cleanLabel,
+        createdAt: Date.now()
+      };
+      state.relations.push(rel);
+      persistRelations();
+      if (sNode && tNode) {
+        const projTarget = sNode.paraType === 'project' ? sNode : (tNode.paraType === 'project' ? tNode : null);
+        logChange({
+          category: 'relation',
+          projectName: projTarget?.name || '',
+          message: `관계 연결(${cleanType}): "${sNode.name}" ↔ "${tNode.name}"${cleanLabel ? ` (${cleanLabel})` : ''}`
+        });
+      }
     }
-    const rel = {
-      id: `rel-${genId()}`,
-      sourceId,
-      targetId,
-      type: cleanType,
-      label: cleanLabel,
-      createdAt: Date.now()
-    };
-    state.relations.push(rel);
-    persistRelations();
+
+    // 상위 할일에 프로젝트/영역이 지정되면 하위 일들도 자연스럽게 동일 소속 상속
+    if (!skipPropagate && !_isPropagatingPara && sNode && tNode) {
+      _isPropagatingPara = true;
+      try {
+        if (cleanType === 'project' || cleanType === 'area') {
+          const docNode = sNode.type === 'doc' ? sNode : (tNode.type === 'doc' ? tNode : null);
+          const entNode = sNode.type === 'para-entity' ? sNode : (tNode.type === 'para-entity' ? tNode : null);
+          if (docNode && entNode) {
+            const descendants = getAllDescendantCards(docNode.id);
+            descendants.forEach((desc) => {
+              addRelation({ sourceId: desc.id, targetId: entNode.id, type: cleanType, skipPropagate: true });
+            });
+          }
+        } else if (cleanType === 'parent' && sNode.type === 'doc' && tNode.type === 'doc') {
+          const parentRels = getRelationsForNode(sNode.id);
+          const targets = [tNode, ...getAllDescendantCards(tNode.id)];
+          (parentRels.projects || []).forEach(({ node }) => {
+            if (node?.type === 'para-entity') {
+              targets.forEach((d) => addRelation({ sourceId: d.id, targetId: node.id, type: 'project', skipPropagate: true }));
+            }
+          });
+          (parentRels.areas || []).forEach(({ node }) => {
+            if (node?.type === 'para-entity') {
+              targets.forEach((d) => addRelation({ sourceId: d.id, targetId: node.id, type: 'area', skipPropagate: true }));
+            }
+          });
+        }
+      } finally {
+        _isPropagatingPara = false;
+      }
+    }
+
     return rel;
   }
 
   function removeRelation(relId) {
+    const targetRel = (state.relations || []).find((r) => r.id === relId);
     const before = state.relations.length;
     state.relations = state.relations.filter((r) => r.id !== relId);
     if (state.relations.length !== before) {
       persistRelations();
+      if (targetRel) {
+        const sNode = resolveAnyNode(targetRel.sourceId);
+        const tNode = resolveAnyNode(targetRel.targetId);
+        if (sNode && tNode) {
+          logChange({
+            category: 'relation',
+            projectName: sNode.paraType === 'project' ? sNode.name : (tNode.paraType === 'project' ? tNode.name : ''),
+            message: `관계 해제(${targetRel.type}): "${sNode.name}" ↔ "${tNode.name}"`
+          });
+        }
+      }
       return true;
     }
     return false;
@@ -1232,25 +1382,540 @@
     return lines.join('\n');
   }
 
-  // ---- Unified Card Helpers (Role T/S/R, Today Core, Sub-Cards, Tags, Schedule) ----
+  // ---- Unified Card Helpers (Role T/S/R/M, Subtype, Reuse, Extract, GTD, Sub-Cards, Tags, Schedule) ----
   function getCardRole(doc) {
     if (!doc) return 'S';
-    if (['T', 'S', 'R'].includes(doc.cardRole)) return doc.cardRole;
+    if (['T', 'S', 'R', 'M'].includes(doc.cardRole)) return doc.cardRole;
+    if (doc.cardKind === 'milestone') return 'M';
     if (doc.cardKind === 'deliverable') return 'R';
     if (doc.cardKind === 'task' || doc.cardKind === 'event' || doc.isTodayCore || /#할일|#todo\b/i.test(String(doc.tag || ''))) return 'T';
+    if (/#마일스톤|#milestone\b/i.test(String(doc.tag || ''))) return 'M';
     if (/#산출물|#결과|#result\b/i.test(String(doc.tag || ''))) return 'R';
     return 'S';
   }
 
-  function setCardRole(doc, role) {
-    if (!doc || !['T', 'S', 'R'].includes(role)) return false;
+  function setCardRole(doc, role, resultSubtype) {
+    if (!doc || !['T', 'S', 'R', 'M'].includes(role)) return false;
     doc.cardRole = role;
     if (role === 'T' && (!doc.cardKind || doc.cardKind === 'note')) doc.cardKind = 'task';
-    if (role === 'R') doc.cardKind = 'deliverable';
-    if (role === 'S' && doc.cardKind === 'deliverable') doc.cardKind = 'note';
+    if (role === 'M') doc.cardKind = 'milestone';
+    if (role === 'R') {
+      doc.cardKind = 'deliverable';
+      if (resultSubtype && ['output', 'trial_error', 'mistake'].includes(resultSubtype)) {
+        doc.resultSubtype = resultSubtype;
+      } else if (!doc.resultSubtype) {
+        doc.resultSubtype = 'output';
+      }
+    }
+    if (role === 'S' && (doc.cardKind === 'deliverable' || doc.cardKind === 'milestone')) doc.cardKind = 'note';
     touchNode(doc);
     persistFS();
     return true;
+  }
+
+  function setCardResultSubtype(doc, subtype) {
+    if (!doc || !['output', 'trial_error', 'mistake'].includes(subtype)) return false;
+    doc.cardRole = 'R';
+    doc.cardKind = 'deliverable';
+    doc.resultSubtype = subtype;
+    touchNode(doc);
+    persistFS();
+    return true;
+  }
+
+  function incrementCardReuse(docId) {
+    const doc = findNodeAndParent(docId)?.node;
+    if (!doc) return 0;
+    doc.reuseCount = Number(doc.reuseCount || 0) + 1;
+    touchNode(doc);
+    persistFS();
+    return doc.reuseCount;
+  }
+
+  function getRecommendedDeliverables(queryText = '', extraTags = []) {
+    const rawTokens = `${queryText || ''} ${(Array.isArray(extraTags) ? extraTags.join(' ') : String(extraTags || ''))}`
+      .toLowerCase()
+      .split(/[\s,#/_\-()\[\]]+/)
+      .map((t) => t.trim())
+      .filter((t) => t.length >= 2);
+    const tokenSet = new Set(rawTokens);
+
+    const archivedProjects = getParaEntities('project', { onlyArchived: true });
+    const allProjects = getParaEntities('project');
+    const results = [];
+    const seenDoc = new Set();
+
+    const scanProjects = archivedProjects.length > 0 ? archivedProjects : allProjects;
+    scanProjects.forEach((proj) => {
+      const projHay = `${proj.name || ''} ${proj.summary || ''} ${proj.tag || ''}`.toLowerCase();
+      let projScore = 0;
+      tokenSet.forEach((tk) => {
+        if (projHay.includes(tk)) projScore += 3;
+      });
+
+      const docs = getProjectLinkedDocs(proj.id);
+      docs.forEach((doc) => {
+        if (seenDoc.has(doc.id)) return;
+        if (getCardRole(doc) !== 'R') return;
+        const docTags = getCardTags(doc).map((t) => t.toLowerCase());
+        const docHay = `${doc.name || ''} ${doc.summary || ''} ${docTags.join(' ')}`.toLowerCase();
+        let score = projScore + (proj.archived ? 2 : 0) + Math.min(3, Number(doc.reuseCount || 0));
+        tokenSet.forEach((tk) => {
+          if (docHay.includes(tk)) score += 4;
+        });
+        if (tokenSet.size === 0 || score > (proj.archived ? 2 : 0)) {
+          seenDoc.add(doc.id);
+          results.push({ doc, project: proj, score });
+        }
+      });
+    });
+
+    return results.sort((a, b) => (b.score - a.score) || (Number(b.doc.reuseCount || 0) - Number(a.doc.reuseCount || 0)));
+  }
+
+  // ---- Life Goals (5), GTD Tags, Weekly Review, Project Hierarchy, Change Logs, Relation Export/Import ----
+  function persistLifeGoals() {
+    if (!activeUserEmail) return;
+    try { localStorage.setItem(getUserKeys(activeUserEmail).lifeGoals, JSON.stringify(state.lifeGoals || [])); } catch (_) {}
+    setSyncMeta({ updatedAt: Date.now(), hasUserEdits: true });
+  }
+
+  function saveLifeGoals(goalsArr) {
+    const clean = DEFAULT_LIFE_GOALS.map((def, idx) => {
+      const src = Array.isArray(goalsArr) ? (goalsArr[idx] || {}) : {};
+      return {
+        id: src.id || def.id,
+        title: String(src.title || '').trim(),
+        desc: String(src.desc || '').trim(),
+        color: src.color || def.color
+      };
+    });
+    state.lifeGoals = clean;
+    persistLifeGoals();
+    logChange({ category: 'goal', message: '인생 중요 목표 5가지 업데이트' });
+    return clean;
+  }
+
+  function getLifeGoalById(id) {
+    if (!id) return null;
+    return (state.lifeGoals || []).find((g) => g.id === id && g.title) || null;
+  }
+
+  function persistGtdTagOptions() {
+    if (!activeUserEmail) return;
+    try { localStorage.setItem(getUserKeys(activeUserEmail).gtdTagOptions, JSON.stringify(state.gtdTagOptions)); } catch (_) {}
+  }
+
+  function addCustomGtdTag(group, rawTag) {
+    if (!['contexts', 'times', 'energies'].includes(group)) return '';
+    let clean = String(rawTag || '').trim();
+    if (!clean) return '';
+    if (!clean.startsWith('@')) clean = `@${clean}`;
+    if (!state.gtdTagOptions[group]) state.gtdTagOptions[group] = [];
+    if (!state.gtdTagOptions[group].includes(clean)) {
+      state.gtdTagOptions[group].push(clean);
+      persistGtdTagOptions();
+    }
+    return clean;
+  }
+
+  function persistWeeklyReviewConfig() {
+    if (!activeUserEmail) return;
+    try { localStorage.setItem(getUserKeys(activeUserEmail).weeklyReview, JSON.stringify(state.weeklyReviewConfig)); } catch (_) {}
+  }
+
+  function updateWeeklyReviewConfig(patch = {}) {
+    state.weeklyReviewConfig = {
+      ...DEFAULT_WEEKLY_REVIEW_CONFIG,
+      ...(state.weeklyReviewConfig || {}),
+      ...patch,
+      checklist: {
+        ...DEFAULT_WEEKLY_REVIEW_CONFIG.checklist,
+        ...(state.weeklyReviewConfig?.checklist || {}),
+        ...(patch.checklist || {})
+      }
+    };
+    persistWeeklyReviewConfig();
+    return state.weeklyReviewConfig;
+  }
+
+  function getLocalYmd(d = new Date()) {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  function persistChangeLogs() {
+    if (!activeUserEmail) return;
+    try { localStorage.setItem(getUserKeys(activeUserEmail).changeLogs, JSON.stringify((state.changeLogs || []).slice(0, 400))); } catch (_) {}
+  }
+
+  function logChange({ category = 'general', projectName = '', message = '' }) {
+    if (!activeUserEmail || !message) return;
+    const now = new Date();
+    const entry = {
+      id: `log-${genId()}`,
+      date: getLocalYmd(now),
+      time: `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`,
+      ts: now.getTime(),
+      category: String(category || 'general'),
+      projectName: String(projectName || '').trim(),
+      message: String(message || '').trim()
+    };
+    if (!Array.isArray(state.changeLogs)) state.changeLogs = [];
+    state.changeLogs.unshift(entry);
+    if (state.changeLogs.length > 400) state.changeLogs.length = 400;
+    persistChangeLogs();
+  }
+
+  function getChangeLogsGroupedByDate(filterCat = 'all', query = '') {
+    const q = String(query || '').trim().toLowerCase();
+    const groups = new Map();
+    (state.changeLogs || []).forEach((log) => {
+      if (filterCat !== 'all' && log.category !== filterCat) return;
+      if (q && !`${log.projectName || ''} ${log.message || ''} ${log.date || ''}`.toLowerCase().includes(q)) return;
+      const d = log.date || '기타';
+      if (!groups.has(d)) groups.set(d, []);
+      groups.get(d).push(log);
+    });
+    return Array.from(groups.entries()).sort((a, b) => b[0].localeCompare(a[0]));
+  }
+
+  // ---- Project Hierarchy (Level 1 = Top, Drag & Drop Nesting / Unnesting) ----
+  function getProjectLevel(projectId) {
+    let level = 1;
+    let cur = findParaEntity(projectId);
+    const seen = new Set();
+    while (cur && cur.parentProjectId && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      const p = findParaEntity(cur.parentProjectId);
+      if (!p) break;
+      level++;
+      cur = p;
+      if (level > 10) break;
+    }
+    return level;
+  }
+
+  function isProjectAncestor(possibleAncestorId, targetId) {
+    let cur = findParaEntity(targetId);
+    const seen = new Set();
+    while (cur && cur.parentProjectId && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      if (cur.parentProjectId === possibleAncestorId) return true;
+      cur = findParaEntity(cur.parentProjectId);
+    }
+    return false;
+  }
+
+  function setProjectParent(childId, parentId = '') {
+    const child = findParaEntity(childId);
+    if (!child || child.paraType !== 'project') return false;
+    if (parentId && (parentId === childId || isProjectAncestor(childId, parentId))) return false;
+    child.parentProjectId = parentId ? String(parentId) : '';
+    child.updatedAt = Date.now();
+    persistParaEntities();
+    const parent = parentId ? findParaEntity(parentId) : null;
+    logChange({
+      category: 'project',
+      projectName: child.name,
+      message: parent
+        ? `프로젝트 계층 변경: "${child.name}" → "${parent.name}" 하위 (Lv.${getProjectLevel(child.id)})`
+        : `프로젝트 계층 해제: "${child.name}" 최상위 (Lv.1)`
+    });
+    return true;
+  }
+
+  // ---- GTD Next Actions & Current Running Tasks & Overdue->Waiting Auto-Sync ----
+  function isTaskCurrentlyRunning(doc, todayYmd = getLocalYmd()) {
+    if (!doc || doc.completed) return false;
+    if (getCardRole(doc) !== 'T') return false;
+    const s = String(doc.startDate || '').trim();
+    const e = String(doc.endDate || '').trim();
+    if (!s && !e) return false;
+    if (s && e) return todayYmd >= s && todayYmd <= e;
+    if (s) return todayYmd >= s;
+    return todayYmd <= e;
+  }
+
+  function addNextActionToDoc(doc, { text = '', context = '@PC', time = '@30분', energy = '@중간' }) {
+    if (!doc || !String(text || '').trim()) return null;
+    if (!Array.isArray(doc.nextActions)) doc.nextActions = [];
+    const na = {
+      id: `na-${genId()}`,
+      text: String(text).trim(),
+      context: String(context || '@PC').trim(),
+      time: String(time || '@30분').trim(),
+      energy: String(energy || '@중간').trim(),
+      done: false,
+      createdAt: Date.now()
+    };
+    doc.nextActions.push(na);
+    touchNode(doc);
+    persistFS();
+    const rels = getRelationsForNode(doc.id);
+    const proj = (rels.projects || []).find((x) => x.node?.type === 'para-entity')?.node;
+    logChange({
+      category: 'task',
+      projectName: proj?.name || '',
+      message: `다음 행동 추가 ("${doc.name.replace(/\.md$/i, '')}"): ${na.text} [${na.context} ${na.time} ${na.energy}]`
+    });
+    return na;
+  }
+
+  function toggleNextActionOnDoc(doc, naId) {
+    if (!doc || !Array.isArray(doc.nextActions)) return false;
+    const item = doc.nextActions.find((x) => x.id === naId);
+    if (!item) return false;
+    item.done = !item.done;
+    touchNode(doc);
+    persistFS();
+    return true;
+  }
+
+  function deleteNextActionOnDoc(doc, naId) {
+    if (!doc || !Array.isArray(doc.nextActions)) return false;
+    const before = doc.nextActions.length;
+    doc.nextActions = doc.nextActions.filter((x) => x.id !== naId);
+    if (doc.nextActions.length !== before) {
+      touchNode(doc);
+      persistFS();
+      return true;
+    }
+    return false;
+  }
+
+  function syncOverdueTasksToWaiting(todayYmd = getLocalYmd()) {
+    let movedCount = 0;
+    collectAllNodes(state.fileSystem).forEach((doc) => {
+      if (!doc || doc.type !== 'doc' || doc.completed) return;
+      if (getCardRole(doc) !== 'T') return;
+      if (doc.endDate && doc.endDate < todayYmd) {
+        if (doc.gtdStatus !== 'waiting' || !doc.missedToWaiting) {
+          doc.gtdStatus = 'waiting';
+          doc.missedToWaiting = true;
+          movedCount++;
+        }
+      } else if (doc.missedToWaiting && (!doc.endDate || doc.endDate >= todayYmd)) {
+        doc.missedToWaiting = false;
+        if (doc.gtdStatus === 'waiting' && !doc.delegatedTo) doc.gtdStatus = 'active';
+      }
+    });
+    if (movedCount > 0) persistFS({ silent: true });
+    return movedCount;
+  }
+
+  function getProjectOverdueMissedTasks(projectId, visibilityFilter = null, todayYmd = getLocalYmd()) {
+    return getProjectLinkedDocs(projectId, visibilityFilter).filter((d) =>
+      !d.completed && getCardRole(d) === 'T' && ((d.endDate && d.endDate < todayYmd) || d.missedToWaiting)
+    );
+  }
+
+  function getProjectNextActionEntries(projectId, visibilityFilter = null) {
+    const docs = projectId
+      ? getProjectLinkedDocs(projectId, visibilityFilter)
+      : collectAllNodes(state.fileSystem).filter((n) => n && n.type === 'doc' && (!visibilityFilter || visibilityFilter(n)));
+    const entries = [];
+    const todayYmd = getLocalYmd();
+    docs.forEach((doc) => {
+      if (doc.completed) return;
+      const rels = getRelationsForNode(doc.id);
+      const proj = projectId
+        ? findParaEntity(projectId)
+        : ((rels.projects || []).find((x) => x.node?.type === 'para-entity')?.node || null);
+      const running = isTaskCurrentlyRunning(doc, todayYmd);
+      // 1. Explicit sub nextActions on this doc
+      if (Array.isArray(doc.nextActions)) {
+        doc.nextActions.forEach((na) => {
+          if (na.done) return;
+          entries.push({
+            kind: 'sub-action',
+            id: na.id,
+            text: na.text,
+            context: na.context || '@PC',
+            time: na.time || '@30분',
+            energy: na.energy || '@중간',
+            doc,
+            project: proj,
+            isRunningTask: running
+          });
+        });
+      }
+      // 2. Standalone next action card (gtdStatus === 'next')
+      if (doc.gtdStatus === 'next' && getCardRole(doc) === 'T') {
+        entries.push({
+          kind: 'card-action',
+          id: `card-${doc.id}`,
+          text: String(doc.name || '').replace(/\.md$/i, ''),
+          context: doc.gtdContext || '@PC',
+          time: doc.gtdTime || '@30분',
+          energy: doc.gtdEnergy || '@중간',
+          doc,
+          project: proj,
+          isRunningTask: running
+        });
+      }
+    });
+    return entries;
+  }
+
+  // ---- Local Folder Relation File Export & Import (Skipping Missing Files Silently!) ----
+  function getNodeRelativePathString(nodeId) {
+    const pathNodes = getPathToNode(nodeId) || [];
+    if (pathNodes.length <= 1) return '';
+    return pathNodes.slice(1).map((n) => n.name).join('/');
+  }
+
+  function buildRelationsExportPayload() {
+    const docMetaById = {};
+    collectAllNodes(state.fileSystem).forEach((n) => {
+      if (!n || n.id === 'root') return;
+      docMetaById[n.id] = {
+        id: n.id,
+        name: n.name,
+        type: n.type,
+        relPath: getNodeRelativePathString(n.id),
+        cardRole: n.type === 'doc' ? getCardRole(n) : undefined,
+        resultSubtype: n.resultSubtype || undefined,
+        isTodayCore: Boolean(n.isTodayCore) || undefined,
+        customTags: Array.isArray(n.customTags) ? n.customTags : undefined,
+        startDate: n.startDate || undefined,
+        endDate: n.endDate || undefined,
+        gtdStatus: n.gtdStatus || undefined,
+        gtdContext: n.gtdContext || undefined,
+        gtdTime: n.gtdTime || undefined,
+        gtdEnergy: n.gtdEnergy || undefined,
+        nextActions: Array.isArray(n.nextActions) && n.nextActions.length ? n.nextActions : undefined,
+        extractStage: n.extractStage || undefined,
+        reuseCount: n.reuseCount || undefined
+      };
+    });
+
+    const exportedRelations = (state.relations || []).map((r) => {
+      const s = resolveAnyNode(r.sourceId);
+      const t = resolveAnyNode(r.targetId);
+      return {
+        id: r.id,
+        type: r.type,
+        label: r.label || '',
+        sourceKind: s?.type === 'para-entity' ? 'para' : 'node',
+        sourceId: r.sourceId,
+        sourcePath: s?.type === 'para-entity' ? s.id : getNodeRelativePathString(r.sourceId),
+        sourceName: s?.name || '',
+        targetKind: t?.type === 'para-entity' ? 'para' : 'node',
+        targetId: r.targetId,
+        targetPath: t?.type === 'para-entity' ? t.id : getNodeRelativePathString(r.targetId),
+        targetName: t?.name || ''
+      };
+    });
+
+    return {
+      format: 'secondbrain-relations-v1',
+      exportedAt: new Date().toISOString(),
+      paraEntities: state.paraEntities || [],
+      lifeGoals: state.lifeGoals || [],
+      fileMeta: Object.values(docMetaById),
+      relations: exportedRelations
+    };
+  }
+
+  function importRelationsExportPayload(payload) {
+    if (!payload || !Array.isArray(payload.relations)) {
+      throw new Error('올바른 관계 파일(.json) 형식이 아닙니다.');
+    }
+
+    // Build lookup index of existing files in current workspace/local folder
+    const allNodes = collectAllNodes(state.fileSystem);
+    const byId = new Map();
+    const byPath = new Map();
+    const byName = new Map();
+    allNodes.forEach((n) => {
+      byId.set(n.id, n);
+      const rp = getNodeRelativePathString(n.id).toLowerCase();
+      if (rp) byPath.set(rp, n);
+      const nm = String(n.name || '').toLowerCase();
+      if (nm && !byName.has(nm)) byName.set(nm, n);
+    });
+
+    // 1. Merge PARA entities
+    let paraAdded = 0;
+    const paraIdRemap = new Map();
+    (payload.paraEntities || []).forEach((ent) => {
+      if (!ent || !ent.name) return;
+      const existing = findParaEntity(ent.id) || (state.paraEntities || []).find(
+        (e) => e.paraType === ent.paraType && String(e.name).toLowerCase() === String(ent.name).toLowerCase()
+      );
+      if (existing) {
+        paraIdRemap.set(ent.id, existing.id);
+      } else {
+        const clone = normalizeParaEntityFields(JSON.parse(JSON.stringify(ent)));
+        state.paraEntities.push(clone);
+        paraIdRemap.set(ent.id, clone.id);
+        paraAdded++;
+      }
+    });
+    if (paraAdded > 0) {
+      ensureParaNumbers();
+      persistParaEntities();
+    }
+
+    // 2. Restore file metadata only for files that actually exist in current folder (ignore missing!)
+    let metaApplied = 0;
+    let missingFiles = 0;
+    (payload.fileMeta || []).forEach((fm) => {
+      const node = byId.get(fm.id)
+        || (fm.relPath ? byPath.get(String(fm.relPath).toLowerCase()) : null)
+        || (fm.name ? byName.get(String(fm.name).toLowerCase()) : null);
+      if (!node) {
+        missingFiles++;
+        return; // 지정 폴더에 파일이 없으면 무시하고 넘어감
+      }
+      if (fm.cardRole) node.cardRole = fm.cardRole;
+      if (fm.resultSubtype) node.resultSubtype = fm.resultSubtype;
+      if (fm.isTodayCore !== undefined) node.isTodayCore = Boolean(fm.isTodayCore);
+      if (Array.isArray(fm.customTags)) node.customTags = fm.customTags;
+      if (fm.startDate) node.startDate = fm.startDate;
+      if (fm.endDate) node.endDate = fm.endDate;
+      if (fm.gtdStatus) node.gtdStatus = fm.gtdStatus;
+      if (fm.gtdContext) node.gtdContext = fm.gtdContext;
+      if (fm.gtdTime) node.gtdTime = fm.gtdTime;
+      if (fm.gtdEnergy) node.gtdEnergy = fm.gtdEnergy;
+      if (Array.isArray(fm.nextActions)) node.nextActions = fm.nextActions;
+      if (fm.extractStage) node.extractStage = fm.extractStage;
+      if (fm.reuseCount) node.reuseCount = fm.reuseCount;
+      metaApplied++;
+    });
+
+    // 3. Restore relations only when BOTH endpoints exist (skip missing files silently!)
+    let relRestored = 0;
+    let relSkippedMissing = 0;
+    const resolveEndpoint = (kind, id, relPath, name) => {
+      if (kind === 'para') {
+        const mapped = paraIdRemap.get(id) || id;
+        return findParaEntity(mapped)?.id || null;
+      }
+      const node = byId.get(id)
+        || (relPath ? byPath.get(String(relPath).toLowerCase()) : null)
+        || (name ? byName.get(String(name).toLowerCase()) : null);
+      return node ? node.id : null;
+    };
+
+    (payload.relations || []).forEach((r) => {
+      const sId = resolveEndpoint(r.sourceKind, r.sourceId, r.sourcePath, r.sourceName);
+      const tId = resolveEndpoint(r.targetKind, r.targetId, r.targetPath, r.targetName);
+      if (!sId || !tId) {
+        relSkippedMissing++;
+        return; // 파일이 없으면 조용히 무시하고 넘어감
+      }
+      if (addRelation({ sourceId: sId, targetId: tId, type: r.type, label: r.label || '' })) {
+        relRestored++;
+      }
+    });
+
+    if (metaApplied > 0) persistFS();
+    logChange({
+      category: 'relation',
+      message: `관계 파일 불러오기: 관계 ${relRestored}건 복원 (미존재 파일 ${relSkippedMissing}건 무시)`
+    });
+    return { paraAdded, metaApplied, relRestored, relSkippedMissing, missingFiles };
   }
 
   function setCardTodayCore(doc, flag, timeStr) {
@@ -1321,20 +1986,91 @@
     return Array.from(map.values()).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   }
 
+  function getAllDescendantCards(parentCardId, visibilityFilter = null) {
+    if (!parentCardId) return [];
+    const visited = new Set([parentCardId]);
+    const result = [];
+    const queue = [parentCardId];
+    while (queue.length > 0) {
+      const curId = queue.shift();
+      const children = getSubCards(curId, visibilityFilter);
+      for (const ch of children) {
+        if (!ch || visited.has(ch.id)) continue;
+        visited.add(ch.id);
+        result.push(ch);
+        queue.push(ch.id);
+      }
+    }
+    return result;
+  }
+
+  function syncCardParaRelations(docId, { projectIds, areaIds, resourceIds } = {}) {
+    const doc = findNodeAndParent(docId)?.node;
+    if (!doc) return { added: 0, removed: 0, propagatedSubCount: 0 };
+    const descendants = getAllDescendantCards(doc.id);
+    let added = 0;
+    let removed = 0;
+
+    const syncOneType = (paraType, desiredIds) => {
+      if (!Array.isArray(desiredIds)) return;
+      const desiredSet = new Set(desiredIds.filter(Boolean));
+      const existingRels = (state.relations || []).filter((r) => {
+        if (r.type !== paraType) return false;
+        if (r.sourceId !== doc.id && r.targetId !== doc.id) return false;
+        const otherId = r.sourceId === doc.id ? r.targetId : r.sourceId;
+        return Boolean(findParaEntity(otherId));
+      });
+      const existingEntityIds = new Set();
+      existingRels.forEach((r) => {
+        const otherId = r.sourceId === doc.id ? r.targetId : r.sourceId;
+        existingEntityIds.add(otherId);
+        if (!desiredSet.has(otherId)) {
+          removeRelation(r.id);
+          removed += 1;
+        }
+      });
+      desiredSet.forEach((eid) => {
+        if (!existingEntityIds.has(eid) && findParaEntity(eid)) {
+          addRelation({ sourceId: doc.id, targetId: eid, type: paraType });
+          added += 1;
+        } else if (existingEntityIds.has(eid) && (paraType === 'project' || paraType === 'area')) {
+          // Ensure existing descendants also inherit currently connected projects/areas
+          descendants.forEach((desc) => {
+            addRelation({ sourceId: desc.id, targetId: eid, type: paraType, skipPropagate: true });
+          });
+        }
+      });
+    };
+
+    syncOneType('project', projectIds);
+    syncOneType('area', areaIds);
+    syncOneType('resource', resourceIds);
+    touchNode(doc);
+    persistFS();
+    return { added, removed, propagatedSubCount: descendants.length };
+  }
+
   function linkSubCard(parentDoc, childDoc, { inheritPara = true } = {}) {
     if (!parentDoc || !childDoc || parentDoc.id === childDoc.id) return false;
     childDoc.parentCardId = parentDoc.id;
     addRelation({ sourceId: parentDoc.id, targetId: childDoc.id, type: 'parent', label: childDoc.cardRole === 'R' ? '산출물' : '하위 카드' });
     if (inheritPara) {
       const parentRels = getRelationsForNode(parentDoc.id);
+      const targets = [childDoc, ...getAllDescendantCards(childDoc.id)];
       (parentRels.projects || []).forEach(({ node }) => {
-        if (node?.type === 'para-entity') addRelation({ sourceId: childDoc.id, targetId: node.id, type: 'project' });
+        if (node?.type === 'para-entity') {
+          targets.forEach((d) => addRelation({ sourceId: d.id, targetId: node.id, type: 'project', skipPropagate: true }));
+        }
       });
       (parentRels.areas || []).forEach(({ node }) => {
-        if (node?.type === 'para-entity') addRelation({ sourceId: childDoc.id, targetId: node.id, type: 'area' });
+        if (node?.type === 'para-entity') {
+          targets.forEach((d) => addRelation({ sourceId: d.id, targetId: node.id, type: 'area', skipPropagate: true }));
+        }
       });
       (parentRels.resources || []).forEach(({ node }) => {
-        if (node?.type === 'para-entity') addRelation({ sourceId: childDoc.id, targetId: node.id, type: 'resource' });
+        if (node?.type === 'para-entity') {
+          targets.forEach((d) => addRelation({ sourceId: d.id, targetId: node.id, type: 'resource', skipPropagate: true }));
+        }
       });
     }
     touchNode(childDoc);
@@ -1445,10 +2181,37 @@
     renderRisksToMarkdown,
     getCardRole,
     setCardRole,
+    setCardResultSubtype,
+    incrementCardReuse,
+    getRecommendedDeliverables,
+    createDefaultRequirementTemplate,
+    persistLifeGoals,
+    saveLifeGoals,
+    getLifeGoalById,
+    persistGtdTagOptions,
+    addCustomGtdTag,
+    persistWeeklyReviewConfig,
+    updateWeeklyReviewConfig,
+    getLocalYmd,
+    logChange,
+    getChangeLogsGroupedByDate,
+    getProjectLevel,
+    setProjectParent,
+    isTaskCurrentlyRunning,
+    addNextActionToDoc,
+    toggleNextActionOnDoc,
+    deleteNextActionOnDoc,
+    syncOverdueTasksToWaiting,
+    getProjectOverdueMissedTasks,
+    getProjectNextActionEntries,
+    buildRelationsExportPayload,
+    importRelationsExportPayload,
     setCardTodayCore,
     getCardTags,
     setCardTags,
     getSubCards,
+    getAllDescendantCards,
+    syncCardParaRelations,
     linkSubCard,
     updateCardSchedule,
     getProjectLinkedDocs,
